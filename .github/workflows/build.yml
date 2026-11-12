@@ -1,0 +1,866 @@
+name: Build OMPlayer
+
+on:
+  push:
+    branches: [main, master, omtv-parity, release/1.0]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ==================== Android APK ====================
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    # SourceForge 持续不可用时改用 GitHub release 作为 MDK SDK 镜像；
+    # fvp 通过 FVP_DEPS_URL 覆盖默认 nightly 下载地址
+    env:
+      FVP_DEPS_URL: https://github.com/wang-bin/mdk-sdk/releases/download/v0.36.0
+      OMPLAYER_KEYSTORE: /home/runner/.android/omplayer.keystore
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Android project files
+        run: flutter create . --platforms=android --project-name omplayer
+
+      - name: Apply app icon (视频取景框)
+        run: |
+          cp branding/android/mipmap-mdpi/ic_launcher.png    android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          cp branding/android/mipmap-hdpi/ic_launcher.png    android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          cp branding/android/mipmap-xhdpi/ic_launcher.png   android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          cp branding/android/mipmap-xxhdpi/ic_launcher.png  android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          cp branding/android/mipmap-xxxhdpi/ic_launcher.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+
+      - name: Patch Android config (cleartext HTTP / cutout fullscreen / PiP / notification)
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          # IPTV 源多为 http:// 明文地址，必须允许明文流量
+          sed -i 's|<application|<application android:usesCleartextTraffic="true"|' $MANIFEST
+          # 单实例：从图标再次启动时回到已有任务而不是新开进程
+          sed -i 's|<activity |<activity android:launchMode="singleTask" |' $MANIFEST
+          # 桌面图标/应用列表显示名：欧米直播（flutter create 默认用工程名 omplayer）
+          sed -i 's|android:label="omplayer"|android:label="欧米直播"|' $MANIFEST
+          grep -q 'android:label="欧米直播"' $MANIFEST \
+            || echo "::warning::Android app label patch failed, launcher name may stay omplayer"
+          # 显式声明网络权限（video_player 会合并，但显式更稳）
+          grep -q "android.permission.INTERNET" $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' $MANIFEST
+          # 画中画：给 MainActivity 声明 supportsPictureInPicture
+          # （默认 manifest 的 <activity 后面直接换行，不能用 '<activity ' 匹配；
+          #  configChanges 系统已自带，重复添加会导致 aapt 报属性冲突）
+          grep -q "supportsPictureInPicture" $MANIFEST \
+            || sed -i 's#android:name=".MainActivity"#android:name=".MainActivity"\n            android:supportsPictureInPicture="true"#' $MANIFEST
+          grep -q "supportsPictureInPicture" $MANIFEST \
+            || echo "::warning::PictureInPicture manifest patch failed"
+          # 画中画 + 前台服务 + 通知权限
+          grep -q "FOREGROUND_SERVICE_MEDIA_PLAYBACK" $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application|' $MANIFEST
+          # TV 盒子可装可用：不强制触摸屏；声明 leanback 非必需
+          grep -q "android.software.leanback" $MANIFEST || sed -i 's|<application|<uses-feature android:name="android.hardware.touchscreen" android:required="false" />\n    <uses-feature android:name="android.software.leanback" android:required="false" />\n    <uses-feature android:name="android.hardware.type.television" android:required="false" />\n    <application|' $MANIFEST
+          # 挖孔/刘海屏全屏不留黑边
+          mkdir -p android/app/src/main/res/values-v28
+          cat > android/app/src/main/res/values-v28/styles.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+                  <item name="android:windowBackground">@drawable/launch_background</item>
+                  <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+              </style>
+              <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+                  <item name="android:windowBackground">?android:colorBackground</item>
+                  <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+              </style>
+          </resources>
+          XML
+
+          # 画中画原生桥：直接覆盖 flutter create 生成的 MainActivity.kt。
+          # 该文件默认只有包名 + 一行 class，整体重写最稳（正则 patch
+          # Kotlin 源码在 CI 上不可靠）。包名从原文件读取，保持与工程一致。
+          ACTIVITY=$(find android/app/src/main -name "MainActivity.kt" | head -n1)
+          if [ -n "$ACTIVITY" ]; then
+            PKG=$(grep -m1 '^package ' "$ACTIVITY" | sed 's/package //' | tr -d '\r')
+            cat > "$ACTIVITY" <<KOTLIN
+          package $PKG
+
+          import android.app.PictureInPictureParams
+          import android.content.pm.PackageManager
+          import android.content.res.Configuration
+          import android.os.Build
+          import android.util.Rational
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private val channelName = "omplayer/pip"
+              // 切后台自动画中画：Dart 侧播放状态变化时同步（见 setAutoPip）
+              private var autoPipArmed = false
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+                      .setMethodCallHandler { call, result ->
+                          when (call.method) {
+                              "enter" -> result.success(enterPip())
+                              "exit" -> result.success(true)
+                              "isTv" -> result.success(isTv())
+                              "notifGranted" -> result.success(true)
+                              "openNotifSettings" -> result.success(false)
+                              "background" -> result.success(false)
+                              "setAutoPip" -> {
+                                  autoPipArmed = call.argument<Boolean>("armed") == true
+                                  setAutoEnterEnabled(autoPipArmed)
+                                  result.success(true)
+                              }
+                              "audioUpdate", "audioStop" -> result.success(true)
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+
+              private fun enterPip(): Boolean {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+                  if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return false
+                  return try {
+                      val params = PictureInPictureParams.Builder()
+                          .setAspectRatio(Rational(16, 9))
+                          .build()
+                      enterPictureInPictureMode(params)
+                  } catch (e: Exception) {
+                      false
+                  }
+              }
+
+              // Android 12+：armed 时按 Home/切任务由系统自动进入画中画
+              private fun setAutoEnterEnabled(armed: Boolean) {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      try {
+                          val params = PictureInPictureParams.Builder()
+                              .setAspectRatio(Rational(16, 9))
+                              .setAutoEnterEnabled(armed)
+                              .build()
+                          setPictureInPictureParams(params)
+                      } catch (e: Exception) {}
+                  }
+              }
+
+              // Android 8–11：没有 autoEnter，切后台时在 onUserLeaveHint 手动进
+              override fun onUserLeaveHint() {
+                  if (autoPipArmed &&
+                      Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                      Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                      try { enterPictureInPictureMode() } catch (e: Exception) {}
+                  }
+                  super.onUserLeaveHint()
+              }
+
+              private fun isTv(): Boolean =
+                  packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+                      packageManager.hasSystemFeature(PackageManager.FEATURE_TELEVISION)
+
+              override fun onPictureInPictureModeChanged(
+                  isInPictureInPictureMode: Boolean,
+                  newConfig: Configuration
+              ) {
+                  super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+                  flutterEngine?.dartExecutor?.binaryMessenger?.let {
+                      MethodChannel(it, channelName).invokeMethod("pip", isInPictureInPictureMode)
+                  }
+              }
+          }
+          KOTLIN
+            echo "MainActivity patched: $ACTIVITY (package=$PKG)"
+          else
+            echo "::warning::MainActivity.kt not found, PiP entry will be unavailable"
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # flutter_inappwebview_android 1.1.x 自身 build.gradle 仍引用已被新版
+      # AGP 拒绝的 proguard-android.txt，pub get 后就地替换
+      - name: Patch flutter_inappwebview proguard file
+        run: |
+          find "$HOME/.pub-cache" -path "*flutter_inappwebview_android-*/android/build.gradle" -print0 \
+            | xargs -0 -r sed -i "s/proguard-android\.txt/proguard-android-optimize.txt/g"
+
+      - name: Cache Android keystore
+        id: ks-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.android/omplayer.keystore
+          key: omplayer-keystore-v4-${{ runner.os }}
+
+      - name: Ensure stable keystore (validate secret; regenerate when corrupt)
+        run: |
+          set -e
+          KS="$HOME/.android/omplayer.keystore"
+          mkdir -p "$HOME/.android"
+          validate_ks() {
+            keytool -list -keystore "$KS" -storepass android \
+              -alias androiddebugkey >/dev/null 2>&1
+          }
+          SECRET_B64="${{ secrets.DEBUG_KEYSTORE_BASE64 }}"
+          if [ -n "$SECRET_B64" ]; then
+            printf '%s' "$SECRET_B64" | base64 -d > "$KS" || true
+            if validate_ks; then
+              echo "Using keystore from repository secret (stable signature)"
+            else
+              echo "::warning::Secret DEBUG_KEYSTORE_BASE64 已损坏（无法用 android/androiddebugkey 打开），将重新生成；请用本次日志末尾的新值更新 Secret"
+              SECRET_B64=""
+            fi
+          fi
+          if [ -z "$SECRET_B64" ]; then
+            if [ "${{ steps.ks-cache.outputs.cache-hit }}" = "true" ] && validate_ks; then
+              echo "Using cached keystore"
+            else
+              echo "Generating new stable keystore (签名与手机上现有版本不同，仍需卸载一次)"
+              rm -f "$KS"
+              keytool -genkey -v \
+                -keystore "$KS" \
+                -storepass android -alias androiddebugkey -keypass android \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=OMPlayer,O=OMPlayer,C=CN"
+              # 输出新 base64：请更新 GitHub Secret，之后所有版本签名固定
+              echo "=== DEBUG_KEYSTORE_BASE64 (用此整行更新 GitHub Secret) ==="
+              base64 -w 0 "$KS"
+              echo ""
+              echo "=== END ==="
+            fi
+          fi
+          echo "Keystore 证书指纹（构建后 APK 必须与此一致）:"
+          keytool -list -v -keystore "$KS" -storepass android \
+            -alias androiddebugkey 2>/dev/null | grep -E 'SHA256:' | head -1
+
+      # android/ 目录由 flutter create 现场生成，无法在仓库里写死
+      # signingConfig。通过 Gradle init 脚本强制 release 变体使用上面
+      # 经验证的 keystore：文件损坏/口令不符时构建直接失败，
+      # 杜绝 AGP 静默生成随机 CN=Android Debug 证书导致签名漂移。
+      - name: Install Gradle init script (explicit release signing)
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/omplayer-signing.gradle" <<'GRADLE'
+          allprojects {
+              afterEvaluate { p ->
+                  if (p.plugins.hasPlugin('com.android.application')) {
+                      def ksPath = System.getenv('OMPLAYER_KEYSTORE')
+                      if (ksPath == null) {
+                          throw new GradleException('OMPLAYER_KEYSTORE env is not set')
+                      }
+                      def ksFile = new File(ksPath)
+                      if (!ksFile.isFile()) {
+                          throw new GradleException("keystore not found: ${ksPath}")
+                      }
+                      def android = p.extensions.getByName('android')
+                      def scs = android.signingConfigs
+                      def sc = scs.findByName('omplayerStable') ?: scs.create('omplayerStable')
+                      sc.storeFile = ksFile
+                      sc.storePassword = 'android'
+                      sc.keyAlias = 'androiddebugkey'
+                      sc.keyPassword = 'android'
+                      android.buildTypes.getByName('release').signingConfig = sc
+                  }
+              }
+          }
+          GRADLE
+
+      - name: Build APK
+        run: flutter build apk --release --split-per-abi
+
+      - name: Rename APKs for release
+        run: |
+          cd build/app/outputs/flutter-apk
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            if [ -f "app-$abi-release.apk" ]; then
+              mv "app-$abi-release.apk" "OMPlayer-android-$abi.apk"
+            fi
+          done
+
+      # 构建后核对：APK 实际证书必须与构建前 keystore 指纹一致，
+      # 一旦再次出现 CN=Android Debug 随机证书可立即发现
+      - name: Verify APK signing certificate
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null \
+            | sort -V | tail -1)
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs \
+              build/app/outputs/flutter-apk/OMPlayer-android-arm64-v8a.apk \
+              | grep -E 'signer|Certificate' | head -5
+          else
+            echo "apksigner not found, skipped"
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: build/app/outputs/flutter-apk/*.apk
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/app/outputs/flutter-apk/OMPlayer-android-*.apk
+
+  # ==================== Web ====================
+  build-web:
+    name: Build Web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Web project files
+        run: flutter create . --platforms=web --project-name omplayer
+
+      - name: Apply app icon (视频取景框)
+        run: |
+          cp branding/web/Icon-192.png web/icons/Icon-192.png
+          cp branding/web/Icon-512.png web/icons/Icon-512.png
+          cp branding/web/Icon-192.png web/icons/Icon-maskable-192.png
+          cp branding/web/Icon-512.png web/icons/Icon-maskable-512.png
+          cp branding/web/favicon.png web/favicon.png
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Web
+        run: flutter build web --release
+
+      - name: Zip Web build
+        run: |
+          cd build/web
+          zip -r ../../OMPlayer-web.zip .
+
+      - name: Upload Web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: build/web
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OMPlayer-web.zip
+
+  # ==================== Windows Desktop ====================
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    # SourceForge 持续不可用时改用 GitHub release 作为 MDK SDK 镜像；
+    # fvp 通过 FVP_DEPS_URL 覆盖默认 nightly 下载地址
+    env:
+      FVP_DEPS_URL: https://github.com/wang-bin/mdk-sdk/releases/download/v0.36.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Windows project files
+        run: flutter create . --platforms=windows --project-name omplayer
+
+      - name: Apply app icon (视频取景框)
+        shell: pwsh
+        run: Copy-Item branding/app_icon.ico windows/runner/resources/app_icon.ico -Force
+
+      # 仓库不提交 windows/ 目录（由 flutter create 现场生成），
+      # 因此把 runner 级补丁注入生成的模板文件：
+      # main.cpp:
+      # 1) 单实例：命名互斥体，重复启动时激活已有窗口后退出
+      # 2) NumLock 一次性恢复：Flutter 引擎初始化会把 NumLock 同步为
+      #    关闭；启动前记住物理状态，3 秒后在 UI 线程恢复一次即永久
+      #    解除定时器。绝不做持续守护——持续合成翻转会污染全局
+      #    NumLock，导致切换到其它程序后小键盘也是关的
+      # 3) WebView2 自动播放浏览器参数（无用户手势也可带声音起播）
+      # flutter_window.cpp:
+      # 4) WH_KEYBOARD_LL 低级键盘钩子 + MethodChannel：WebView2 获得
+      #    焦点后吞掉全部按键，Flutter 收不到数字键；钩子在本进程前台
+      #    时把 0-9/小键盘数字转发给 Dart 选台（设置面板打开时放行）
+      - name: Patch Windows runner (single instance + NumLock + WebView2 autoplay + digit hotkey hook)
+        shell: pwsh
+        run: |
+          $f = 'windows/runner/main.cpp'
+          $t = [System.IO.File]::ReadAllText($f)
+          $inject1 = @(
+            '// ===== OMPlayer injected: single instance + one-shot NumLock restore =====',
+            'static BOOL g_om_numlock_was_on = FALSE;',
+            'static const wchar_t* kOmSingleInstanceMutex = L"Local\\OMPlayer_SingleInstance";',
+            '// 一次性回调：触发后立刻 KillTimer，之后永不干预 NumLock，',
+            '// 避免后台轮询读到滞后状态而反复翻转、污染全局键盘状态',
+            'static VOID CALLBACK OMNumLockRestore(HWND hwnd, UINT, UINT_PTR id, DWORD) {',
+            '  ::KillTimer(hwnd, id);',
+            '  BOOL on = (::GetKeyState(VK_NUMLOCK) & 0x0001) != 0;',
+            '  if (g_om_numlock_was_on != on) {',
+            '    ::keybd_event(VK_NUMLOCK, 0x45, KEYEVENTF_EXTENDEDKEY, 0);',
+            '    ::keybd_event(VK_NUMLOCK, 0x45, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);',
+            '  }',
+            '}',
+            '// ===== OMPlayer injected: startup cursor-count repair =====',
+            '// 历史版本退出时未恢复 ShowCursor 计数，会把整个桌面的光标',
+            '// 显示计数留在负数（表现为鼠标指针/拖曳异常，只能重启恢复）。',
+            '// 启动时把计数拉回 >= 0（正常可见状态），无需用户重启系统。',
+            'static void OMRepairCursorCount() {',
+            '  while (::ShowCursor(TRUE) < 0) {}',
+            '}',
+            '// ===== OMPlayer injected: WebView2 cache cleanup on startup =====',
+            '// 启动时清空纯缓存目录（Cache/Code Cache/GPUCache/Service Worker），',
+            '// 文件夹臃肿会拖慢 WebView2 启动；保留 Cookies/Local Storage 登录态',
+            '#include <filesystem>',
+            'static void OMClearWebView2Cache() {',
+            '  try {',
+            '    wchar_t exePath[MAX_PATH];',
+            '    DWORD n = ::GetModuleFileNameW(nullptr, exePath, MAX_PATH);',
+            '    if (n == 0 || n >= MAX_PATH) return;',
+            '    std::filesystem::path def =',
+            '        std::filesystem::path(std::wstring(exePath, n) + L".WebView2");',
+            '    std::error_code ec;',
+            '    const wchar_t* dirs[] = {',
+            '        L"Cache", L"Code Cache", L"GPUCache", L"Service Worker"};',
+            '    for (const wchar_t* d : dirs) {',
+            '      std::filesystem::remove_all(def / d, ec);',
+            '    }',
+            '  } catch (...) {}',
+            '}',
+            '// ===== end injected code =====',
+            'int APIENTRY wWinMain('
+          ) -join "`r`n"
+          $inject2 = @(
+            '  // OMPlayer: 允许内嵌 WebView2 无用户手势自动播放（带声音）。',
+            '  // 必须在任何 WebView2 环境创建前设置，进程级生效；',
+            '  // disk-cache-size 256MB，加速二次加载',
+            '  ::SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",',
+            '      L"--autoplay-policy=no-user-gesture-required --disk-cache-size=268435456");',
+            '',
+            '  // OMPlayer: 在任何 WebView2 环境创建前清理磁盘缓存',
+            '  OMClearWebView2Cache();',
+            '',
+            '  // OMPlayer: 修复上次异常退出残留的光标隐藏计数（无需重启系统）',
+            '  OMRepairCursorCount();',
+            '',
+            '  ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);',
+            '',
+            '  // OMPlayer: allow only one running instance',
+            '  HANDLE om_mutex = ::CreateMutexW(nullptr, TRUE, kOmSingleInstanceMutex);',
+            '  (void)om_mutex; // hold for process lifetime; silences C4189 under /WX',
+            '  if (::GetLastError() == ERROR_ALREADY_EXISTS) {',
+            '    HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", L"omplayer");',
+            '    if (existing != nullptr) {',
+            '      ::ShowWindow(existing, SW_RESTORE);',
+            '      ::SetForegroundWindow(existing);',
+            '    }',
+            '    return 0;',
+            '  }',
+            '  // 引擎键盘同步之前记住物理 NumLock 状态（GetKeyState 会',
+            '  // 以当前全局状态初始化本线程键盘队列）',
+            '  g_om_numlock_was_on = (::GetKeyState(VK_NUMLOCK) & 0x0001) != 0;'
+          ) -join "`r`n"
+          $inject3 = @(
+            '  window.SetQuitOnClose(true);',
+            '',
+            '  // OMPlayer: 引擎初始化后 3 秒一次性恢复 NumLock 到启动前',
+            '  // 状态，回调内自行 KillTimer，之后不再干预用户按键',
+            '  ::SetTimer(nullptr, 0x4F4D, 3000, OMNumLockRestore);'
+          ) -join "`r`n"
+          $a1 = 'int APIENTRY wWinMain('
+          $a2 = '  ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);'
+          $a3 = '  window.SetQuitOnClose(true);'
+          if (-not $t.Contains($a1) -or -not $t.Contains($a2) -or -not $t.Contains($a3)) {
+            throw 'main.cpp anchor not found, Flutter template may have changed'
+          }
+          $t = $t.Replace($a1, $inject1)
+          $t = $t.Replace($a2, $inject2)
+          $t = $t.Replace($a3, $inject3)
+          [System.IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($false)))
+          Get-Content $f | Select-String 'OMPlayer' | ForEach-Object { $_.Line.Trim() }
+
+          # ===== flutter_window.cpp：数字键低级键盘钩子 + MethodChannel =====
+          $fw = 'windows/runner/flutter_window.cpp'
+          $wt = [System.IO.File]::ReadAllText($fw)
+          $wIncAnchor = '#include "flutter/generated_plugin_registrant.h"'
+          $wRegAnchor = 'RegisterPlugins(flutter_controller_->engine());'
+          if (-not $wt.Contains($wIncAnchor) -or -not $wt.Contains($wRegAnchor)) {
+            throw 'flutter_window.cpp anchor not found, Flutter template may have changed'
+          }
+          $wInc = @(
+            '#include "flutter/generated_plugin_registrant.h"',
+            '// ===== OMPlayer injected: low-level hotkeys + idle cursor hide =====',
+            '// WebView2 is a separate HWND: once it has keyboard focus Flutter',
+            '// never receives WM_KEYDOWN, so hotkeys die. WH_KEYBOARD_LL forwards',
+            '// digits and control keys to Dart while this process is foreground.',
+            '// WH_MOUSE_LL is NOT installed: polling the cursor position avoids',
+            '// interfering with system drag-and-drop / dragging.',
+            '// Channel uses raw UTF-8 bytes (Dart side: BasicMessageChannel<String>).',
+            '#include <windows.h>',
+            '#include <cstring>',
+            '#if __has_include(<flutter/flutter_messenger.h>)',
+            '#include <flutter/flutter_messenger.h>',
+            '#else',
+            '#include <flutter_messenger.h>',
+            '#endif',
+            '#if __has_include(<flutter/flutter_plugin_registrar.h>)',
+            '#include <flutter/flutter_plugin_registrar.h>',
+            '#else',
+            '#include <flutter_plugin_registrar.h>',
+            '#endif',
+            'namespace {',
+            'FlutterDesktopMessengerRef g_om_messenger = nullptr;',
+            '// TRUE = intercept hotkeys; Dart sets FALSE while settings panel open.',
+            'volatile BOOL g_om_capture = TRUE;',
+            '// TRUE = hide cursor after 3s idle; Dart enables while web foreground.',
+            'volatile BOOL g_om_cursor_hide = FALSE;',
+            '// TRUE = web page owns keyboard focus: hook must swallow+forward keys;',
+            '// FALSE = normal video UI: pass keys through so Flutter gets full',
+            '// down/up sequences for long-press detection.',
+            'volatile BOOL g_om_web_forward = FALSE;',
+            '// 低级键盘钩子句柄：退出时必须 Unhook，不能只靠进程结束清理',
+            'HHOOK g_om_kb_hook = nullptr;',
+            'DWORD g_om_last_mouse_tick = 0;',
+            'bool g_om_mouse_hidden = false;',
+            '// 光标移动检测改为 500ms 定时轮询 GetCursorPos。',
+            '// 原来的 WH_MOUSE_LL 全局鼠标钩子会干扰系统拖放/拖拽',
+            '// （程序退出后拖曳失效、必须重启才恢复），这里彻底移除。',
+            'bool g_om_have_last_pos = false;',
+            'POINT g_om_last_pos = {0, 0};',
+            'void OMExitCleanup();  // 定义在下方，退出请求需要提前引用',
+            'void OMShowCursorAgain() {',
+            '  if (g_om_mouse_hidden) {',
+            '    g_om_mouse_hidden = false;',
+            '    // 恢复光标显示计数到 >= 0',
+            '    while (::ShowCursor(TRUE) < 0) {}',
+            '  }',
+            '}',
+            'bool OMForegroundIsOurs() {',
+            '  DWORD pid = 0;',
+            '  ::GetWindowThreadProcessId(::GetForegroundWindow(), &pid);',
+            '  return pid == ::GetCurrentProcessId();',
+            '}',
+            '// Dart asks to hide the pointer immediately (remote/keyboard in use).',
+            '// Any WM_MOUSEMOVE brings it back via OMShowCursorAgain.',
+            'void OMHideCursorNow() {',
+            '  g_om_last_mouse_tick = ::GetTickCount();',
+            '  if (!g_om_mouse_hidden) {',
+            '    g_om_mouse_hidden = true;',
+            '    while (::ShowCursor(FALSE) >= 0) {}',
+            '  }',
+            '}',
+            '// Dart -> C++: "1"/"0" capture toggle, "C1"/"C0" cursor-hide toggle,',
+            '// "W1"/"W0" web-forward toggle, "H" hide cursor now',
+            'void OMMessengerCallback(FlutterDesktopMessengerRef messenger,',
+            '                         const FlutterDesktopMessage* message,',
+            '                         void* user_data) {',
+            '  if (message->message != nullptr && message->message_size >= 1) {',
+            '    const uint8_t* m = message->message;',
+            '    if (m[0] == 0x48) {  // "H": hide cursor immediately',
+            '      OMHideCursorNow();',
+            '    } else if (m[0] == 0x43) {  // "C1"/"C0": cursor-hide enable/disable',
+            '      g_om_cursor_hide =',
+            '          (message->message_size >= 2 && m[1] == 0x31) ? TRUE : FALSE;',
+            '      if (!g_om_cursor_hide) OMShowCursorAgain();',
+            '    } else if (m[0] == 0x57) {  // "W1"/"W0": web-forward enable/disable',
+            '      g_om_web_forward =',
+            '          (message->message_size >= 2 && m[1] == 0x31) ? TRUE : FALSE;',
+            '    } else if (m[0] == 0x51) {  // "Q": quit requested by Dart',
+            '      // Windows 10 1607 等老系统上，引擎/插件析构会在',
+            '      // flutter_windows.dll 内抛 0xc0000005，表现为退出时',
+            '      // "omplayer.exe 已停止工作"。这里先恢复光标/卸载钩子，',
+            '      // 再由 runner 直接结束进程，跳过会崩溃的析构链。',
+            '      OMExitCleanup();',
+            '      ::TerminateProcess(::GetCurrentProcess(), 0);',
+            '    } else {  // "1"/"0": hotkey capture enable/disable',
+            '      g_om_capture = (m[0] == 0x31) ? TRUE : FALSE;',
+            '    }',
+            '  }',
+            '  ::FlutterDesktopMessengerSendResponse(',
+            '      messenger, message->response_handle, nullptr, 0);',
+            '}',
+            'LRESULT CALLBACK OMLowLevelKeyboardProc(int n_code, WPARAM w_param,',
+            '                                         LPARAM l_param) {',
+            '  if (n_code == HC_ACTION &&',
+            '      (w_param == WM_KEYDOWN || w_param == WM_SYSKEYDOWN ||',
+            '       w_param == WM_KEYUP || w_param == WM_SYSKEYUP)) {',
+            '    const bool is_down =',
+            '        (w_param == WM_KEYDOWN || w_param == WM_SYSKEYDOWN);',
+            '    const KBDLLHOOKSTRUCT* kb =',
+            '        reinterpret_cast<const KBDLLHOOKSTRUCT*>(l_param);',
+            '    int digit = -1;',
+            '    const char* action = nullptr;',
+            '    // Browser Back is always swallowed: stop WebView history',
+            '    // navigation and let Dart do hierarchical back handling.',
+            '    bool force_swallow = false;',
+            '    if (kb->vkCode == VK_BROWSER_BACK) {',
+            '      action = "back";',
+            '      force_swallow = true;',
+            '    } else if (kb->vkCode >= 0x30 && kb->vkCode <= 0x39) {',
+            '      digit = static_cast<int>(kb->vkCode - 0x30);',
+            '    } else if (kb->vkCode >= VK_NUMPAD0 && kb->vkCode <= VK_NUMPAD9) {',
+            '      digit = static_cast<int>(kb->vkCode - VK_NUMPAD0);',
+            '    } else {',
+            '      switch (kb->vkCode) {',
+            '        case VK_SPACE: action = "space"; break;',
+            '        case VK_RETURN: action = "ok"; break;',
+            '        case VK_LEFT: action = "left"; break;',
+            '        case VK_RIGHT: action = "right"; break;',
+            '        case VK_UP: action = "up"; break;',
+            '        case VK_DOWN: action = "down"; break;',
+            '        case VK_ESCAPE: action = "esc"; break;',
+            '        case VK_APPS: action = "menu"; break;',
+            '        case 0x4D: action = "m"; break;',
+            '        case 0x46: action = "f"; break;',
+            '        case 0x52: action = "r"; break;',
+            '        case 0x43: action = "c"; break;',
+            '        case 0x45: action = "e"; break;',
+            '        case 0x53: action = "s"; break;',
+            '        default: break;',
+            '      }',
+            '    }',
+            '    const bool matched = digit >= 0 || action != nullptr;',
+            '    // Remote-capture mode (g_om_capture): swallow every matched key',
+            '    // and forward ONLY via the win_hotkeys channel. Previously the key',
+            '    // was also passed through to Flutter, so one physical press was',
+            '    // handled twice (hook message + native Flutter key event): arrow',
+            '    // keys moved two rows, OK fired twice (channel 2 -> ~10, EPG',
+            '    // reserved several later programs). Settings panel calls',
+            '    // setCapture(false), which clears g_om_capture, so text input',
+            '    // still receives keys normally.',
+            '    const bool swallow_mode =',
+            '        force_swallow || g_om_capture;',
+            '    if (matched && swallow_mode) {',
+            '      const bool has_modifier =',
+            '          (::GetKeyState(VK_SHIFT) & 0x8000) != 0 ||',
+            '          (::GetKeyState(VK_CONTROL) & 0x8000) != 0 ||',
+            '          (::GetKeyState(VK_MENU) & 0x8000) != 0;',
+            '      if (!has_modifier && g_om_messenger != nullptr &&',
+            '          OMForegroundIsOurs()) {',
+            '        if (digit >= 0) {',
+            '          // digits: forward on keydown only, no auto-repeat flood',
+            '          if (is_down) {',
+            '            const uint8_t msg = static_cast<uint8_t>(0x30 + digit);',
+            '            ::FlutterDesktopMessengerSend(g_om_messenger,',
+            '                "omplayer/win_hotkeys", &msg, 1);',
+            '          }',
+            '        } else {',
+            '          // "k:xxx" keydown, "u:xxx" keyup',
+            '          char buf[24];',
+            '          const int n = ::wsprintfA(buf, is_down ? "k:%s" : "u:%s",',
+            '                                    action);',
+            '          if (n > 0) {',
+            '            ::FlutterDesktopMessengerSend(g_om_messenger,',
+            '                "omplayer/win_hotkeys",',
+            '                reinterpret_cast<const uint8_t*>(buf),',
+            '                static_cast<size_t>(n));',
+            '          }',
+            '        }',
+            '        return 1;  // swallowed: not delivered to Flutter/WebView',
+            '      }',
+            '    }',
+            '  }',
+            '  return ::CallNextHookEx(nullptr, n_code, w_param, l_param);',
+            '}',
+            '// 轮询鼠标位置：鼠标一动就恢复光标；只有网页前台且空闲 3 秒',
+            '// 才隐藏。没有全局鼠标钩子，不影响系统的拖放/拖拽。',
+            'VOID CALLBACK OMCursorTimerProc(HWND, UINT, UINT_PTR, DWORD) {',
+            '  POINT p = {0, 0};',
+            '  ::GetCursorPos(&p);',
+            '  const bool moved = !g_om_have_last_pos ||',
+            '      p.x != g_om_last_pos.x || p.y != g_om_last_pos.y;',
+            '  if (moved) {',
+            '    g_om_last_pos = p;',
+            '    g_om_have_last_pos = true;',
+            '    g_om_last_mouse_tick = ::GetTickCount();',
+            '    OMShowCursorAgain();',
+            '  }',
+            '  // 普通视频界面不做空闲隐藏（Dart 只在网页前台开启）',
+            '  if (!g_om_cursor_hide) return;',
+            '  // 程序不在前台：立即恢复，避免指针在切走后仍被隐藏',
+            '  if (!OMForegroundIsOurs()) {',
+            '    OMShowCursorAgain();',
+            '    return;',
+            '  }',
+            '  if (!moved && g_om_last_mouse_tick != 0 &&',
+            '      ::GetTickCount() - g_om_last_mouse_tick >= 3000) {',
+            '    if (!g_om_mouse_hidden) {',
+            '      g_om_mouse_hidden = true;',
+            '      // ShowCursor(FALSE) 递减显示计数到 < 0 隐藏光标。',
+            '      // 基于计数，不会被 WM_SETCURSOR 覆盖（SetCursor 会被覆盖）。',
+            '      while (::ShowCursor(FALSE) >= 0) {}',
+            '    }',
+            '  }',
+            '}',
+            '// 退出清理：卸载键盘钩子、关闭定时器、恢复系统光标显示计数。',
+            '// 之前遗漏恢复，进程退出后整个桌面的光标/拖曳状态会一直异常，',
+            '// 只能重启系统才恢复。',
+            'void OMExitCleanup() {',
+            '  ::KillTimer(nullptr, 0x4F43);',
+            '  if (g_om_kb_hook != nullptr) {',
+            '    ::UnhookWindowsHookEx(g_om_kb_hook);',
+            '    g_om_kb_hook = nullptr;',
+            '  }',
+            '  OMShowCursorAgain();',
+            '}',
+            '}  // namespace',
+            '// ===== end injected code ====='
+          ) -join "`r`n"
+          $wReg = @(
+            'RegisterPlugins(flutter_controller_->engine());',
+            '  // OMPlayer: hotkey channel (Dart side: omplayer/win_hotkeys)',
+            '  // 3.44+: GetRegistrarForPlugin returns the C registrar ref; use the',
+            '  // C messenger API directly (C++ MethodChannel impl is not shipped).',
+            '  auto om_registrar =',
+            '      flutter_controller_->engine()->GetRegistrarForPlugin(',
+            '          "OMPlayerHotkeys");',
+            '  g_om_messenger = ::FlutterDesktopPluginRegistrarGetMessenger(',
+            '      om_registrar);',
+            '  ::FlutterDesktopMessengerSetCallback(g_om_messenger,',
+            '      "omplayer/win_hotkeys", &OMMessengerCallback, nullptr);',
+            '  g_om_kb_hook = ::SetWindowsHookExW(WH_KEYBOARD_LL,',
+            '      &OMLowLevelKeyboardProc, ::GetModuleHandleW(nullptr), 0);',
+            '  // 不再安装 WH_MOUSE_LL：全局鼠标钩子会拖累系统拖放，改为定时器轮询',
+            '  ::SetTimer(nullptr, 0x4F43, 500, OMCursorTimerProc);'
+          ) -join "`r`n"
+          $wt = $wt.Replace($wIncAnchor, $wInc).Replace($wRegAnchor, $wReg)
+          # 退出时务必恢复原生状态：卸载键盘钩子 + 恢复系统光标显示计数。
+          # 缺了这一步，进程退出后桌面会残留隐藏光标/拖曳异常，只能重启恢复。
+          if (-not $wt.Contains('  Win32Window::OnDestroy();')) {
+            throw 'flutter_window.cpp OnDestroy anchor not found'
+          }
+          $wt = $wt.Replace('  Win32Window::OnDestroy();',
+            "  OMExitCleanup();`r`n  Win32Window::OnDestroy();")
+          $dtorPat = 'FlutterWindow::~FlutterWindow\(\)\s*(=\s*default;|\{\s*\})'
+          if (-not [regex]::IsMatch($wt, $dtorPat)) {
+            throw 'flutter_window.cpp destructor anchor not found'
+          }
+          $wt = [regex]::Replace($wt, $dtorPat,
+            "FlutterWindow::~FlutterWindow() {`r`n  OMExitCleanup();`r`n}")
+          [System.IO.File]::WriteAllText($fw, $wt, (New-Object System.Text.UTF8Encoding($false)))
+          'flutter_window.cpp: injected digit hotkey WH_KEYBOARD_LL hook'
+
+          # flutter_inappwebview_windows 仍使用 /await + <experimental/coroutine>，
+          # VS2026 (MSVC 14.51) 已将其升为硬错误；在顶层 CMakeLists 的插件
+          # add_subdirectory 之前注入官方逃生宏（目录级定义传播给所有插件）。
+          # 不同 Flutter 模板锚点不同（旧: add_subdirectory(flutter)，
+          # 3.29+: add_subdirectory("${FLUTTER_MANAGED_DIR}" flutter)），逐一容错
+          $cm = 'windows/CMakeLists.txt'
+          $ct = [System.IO.File]::ReadAllText($cm)
+          $macro = 'add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)'
+          $anchors = @(
+            'add_subdirectory("${FLUTTER_MANAGED_DIR}" flutter)',
+            'add_subdirectory(flutter)'
+          )
+          $done = $false
+          foreach ($a in $anchors) {
+            if ($ct.Contains($a)) {
+              $ct = $ct.Replace($a, "$macro`r`n$a")
+              $done = $true
+              break
+            }
+          }
+          if (-not $done) {
+            # 兜底：project() 声明之后插入（对后续所有 target 生效）
+            $m = [regex]::Match($ct, '(project\s*\([^\)]*\))')
+            if (-not $m.Success) { throw 'windows CMakeLists: no usable anchor' }
+            $ct = $ct.Substring(0, $m.Groups[1].Index + $m.Groups[1].Length) + "`r`n$macro" + $ct.Substring($m.Groups[1].Index + $m.Groups[1].Length)
+          }
+          [System.IO.File]::WriteAllText($cm, $ct, (New-Object System.Text.UTF8Encoding($false)))
+          'CMake: injected experimental coroutine silence define'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Windows
+        run: flutter build windows --release
+
+      - name: Zip Windows build
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath OMPlayer-windows.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: OMPlayer-windows.zip
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OMPlayer-windows.zip
+
+  # ==================== Linux Desktop ====================
+  build-linux:
+    name: Build Linux
+    # 22.04：desktop_webview_window 的 Linux 端依赖 webkit2gtk-4.0，
+    # 该包在 24.04 中已被移除（仅剩 4.1）
+    runs-on: ubuntu-22.04
+    # SourceForge 持续不可用时改用 GitHub release 作为 MDK SDK 镜像；
+    # fvp 通过 FVP_DEPS_URL 覆盖默认 nightly 下载地址
+    env:
+      FVP_DEPS_URL: https://github.com/wang-bin/mdk-sdk/releases/download/v0.36.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtk-3-dev libasound2-dev pkg-config libwebkit2gtk-4.0-dev libsoup-3.0-dev
+
+      - name: Create Linux project files
+        run: flutter create . --platforms=linux --project-name omplayer
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Linux
+        run: flutter build linux --release
+
+      - name: Zip Linux build
+        run: |
+          cd build/linux/x64/release/bundle
+          zip -r ${{ github.workspace }}/OMPlayer-linux.zip .
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: OMPlayer-linux.zip
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OMPlayer-linux.zip

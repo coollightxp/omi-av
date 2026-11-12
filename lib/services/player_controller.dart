@@ -1,0 +1,3224 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show Icons;
+import 'package:flutter/widgets.dart';
+import 'package:video_player/video_player.dart';
+import 'package:screen_brightness/screen_brightness.dart';
+import 'package:volume_controller/volume_controller.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:window_manager/window_manager.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+
+import '../models/channel.dart';
+import '../models/epg_program.dart';
+import '../models/epg_source.dart';
+import '../models/player_settings.dart';
+import '../models/playlist_source.dart';
+import '../models/reservation.dart';
+import 'auto_launch.dart';
+import 'cast_stream_proxy.dart';
+import 'dlna_service.dart';
+import 'win_hotkeys.dart';
+import 'fvp_register.dart';
+import 'cast_log.dart';
+import 'format_hint.dart';
+import 'media_capture_service.dart';
+import 'native_capture.dart';
+import 'remote_admin_service.dart';
+import 'reservation_manager.dart';
+import 'source_manager.dart';
+import 'web_env.dart';
+import 'web_launch.dart';
+import 'network_monitor.dart';
+import 'osd_bus.dart';
+import 'pip.dart';
+
+/// 播放器状态
+enum PlayerState { idle, loading, playing, paused, error, ended, waitingForNetwork }
+
+/// 播放器控制器 - 使用 ChangeNotifier 进行状态管理
+class PlayerController extends ChangeNotifier {
+  VideoPlayerController? _videoController;
+  PlayerSettings _settings = const PlayerSettings();
+
+  /// 时钟显隐的独立通知器：切换它只重建时钟本身，不触发整棵播放
+  /// Stack 的 notifyListeners（避免反复重建导致灰屏）
+  final ValueNotifier<bool> clockVisible = ValueNotifier<bool>(false);
+
+  /// 视频画面旋转（顺时针 90° 的倍数）：0=0°, 1=90°, 2=180°, 3=270°。
+  /// 仅影响显示，不改变解码器或流本身。投屏竖屏直播时可旋转画面填满屏幕。
+  final ValueNotifier<int> videoRotation = ValueNotifier<int>(0);
+
+  /// 旋转：每点一次顺时针转 90°（0°→90°→180°→270°→0°），
+  /// 与 OMTV 一致，四个方向都能转
+  void cycleVideoRotation() {
+    videoRotation.value = (videoRotation.value + 1) % 4;
+  }
+
+  PlayerState _state = PlayerState.idle;
+  Channel? _currentChannel;
+  double _volume = 0.8;
+  double _brightness = 0.8;
+  List<ChannelCategory> _categories = [];
+
+  // 新增服务
+  final SourceManager sourceManager = SourceManager();
+  final ReservationManager reservationManager = ReservationManager();
+  final MediaCaptureService captureService = MediaCaptureService();
+
+  // DLNA 投屏接收服务（接收其它设备推送的视频）
+  final DlnaService dlnaService = DlnaService();
+  bool _isCasting = false;
+  Channel? _preCastChannel; // 投屏前的频道，用于断开后恢复
+
+  // 局域网 Web 管理服务（手机扫码后增删改直播源/EPG）
+  final RemoteAdminService remoteAdminService = RemoteAdminService();
+  String _remoteAdminUrl = '';
+  String get remoteAdminUrl => _remoteAdminUrl;
+  bool get remoteAdminRunning => remoteAdminService.isRunning;
+
+  // NumLock 守护已移至 Windows runner（见文件末说明）
+
+  // 投屏卡顿看门狗：状态仍为"播放中"但播放位置长时间不推进时，
+  // 说明网络流被静默掐断（常见于 HTTP-FLV/视频号直播），需要自愈
+  int _watchPosMs = -1;
+  DateTime? _watchAdvanceAt;
+  bool _stallNudged = false;
+  // seek 后给看门狗 30 秒宽限期：长视频 seek 到远处缓冲慢，期间 position
+  // 暂时停在目标点不动，若按正常 12 秒计时会被误判为卡顿而触发重建
+  DateTime? _seekGraceUntil;
+  // 整场投屏是否已重建过（所有自愈路径统一守门，只重建一次）
+  bool _castReinitDone = false;
+
+  // buffering 持续超时自愈
+  DateTime? _bufferingSince;
+  // 上次观察到的已缓冲末尾（ms）：缓冲中若该值仍在增长，说明下载在
+  // 推进（只是慢），不应判定卡死；-1 表示尚无观测
+  int _lastBufferedEndMs = -1;
+
+  // 最后确认可播的位置（ms）：看门狗在「非缓冲、非宽限、位置推进」时更新。
+  // seek 后下载完全停滞时软回退到这里（重建=重发同一 Range 请求照样挂死）
+  int _lastGoodPosMs = -1;
+  // 本次停滞是否已用过软回退（防止在死位置之间来回弹跳）
+  bool _seekFallbackUsed = false;
+
+  // 有声无画面看门狗：音频在播但视频尺寸长时间为 0（解码链视频轨没起来）
+  DateTime? _noVideoSince;
+  // 投屏 initialize 15s 超时后，用同一 URL 原地重拉一次（偶发首拉视频轨不起）
+  bool _castInitRetried = false;
+
+  // 播放代际令牌：每次发起播放 +1；initialize 是异步的，Stop→换片等场景会
+  // 并发触发多个 _playCurrentSource，迟到的 initialize 完成时若代际已过期，
+  // 必须静默丢弃，不能覆盖当前播放器（否则会出现直播流覆盖点播、进度条消失、
+  // 假 error 覆盖层 + 旧音频仍在响等问题）
+  int _playGeneration = 0;
+  // 绑定到当前 controller 的事件监听闭包（dispose 时精确移除）
+  VoidCallback? _videoListenerClosure;
+
+  // 投屏 Stop 延迟恢复：发送端换片的标准信令是 Stop→SetURI→Play（间隔仅
+  // 几十毫秒），立即恢复上次频道会与马上到达的新投屏并发拉流。延迟 800ms，
+  // 期间收到新投屏则取消恢复
+  Timer? _castRestoreTimer;
+  // 投屏点播播完（ended）兜底：上报 STOPPED 后等待「投屏播完后」设置
+  // 的时长，发送端若没主动 Stop/换片，就自动切回投屏前频道
+  Timer? _castEndedTimer;
+
+  // 播放失败自动重试定时器：起播/播放失败进入 error 后，按设置次数
+  // 自动重载当前频道；换台/手动重试时取消
+  Timer? _autoRetryTimer;
+
+  // 静音状态
+  bool _isMuted = false;
+  double _volumeBeforeMute = 0.8;
+
+  bool _isLoadingPlaylist = false;
+  bool _isLoadingEpg = false;
+  String? _lastError;
+  bool _isFullscreen = false;
+
+  /// 启动初始化是否完成（配置、节目列表、EPG 全部读入后才置 true）。
+  /// 播放页据此显示启动画面，避免先闪一下空白/空频道列表
+  bool _bootReady = false;
+  /// 启动画面上的状态文案（"正在读取节目列表…"等）
+  String _bootStatus = '正在启动…';
+
+  bool get bootReady => _bootReady;
+  String get bootStatus => _bootStatus;
+
+  /// 更新启动状态文案（启动画面正在显示，通知即可刷新）
+  void _boot(String status) {
+    if (_bootStatus == status) return;
+    _bootStatus = status;
+    notifyListeners();
+  }
+
+  // 录制状态（fvp 原生录制 / 网页 MediaRecorder 录制）
+  bool _isRecording = false;
+  String? _recordPath;
+
+  // 网页录制：MediaRecorder 分块（base64）经 JS bridge 追加写入 .webm
+  int _webRecBytes = 0;
+  Completer<void>? _webRecDone;
+
+  // 播放进度定时刷新（进度条/倒计时）
+  Timer? _tickTimer;
+
+  PlayerState get state => _state;
+  Channel? get currentChannel => _currentChannel;
+  double get volume => _volume;
+  double get brightness => _brightness;
+  PlayerSettings get settings => _settings;
+  VideoPlayerController? get videoController => _videoController;
+  List<ChannelCategory> get categories => _categories;
+  bool get isLoadingPlaylist => _isLoadingPlaylist;
+  bool get isLoadingEpg => _isLoadingEpg;
+  String? get lastError => _lastError;
+  bool get isRecording => _isRecording;
+
+  /// 网页录制已落盘字节数（录制指示器显示）
+  int get webRecordingBytes => _webRecBytes;
+  bool get isDesktop => !kIsWeb && MediaCaptureService.isDesktop;
+  bool get isFullscreen => _isFullscreen;
+  bool get isCasting => _isCasting;
+  bool get isMuted => _isMuted;
+
+  bool get isPlaying =>
+      _webPageActive ? _webPlaying : _state == PlayerState.playing;
+  bool get isInitialized =>
+      _videoController != null && _videoController!.value.isInitialized;
+
+  // 用户收藏的频道 ID（独立持久化，不改动频道/分类结构）
+  final Set<String> _favoriteChannelIds = <String>{};
+  List<String> get favoriteChannelIds =>
+      _favoriteChannelIds.toList(growable: false);
+  bool isFavoriteChannel(String id) => _favoriteChannelIds.contains(id);
+
+  /// 聚合收藏频道：按频道在源分类中的原始顺序输出
+  List<Channel> buildFavoriteChannels() {
+    final result = <Channel>[];
+    for (final cat in _categories) {
+      for (final ch in cat.channels) {
+        if (_favoriteChannelIds.contains(ch.id)) result.add(ch);
+      }
+    }
+    return result;
+  }
+
+  /// 已同步给原生的「切后台自动画中画」开关状态（去重，避免每次刷新都走通道）
+  bool _autoPipSynced = false;
+
+  /// 是否 Android TV / 电视盒子（启动时检测一次）。
+  /// 电视端按 Home 进小窗会打断看电视的主流程，不做自动画中画
+  bool _isTv = false;
+
+  /// 播放状态可能从多处改变（内核回调/网页 JS/切台/投屏），统一在
+  /// notifyListeners 出口处同步：播放中（非投屏/非电视端）时，
+  /// 安卓按 Home 或切到别的应用会自动进入画中画小窗
+  @override
+  void notifyListeners() {
+    super.notifyListeners();
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    final armed = isPlaying && !_isCasting && !_isTv;
+    if (armed == _autoPipSynced) return;
+    _autoPipSynced = armed;
+    setAutoPip(armed);
+  }
+
+  PlayerController() {
+    _init();
+  }
+
+  Future<void> _init() async {
+    _boot('正在读取设置…');
+    await _loadSettings();
+    // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
+    _isTv = await isTvDevice();
+    _boot('正在加载节目源…');
+    await sourceManager.loadFromPrefs();
+    await reservationManager.init(_onReservationTriggered);
+
+    // 启动网络监控：开机启动时可能网络未就绪，需要检测并重试
+    NetworkMonitor.instance.start();
+    NetworkMonitor.instance.onNetworkChanged.listen(_onNetworkChanged);
+    // 播放中每 500ms 刷新一次（进度条、倒计时等）
+    _tickTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      _checkCastStall();
+      if (_videoController != null &&
+          _videoController!.value.isInitialized) {
+        notifyListeners();
+      }
+    });
+
+    // 如果有选中的播放列表，加载频道；否则保持空列表，等用户添加
+    if (sourceManager.currentPlaylist != null) {
+      _boot('正在读取节目列表…');
+      await refreshChannels();
+    }
+
+    // 如果有选中的 EPG，加载节目单
+    if (sourceManager.currentEpg != null) {
+      _boot('正在读取节目单…');
+      await refreshEpg();
+    }
+
+    // 先启动 DLNA 投屏接收服务（不等系统值初始化，避免被阻塞）；
+    // 用户可在设置中关闭
+    if (_settings.dlnaEnabled) {
+      _startDlna();
+    }
+    // 启动局域网 Web 管理服务（手机扫码管理直播源/EPG）
+    if (_settings.remoteAdminEnabled) {
+      _startRemoteAdmin();
+    }
+    _initSystemValues();
+
+    // 频道加载完毕后，恢复上次退出时播放的频道
+    _boot('正在恢复上次播放的频道…');
+    await restoreLastChannel();
+
+    // 启动初始化完成：撤掉启动画面
+    _bootReady = true;
+    notifyListeners();
+  }
+
+  // ==================== 网络状态处理 ====================
+
+  /// 网络状态变化回调
+  void _onNetworkChanged(bool online) {
+    if (online) {
+      _onNetworkRestored();
+    } else {
+      // 网络断开：暂停播放
+      if (_webPageActive) {
+        _webEval?.call('window.__omPause && window.__omPause()');
+      } else if (_videoController != null) {
+        _videoController?.pause();
+      }
+      _state = PlayerState.paused;
+      notifyListeners();
+    }
+  }
+
+  /// 网络恢复：补加载启动时因无网未载入的频道列表/EPG（已载入的不管），
+  /// 并恢复播放
+  Future<void> _onNetworkRestored() async {
+    // 频道列表为空且已选播放列表：启动时无网加载失败，补加载
+    if (_categories.isEmpty &&
+        sourceManager.currentPlaylist != null &&
+        !_isLoadingPlaylist) {
+      await refreshChannels();
+    }
+    // EPG 无数据且已选 EPG 源：补加载
+    if (sourceManager.cachedEpg.isEmpty &&
+        sourceManager.currentEpg != null &&
+        !_isLoadingEpg) {
+      await refreshEpg();
+    }
+    if (_state == PlayerState.waitingForNetwork) {
+      if (_currentChannel != null) {
+        // 之前在等待网络：重新播放当前频道
+        _state = PlayerState.loading;
+        notifyListeners();
+        await playChannel(_currentChannel!);
+      } else {
+        // 启动时无网，playChannel 在等网阶段返回、频道从未赋值：
+        // 重新恢复上次播放的频道（无记录时回到空闲态）
+        _state = PlayerState.idle;
+        await restoreLastChannel();
+      }
+    } else if (_state == PlayerState.paused && _webPageActive) {
+      // 网页频道：网络恢复后尝试继续播放
+      _webEval?.call('window.__omResume && window.__omResume()');
+    } else if (_state == PlayerState.paused && _videoController != null) {
+      // 普通频道：网络恢复后继续播放
+      _videoController?.play();
+    }
+  }
+
+  /// 等待网络可用（最多等 30 秒），返回是否有网
+  Future<bool> _waitForNetwork() async {
+    if (NetworkMonitor.instance.hasNetwork) return true;
+    _state = PlayerState.waitingForNetwork;
+    notifyListeners();
+    return NetworkMonitor.instance.waitForNetwork(
+      timeout: const Duration(seconds: 30),
+    );
+  }
+
+  // ==================== 上次播放记忆 ====================
+
+  static const _kLastChannel = 'last_channel_v1';
+
+  /// 播放成功后记录当前频道，供下次启动恢复
+  Future<void> _saveLastChannel({Channel? channel}) async {
+    // 投屏会话不记录：投屏链接是临时的（如手机推来的抖音直播），
+    // 记录后下次启动会尝试恢复一个已失效的投屏地址
+    if (_isCasting) return;
+    final ch = channel ?? _currentChannel;
+    if (ch == null) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      final data = {
+        'id': ch.id,
+        'name': ch.name,
+        'logoUrl': ch.logoUrl,
+        'tvgId': ch.tvgId,
+        'tvgName': ch.tvgName,
+        'groupTitle': ch.groupTitle,
+        'categoryId': ch.categoryId,
+        'streamUrls': ch.streamUrls,
+        'sourceIndex': _sourceIndex,
+        'userAgent': ch.userAgent,
+      };
+      await p.setString(_kLastChannel, jsonEncode(data));
+    } catch (_) {}
+  }
+
+  /// 启动时恢复上次播放的频道：优先在当前播放列表中精确匹配，
+  /// 匹配不到则用记录的播放地址构造临时频道播放
+  Future<void> restoreLastChannel() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final str = p.getString(_kLastChannel);
+      if (str == null || str.isEmpty) return;
+      final Map<String, dynamic> data =
+          jsonDecode(str) as Map<String, dynamic>;
+      final urls = (data['streamUrls'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          const <String>[];
+      if (urls.isEmpty) return;
+      final id = data['id'] as String? ?? '';
+      final name = data['name'] as String? ?? '';
+      final srcIdx = (data['sourceIndex'] as int?) ?? 0;
+
+      // 1) 在已加载分类中按频道 ID 精确查找
+      Channel? target;
+      if (id.isNotEmpty) {
+        target = _findChannelById(id);
+      }
+      // 2) 没找到则用记录的地址列表 + 元数据构造临时频道
+      target ??= Channel(
+        id: id.isNotEmpty ? id : '__last_played__',
+        name: name,
+        logoUrl: data['logoUrl'] as String? ?? '',
+        streamUrls: urls,
+        categoryId: data['categoryId'] as String? ?? '',
+        tvgId: data['tvgId'] as String? ?? '',
+        tvgName: data['tvgName'] as String? ?? '',
+        groupTitle: data['groupTitle'] as String? ?? '',
+        userAgent: data['userAgent'] as String? ?? '',
+      );
+      _sourceIndex =
+          srcIdx < target.streamUrls.length ? srcIdx : 0;
+      // 上次是网页频道：启动时也自动打开网页播放
+      await playChannel(target);
+      // 开机时系统网络/DNS 可能尚未就绪，首次拉流偶发超时失败。
+      // 3 秒后在用户无操作（未手动切台/未投屏）的前提下自动重试一次
+      if (_state == PlayerState.error &&
+          !_isCasting &&
+          identical(_currentChannel, target)) {
+        await Future.delayed(const Duration(seconds: 3));
+        if (_state == PlayerState.error &&
+            !_isCasting &&
+            identical(_currentChannel, target)) {
+          await playChannel(target);
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// DLNA 服务状态（设置面板展示，方便确认是否开启）
+  String _dlnaName = '';
+  bool _dlnaRunning = false;
+  String _dlnaEndpoint = '';
+  String get dlnaName => _dlnaName;
+  bool get dlnaRunning => _dlnaRunning;
+  String get dlnaEndpoint => _dlnaEndpoint;
+
+  /// 启动 DLNA 接收服务：设备名 = OMPlayer + 机器唯一标识
+  Future<void> _startDlna() async {
+    if (dlnaService.isRunning) {
+      // 已运行（用户刚重新打开开关）：只刷新状态展示
+      _dlnaName = dlnaService.deviceName;
+      _dlnaRunning = true;
+      _dlnaEndpoint = dlnaService.deviceEndpoint;
+      notifyListeners();
+      return;
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      var uuid = prefs.getString('dlna_uuid') ?? '';
+      if (uuid.isEmpty) {
+        final rnd = Random();
+        uuid = List.generate(
+                8, (_) => '0123456789abcdef'[rnd.nextInt(16)])
+            .join();
+        await prefs.setString('dlna_uuid', uuid);
+      }
+      await dlnaService.start(
+        uuid: uuid,
+        hooks: DlnaHooks(
+          onPlay: (url, title) => playCastUrl(url, title),
+          onPause: () async {
+            if (_videoController != null &&
+                _videoController!.value.isPlaying) {
+              await _videoController!.pause();
+              _state = PlayerState.paused;
+              notifyListeners();
+            }
+          },
+          onResume: () async {
+            if (_videoController == null ||
+                !_videoController!.value.isInitialized) {
+              return;
+            }
+            if (!_videoController!.value.isPlaying) {
+              await _videoController!.play();
+              _state = PlayerState.playing;
+              notifyListeners();
+            }
+          },
+          onStop: () => stopCastAndRestore(),
+          onSeek: (p) => seekTo(p),
+          onSetVolume: (v) => setVolume(v),
+          onSetMute: (m) => setMuted(m),
+          transportState: () {
+            switch (_state) {
+              case PlayerState.playing:
+                return 'PLAYING';
+              case PlayerState.paused:
+                return 'PAUSED_PLAYBACK';
+              case PlayerState.loading:
+                // Macast 对 SetURI 返回 PAUSED_PLAYBACK，发送端以此确认
+                // 设置成功；TRANSITIONING 部分 SDK 不识别会判失败
+                return 'PAUSED_PLAYBACK';
+              default:
+                return 'STOPPED';
+            }
+          },
+          position: () => position,
+          duration: () => duration,
+          volume: () => _volume,
+          muted: () => _isMuted,
+        ),
+      );
+      _dlnaName = dlnaService.deviceName;
+      _dlnaRunning = dlnaService.isRunning;
+      _dlnaEndpoint = dlnaService.deviceEndpoint;
+    } catch (_) {
+      _dlnaRunning = false;
+    }
+    notifyListeners();
+  }
+
+  /// 停止 DLNA 投屏接收服务（设置面板开关）
+  void _stopDlna() {
+    dlnaService.stop();
+    _dlnaRunning = false;
+    _dlnaEndpoint = '';
+    notifyListeners();
+  }
+
+  /// 启动局域网 Web 管理服务
+  Future<void> _startRemoteAdmin() async {
+    if (remoteAdminService.isRunning) {
+      _remoteAdminUrl = remoteAdminService.endpoint;
+      notifyListeners();
+      return;
+    }
+    try {
+      await remoteAdminService.start(
+        hooks: RemoteAdminHooks(
+          getSnapshot: _remoteAdminSnapshot,
+          applySnapshot: _remoteAdminApply,
+          refresh: (kind) async {
+            if (kind == 'epgs') {
+              await refreshEpg();
+            } else {
+              await refreshChannels();
+            }
+          },
+        ),
+      );
+      _remoteAdminUrl = remoteAdminService.endpoint;
+    } catch (_) {
+      _remoteAdminUrl = '';
+    }
+    notifyListeners();
+  }
+
+  void _stopRemoteAdmin() {
+    remoteAdminService.stop();
+    _remoteAdminUrl = '';
+    notifyListeners();
+  }
+
+  Future<Map<String, dynamic>> _remoteAdminSnapshot() async {
+    final s = settings;
+    return {
+      'playlists': sourceManager.playlists.map((e) => e.toJson()).toList(),
+      'currentPlaylistId': sourceManager.currentPlaylistId,
+      'epgs': sourceManager.epgs.map((e) => e.toJson()).toList(),
+      'currentEpgId': sourceManager.currentEpgId,
+      // 手机端常用开关（不放 remoteAdminEnabled：关掉会断开自己）
+      'settings': {
+        'showClock': s.showClock,
+        'dlnaEnabled': s.dlnaEnabled,
+        'alwaysOnTop': s.alwaysOnTop,
+        'autoPlayNext': s.autoPlayNext,
+        'autoReloadStall': s.autoReloadStall,
+        'retryTimes': s.retryTimes,
+        'castEndWaitSeconds': s.castEndWaitSeconds,
+        'webEnabled': s.webEnabled,
+        'startFullscreen': s.startFullscreen,
+        'launchAtStartup': s.launchAtStartup,
+        'uiScale': s.uiScale,
+        'uiScaleAuto': s.uiScaleAuto,
+        'isDesktop': isDesktop,
+      },
+    };
+  }
+
+  Future<void> _remoteAdminApply(Map<String, dynamic> data) async {
+    final rawPl = (data['playlists'] as List?) ?? const [];
+    final playlists = rawPl
+        .whereType<Map>()
+        .map((m) => PlaylistSource.fromJson(
+            _normalizeRemoteItem(m.cast<String, dynamic>())))
+        .toList();
+    final newPlId = data['currentPlaylistId']?.toString();
+    final oldPlId = sourceManager.currentPlaylistId;
+    final oldPlUrl = sourceManager.currentPlaylist?.url;
+    final plExists = await sourceManager.replacePlaylists(playlists, newPlId);
+    if (plExists) {
+      final cur = sourceManager.currentPlaylist!;
+      if (cur.id != oldPlId || cur.url != oldPlUrl) {
+        await refreshChannels();
+      }
+    } else if (oldPlId != null) {
+      // 当前源被删除：清空频道
+      _categories = [];
+      _currentChannel = null;
+      notifyListeners();
+    }
+
+    final rawEpg = (data['epgs'] as List?) ?? const [];
+    final epgs = rawEpg
+        .whereType<Map>()
+        .map((m) => EpgSource.fromJson(
+            _normalizeRemoteItem(m.cast<String, dynamic>())))
+        .toList();
+    final newEpgId = data['currentEpgId']?.toString();
+    final oldEpgId = sourceManager.currentEpgId;
+    await sourceManager.replaceEpgs(epgs, newEpgId);
+    if (sourceManager.currentEpg != null &&
+        sourceManager.currentEpgId != oldEpgId) {
+      await refreshEpg();
+    }
+
+    // 手机端常用开关（settings 段缺省时跳过，兼容旧版页面的请求）
+    final rawSettings = data['settings'];
+    if (rawSettings is Map) {
+      bool? rb(String key) =>
+          rawSettings[key] is bool ? rawSettings[key] as bool : null;
+      final cur = _settings;
+
+      // 时钟走独立通道，避免整棵播放树重建（见 setShowClock 注释）
+      final clock = rb('showClock');
+      if (clock != null && clock != cur.showClock) {
+        setShowClock(clock);
+      }
+
+      final dlna = rb('dlnaEnabled') ?? cur.dlnaEnabled;
+      final autoPlayNext = rb('autoPlayNext') ?? cur.autoPlayNext;
+      final autoReloadStall = rb('autoReloadStall') ?? cur.autoReloadStall;
+      final webEnabled = rb('webEnabled') ?? cur.webEnabled;
+      final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
+      double uiScale = cur.uiScale;
+      if (rawSettings['uiScale'] is num) {
+        uiScale = (rawSettings['uiScale'] as num).toDouble().clamp(0.8, 3.0);
+      }
+      // 数值型选项：只接受界面提供的档位，防止旧/异常页面写入非法值
+      int retryTimes = cur.retryTimes;
+      final rt = rawSettings['retryTimes'];
+      if (rt is num && const {3, 5, 10}.contains(rt.toInt())) {
+        retryTimes = rt.toInt();
+      }
+      int castEndWait = cur.castEndWaitSeconds;
+      final ce = rawSettings['castEndWaitSeconds'];
+      if (ce is num && const {-1, 0, 5, 30}.contains(ce.toInt())) {
+        castEndWait = ce.toInt();
+      }
+      final startFullscreen = rb('startFullscreen') ?? cur.startFullscreen;
+      final alwaysOnTop =
+          isDesktop ? (rb('alwaysOnTop') ?? cur.alwaysOnTop) : cur.alwaysOnTop;
+      final launchAtStartup = isDesktop
+          ? (rb('launchAtStartup') ?? cur.launchAtStartup)
+          : cur.launchAtStartup;
+      if (dlna != cur.dlnaEnabled ||
+          autoPlayNext != cur.autoPlayNext ||
+          autoReloadStall != cur.autoReloadStall ||
+          webEnabled != cur.webEnabled ||
+          retryTimes != cur.retryTimes ||
+          castEndWait != cur.castEndWaitSeconds ||
+          uiScaleAuto != cur.uiScaleAuto ||
+          uiScale != cur.uiScale ||
+          startFullscreen != cur.startFullscreen ||
+          alwaysOnTop != cur.alwaysOnTop ||
+          launchAtStartup != cur.launchAtStartup) {
+        updateSettings(cur.copyWith(
+          dlnaEnabled: dlna,
+          autoPlayNext: autoPlayNext,
+          autoReloadStall: autoReloadStall,
+          webEnabled: webEnabled,
+          retryTimes: retryTimes,
+          castEndWaitSeconds: castEndWait,
+          uiScaleAuto: uiScaleAuto,
+          uiScale: uiScale,
+          startFullscreen: startFullscreen,
+          alwaysOnTop: alwaysOnTop,
+          launchAtStartup: launchAtStartup,
+        ));
+      }
+    }
+    notifyListeners();
+  }
+
+  /// 手机端新建项可能缺少 addedAt 等字段，补默认值
+  Map<String, dynamic> _normalizeRemoteItem(Map<String, dynamic> j) {
+    if (j['id'] is! String || (j['id'] as String).isEmpty) {
+      j['id'] = DateTime.now().millisecondsSinceEpoch.toString();
+    }
+    if (j['name'] is! String) j['name'] = '未命名';
+    if (j['url'] is! String) j['url'] = '';
+    if (j['type'] is! String) j['type'] = 'url';
+    if (j['format'] is! String) j['format'] = 'unknown';
+    if (j['addedAt'] is! String) {
+      j['addedAt'] = DateTime.now().toIso8601String();
+    }
+    return j;
+  }
+
+  /// 播放投屏推送的 URL（记录投屏前频道用于断开恢复）
+  Future<void> playCastUrl(String url, String title) async {
+    // 紧接 Stop 到达的新投屏：取消挂起的"恢复上次频道"和"播完兜底"
+    _castRestoreTimer?.cancel();
+    _castRestoreTimer = null;
+    _castEndedTimer?.cancel();
+    _castEndedTimer = null;
+    // 幂等：投屏进行中且 URL 与当前源完全相同（抖音等乐播 SDK 在等待
+    // 确认窗口内会 Stop+SetURI+Play 反复推送同一地址），不重建播放器。
+    // 单 controller 模型下重复 dispose+initialize：① dispose 遇到内核
+    // 繁忙超时放弃 → 孤儿内核继续播放出声（双声音）；② 正在进行的
+    // initialize 被打断（投屏自动退出）。Macast 的 mpv 单实例换源无此代价，
+    // 我们以"同 URL 忽略重载"对齐其行为。
+    if (_isCasting &&
+        _currentChannel != null &&
+        _currentChannel!.streamUrls.isNotEmpty &&
+        _sourceIndex >= 0 &&
+        _sourceIndex < _currentChannel!.streamUrls.length &&
+        _currentChannel!.streamUrls[_sourceIndex] == url) {
+      CastLog.write('cast play SAME URL ignored: $title');
+      return;
+    }
+    CastLog.write('cast play url: $title');
+    // 诊断：记录 URL 类型与 host（不落完整 URL 里的鉴权参数）
+    try {
+      final u = Uri.parse(url);
+      final lu = url.toLowerCase();
+      CastLog.write('cast url host=${u.host} '
+          'isHls=${lu.contains('.m3u8') || lu.contains('.m3u')} '
+          'len=${url.length}');
+    } catch (_) {}
+    _preCastChannel ??=
+        (_currentChannel?.id.startsWith('__dlna_cast__') ?? false)
+            ? null
+            : _currentChannel;
+    _isCasting = true;
+    // 重置卡顿看门狗
+    _watchPosMs = -1;
+    _watchAdvanceAt = null;
+    _stallNudged = false;
+    _castReinitDone = false;
+    _bufferingSince = null;
+    _lastBufferedEndMs = -1;
+    _lastGoodPosMs = -1;
+    _seekFallbackUsed = false;
+    _noVideoSince = null;
+    _castInitRetried = false;
+    final cast = Channel(
+      id: '__dlna_cast__',
+      name: title.isEmpty ? 'DLNA 投屏' : title,
+      streamUrls: [url],
+      categoryId: 'dlna',
+    );
+    await playChannel(cast);
+  }
+
+  /// 投屏端停止：延迟 800ms 再恢复。
+  /// 发送端换片信令通常是 Stop→(几十毫秒)→SetAVTransportURI→Play，
+  /// 立即恢复会让"恢复直播"与"新投屏"两路 initialize 并发，迟到的直播流
+  /// 初始化会覆盖点播（进度条消失、假重试、有声无画的根因）。
+  Future<void> stopCastAndRestore() async {
+    if (!_isCasting) return;
+    // 恢复延迟已在途：保持原 timer，不取消/重置。
+    // 看门狗或重复点击若不断重置这个 timer，会导致几十秒无法真正断开
+    if (_castRestoreTimer != null) return;
+    _castEndedTimer?.cancel();
+    _castEndedTimer = null;
+    _castRestoreTimer = Timer(const Duration(milliseconds: 800), () {
+      _castRestoreTimer = null;
+      _doStopCastAndRestore();
+    });
+  }
+
+  /// 投屏端断开/停止后的实际恢复逻辑
+  Future<void> _doStopCastAndRestore() async {
+    if (!_isCasting) return;
+    _isCasting = false;
+    _watchPosMs = -1;
+    _watchAdvanceAt = null;
+    unawaited(CastStreamProxy.instance.stop());
+    // 本机主动断开：清 DLNA 媒体 + 推 STOPPED + 终止订阅 + SSDP
+    // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
+    // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
+    dlnaService.kickCastClients();
+    final restore = _preCastChannel;
+    _preCastChannel = null;
+    if (restore != null) {
+      await playChannel(restore);
+    } else {
+      await _disposeVideoController();
+      WakelockPlus.disable();
+      _state = PlayerState.idle;
+      notifyListeners();
+    }
+  }
+
+  /// 预约触发回调 - 自动切换/录制
+  Future<void> _onReservationTriggered(ProgramReservation r) async {
+    Channel? channel;
+    if (r.autoSwitch || (r.autoRecord && isDesktop)) {
+      // 优先使用预约时记录的播放地址直接播放（不依赖当前播放列表）
+      if (r.streamUrls.isNotEmpty) {
+        channel = Channel(
+          id: r.channelId,
+          name: r.channelName.isNotEmpty ? r.channelName : r.programTitle,
+          logoUrl: r.logoUrl,
+          streamUrls: r.streamUrls,
+          categoryId: '',
+          tvgId: r.tvgId,
+          tvgName: r.tvgName,
+        );
+      } else {
+        // 兼容旧预约记录：按 ID/tvgId/名称从当前播放列表反查
+        channel = _resolveReservationChannel(r);
+      }
+    }
+    if (r.autoSwitch && channel != null) {
+      await playChannel(channel);
+    }
+    if (r.autoRecord && isDesktop && channel != null) {
+      // 保证录制针对的是预约频道
+      if (_currentChannel?.id != channel.id) {
+        await playChannel(channel);
+      }
+      startRecording();
+    }
+    notifyListeners();
+  }
+
+  /// 解析预约对应的频道：先按播放列表频道 ID 精确查找，
+  /// 失败则兼容旧数据（存的是 EPG 频道 ID）按 tvgId/名称匹配
+  Channel? _resolveReservationChannel(ProgramReservation r) {
+    final byId = _findChannelById(r.channelId);
+    if (byId != null) return byId;
+    // tvgId 精确匹配
+    for (final cat in _categories) {
+      for (final ch in cat.channels) {
+        if (ch.tvgId.isNotEmpty && ch.tvgId == r.channelId) return ch;
+      }
+    }
+    // 名称模糊匹配（EPG 频道 ID 或预约记录的频道名）
+    for (final key in [r.channelId, r.channelName]) {
+      final lower = key.toLowerCase();
+      if (lower.isEmpty) continue;
+      for (final cat in _categories) {
+        for (final ch in cat.channels) {
+          if (ch.tvgName.isNotEmpty &&
+              ch.tvgName.toLowerCase() == lower) {
+            return ch;
+          }
+          final name = ch.name.toLowerCase();
+          if (name.contains(lower) || lower.contains(name)) {
+            return ch;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  Channel? _findChannelById(String channelId) {
+    for (final cat in _categories) {
+      for (final ch in cat.channels) {
+        if (ch.id == channelId) return ch;
+      }
+    }
+    return null;
+  }
+
+  /// 初始化系统音量和亮度
+  Future<void> _initSystemValues() async {
+    try {
+      _brightness = await ScreenBrightness.instance.application;
+    } catch (_) {
+      _brightness = _settings.defaultBrightness;
+    }
+    try {
+      final vol = await VolumeController.instance.getVolume();
+      _volume = vol;
+    } catch (_) {
+      _volume = _settings.defaultVolume;
+    }
+    notifyListeners();
+  }
+
+  // ==================== 频道加载 ====================
+
+  /// 刷新当前播放列表的频道
+  Future<void> refreshChannels() async {
+    _isLoadingPlaylist = true;
+    _lastError = null;
+    notifyListeners();
+    try {
+      _categories = await sourceManager.loadChannels();
+    } catch (e) {
+      _lastError = '加载频道列表失败: $e';
+    } finally {
+      _isLoadingPlaylist = false;
+      notifyListeners();
+    }
+  }
+
+  /// 刷新 EPG 数据。
+  /// - 当前 EPG 可用（缓存新鲜或联网成功）→ 正常返回；
+  /// - 当前 EPG 彻底失败且还有其他 EPG 源 → 依次尝试，成功一个就
+  ///   自动切为当前源并保存；
+  /// - 全部失败 → 保持空，记录错误。
+  Future<void> refreshEpg() async {
+    _isLoadingEpg = true;
+    notifyListeners();
+    try {
+      await sourceManager.loadEpg();
+    } catch (e) {
+      _lastError = '加载 EPG 失败: $e';
+
+      // 默认 EPG 挂了：循环其他源，成功一个就自动切换
+      final epgs = sourceManager.epgs;
+      if (epgs.length > 1) {
+        final curId = sourceManager.currentEpgId;
+        for (final alt in epgs) {
+          if (alt.id == curId) continue;
+          try {
+            await sourceManager.selectEpg(alt.id);
+            await sourceManager.loadEpg();
+            _lastError = '';
+            // 切换了源，通知 UI 并持久化
+            notifyListeners();
+            break;
+          } catch (_) {
+            // 继续试下一个
+          }
+        }
+      }
+    } finally {
+      _isLoadingEpg = false;
+      notifyListeners();
+    }
+  }
+
+  // ==================== 播放控制 ====================
+
+  /// 当前播放源索引（同名频道合并后有多个源）
+  int _sourceIndex = 0;
+  int get sourceIndex => _sourceIndex;
+  int get sourceCount => _currentChannel?.streamUrls.length ?? 0;
+  // 网页频道前台时恒 true：此时切源键映射为清晰度循环切换
+  bool get hasPrevSource => _webPageActive || _sourceIndex > 0;
+  bool get hasNextSource => _webPageActive || _sourceIndex < sourceCount - 1;
+
+  /// 播放指定频道（从第一个源开始，失败自动尝试下一个源）
+  Future<void> playChannel(Channel channel) async {
+    // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
+    // 并取消上个频道挂起的自动重试
+    _autoReloadCount = 0;
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    _lastError = null;
+    // 投屏中手动切台/选台 = 手动结束投屏：按 UPnP 规范先给发送端推
+    // 「无媒体 STOPPED」断联信号（手机端投屏 UI 随之退出），
+    // 再走正常播放流程；投屏内部换片不走这里（由 playCastUrl 处理）
+    if (_isCasting && !channel.id.startsWith('__dlna_cast__')) {
+      _isCasting = false;
+      _preCastChannel = null;
+      _castRestoreTimer?.cancel();
+      _castRestoreTimer = null;
+      _castEndedTimer?.cancel();
+      _castEndedTimer = null;
+      unawaited(CastStreamProxy.instance.stop());
+      dlnaService.clearCurrentMedia();
+    }
+    // 无网络时等待网络（开机启动时系统网络可能未就绪）
+    if (!await _waitForNetwork()) {
+      // 30 秒内仍无网络，保持等待状态，后台继续检测
+      return;
+    }
+    // 切到与「网页→内置接管」无关的频道（普通换台/启动恢复）：
+    // 清空网页<->内置联动状态，控制面板切换按钮随之复位
+    if (_lastWebChannel == null || channel.id != _lastWebChannel!.id) {
+      _lastWebChannel = null;
+      _sniffTarget = null;
+      _sniffNativeActive = false;
+      _abandonedSniffWebUrl = null;
+      _userWebChoiceUrl = null;
+    }
+    // 网页频道（webview:// 包装的网站）：停掉视频，切到内嵌网页控件，
+    // 由网站自身的播放器播放；节目单/信息面板浮层继续显示在其上
+    if (channel.isWebPage) {
+      await _openWebPageChannel(channel);
+      return;
+    }
+    _webPageActive = false;
+    _webPageForeground = false;
+    _currentChannel = channel;
+    _sourceIndex = 0;
+    await _playCurrentSource();
+  }
+
+  /// 是否处于网页频道内嵌模式（PlayerScreen 据此显示内嵌网页控件）
+  bool _webPageActive = false;
+  bool get webPageActive => _webPageActive;
+
+  /// 网页频道的 WebView 控制器（Dart 侧调用网页 JS 用，如重置光标隐藏定时器）
+  dynamic webController;
+
+  /// 网页频道的 FocusNode（用户交互后请求 WebView 焦点用）
+  FocusNode? webFocusNode;
+
+  /// 网页是否已在【前台】播放（网页在后台缓冲时为 false，视频层保持
+  /// 黑屏占位；网页播放器真正带声音起播后由 JS 回调置 true，
+  /// 网页推到最前、原视频层隐藏）
+  bool _webPageForeground = false;
+  bool get webPageForeground => _webPageForeground;
+
+  /// 网页内视频是否处于播放态（由网页 play/pause 事件回传，
+  /// 供底部面板播放按钮显示正确图标）
+  bool _webPlaying = false;
+
+  /// ===== 网页频道控制桥（由内嵌 WebView 注册/注销）=====
+  /// 执行 JS 并返回结果
+  Future<dynamic> Function(String)? _webEval;
+
+  /// 截取网页画面，返回 PNG 字节
+  Future<List<int>?> Function()? _webScreenshot;
+
+  /// 网页内播放/暂停切换 JS（递归同源 iframe，只操作可见面积最大的
+  /// 主视频——页面常带隐藏预览/广告播放器，"任一个在播就全暂停"会
+  /// 把主视频误停）。
+  /// 暂停时先代点站点自身的大播放钮（央视频 CMG 等播放器只认自身
+  /// 按钮激活，纯 video.play() 会被立即暂停），再兜底 play()。
+  /// 返回 '1' 表示切换后暂停，'0' 表示播放中，'2' 表示没找到可见视频。
+  static const _webToggleJs = r'''
+(function(){
+  function allVideos(root){
+    var out = Array.prototype.slice.call(root.querySelectorAll('video'));
+    var frames = root.querySelectorAll('iframe');
+    for (var i=0;i<frames.length;i++){
+      try { var d = frames[i].contentDocument;
+            if (d) out = out.concat(allVideos(d)); } catch(e) {}
+    }
+    return out;
+  }
+  function collectDocs(root, out){
+    out.push(root);
+    var frames = root.querySelectorAll('iframe');
+    for (var i=0;i<frames.length;i++){
+      try { var d = frames[i].contentDocument;
+            if (d) collectDocs(d, out); } catch(e) {}
+    }
+  }
+  // 代点网站大播放按钮（VideoJS 等封装播放器不认 raw video.play()）
+  function clickBigPlay(){
+    var docs = [];
+    collectDocs(document, docs);
+    for (var di=0; di<docs.length; di++){
+      var d = docs[di];
+      var w = d.defaultView;
+      var ww = (w.innerWidth || 1), hh = (w.innerHeight || 1);
+      var pts = [[ww/2, hh/2], [ww/2, hh*0.3], [ww/2, hh*0.7],
+                 [ww*0.3, hh/2], [ww*0.7, hh/2]];
+      var vids = d.querySelectorAll('video');
+      for (var vi=0;vi<vids.length;vi++)
+        vids[vi].style.setProperty('pointer-events','none','important');
+      for (var k=0;k<pts.length;k++){
+        var el = null;
+        try { el = d.elementFromPoint(pts[k][0], pts[k][1]); } catch(e){}
+        for (var vi=0;vi<vids.length;vi++){
+          try { vids[vi].style.removeProperty('pointer-events'); } catch(e){}
+        }
+        var n = el, dep = 0;
+        while (n && n !== d && dep < 6){
+          var tg = (n.tagName || '').toLowerCase();
+          var role = n.getAttribute ? n.getAttribute('role') : '';
+          var cls = ((n.className && n.className.toString) ? n.className.toString() : '')
+              + ' ' + (n.id || '');
+          if (tg === 'button' || role === 'button'
+              || /play|start|poster|cover|bigplay/i.test(cls)) {
+            try { n.click(); } catch(e){}
+            return true;
+          }
+          n = n.parentNode; dep++;
+        }
+      }
+    }
+    return false;
+  }
+  var vs = allVideos(document);
+  var anyPlaying = false;
+  for (var i=0;i<vs.length;i++){
+    if (!vs[i].paused) { anyPlaying = true; break; }
+  }
+  // 通知 kick()：暂停时不再自动拉起
+  try { window.__omUserPaused = anyPlaying; } catch(e) {}
+  if (anyPlaying) {
+    // 暂停：raw video.pause() 即可
+    for (var i=0;i<vs.length;i++){ try { vs[i].pause(); } catch(e){} }
+    // VideoJS 等封装播放器也暂停
+    try {
+      if (window.videojs && videojs.getAllPlayers) {
+        var ps = videojs.getAllPlayers();
+        for (var pi=0; pi<ps.length; pi++){
+          try { ps[pi].pause(); } catch(e){}
+        }
+      }
+    } catch(e) {}
+  } else {
+    // 播放：先 VideoJS API，再 raw play()，最后代点网站播放钮
+    try {
+      if (window.videojs && videojs.getAllPlayers) {
+        var ps = videojs.getAllPlayers();
+        for (var pi=0; pi<ps.length; pi++){
+          try { ps[pi].muted(false); ps[pi].play(); } catch(e){}
+        }
+      }
+    } catch(e) {}
+    for (var i=0;i<vs.length;i++){
+      var v = vs[i];
+      try {
+        v.removeAttribute('muted'); v.muted = false;
+        var wv = window.__omVol;
+        v.volume = (typeof wv === 'number') ? wv : 1;
+        var p = v.play(); if (p && p.catch) p.catch(function(){});
+      } catch(e) {}
+    }
+    clickBigPlay();
+  }
+  return anyPlaying ? '1' : '0';
+})();
+''';
+
+  /// 注册网页控制桥（WebView 创建后）
+  void attachWebBridge({
+    required Future<dynamic> Function(String) eval,
+    required Future<List<int>?> Function() screenshot,
+  }) {
+    _webEval = eval;
+    _webScreenshot = screenshot;
+    _webPlaying = true;
+    // 网页前台播放时鼠标静止 3 秒隐藏光标（原生实现，CSS 管不到跨域 iframe）
+    WinHotkeys().setCursorHide(true);
+    // 把当前音量同步给页面 video（kick 起播锁定后不再改写音量）
+    _applyWebVolume();
+    // 网页频道用 CSS filter 调光（系统亮度 API 管不到 WebView2）
+    _applyWebBrightness();
+    // 清晰度按设置下发：页面脚本/清晰度菜单渲染较晚，立即+延迟补发
+    _applyWebQuality();
+    Timer(const Duration(seconds: 3), _applyWebQuality);
+    Timer(const Duration(seconds: 8), _applyWebQuality);
+  }
+
+  /// 网页频道清晰度档位（站点不同档位不同，从大到小排列，首档=最高=默认）：
+  /// 央视频 3 档 1080/720/540（起点 540P、中间档 720P）；央视网多两档共
+  /// 5 档 1080/720/576/480/360——注意央视网的「高清」是 576P、「超清」
+  /// 才是 720P，中间档为 576P 而非 720P；低档位更省流量
+  List<String> get webQualityLevels {
+    final url = _currentChannel?.webPageUrl ?? '';
+    if (url.contains('cctv.com') || url.contains('cctv.cn')) {
+      return const ['1080', '720', '576', '480', '360'];
+    }
+    return const ['1080', '720', '540'];
+  }
+
+  /// 当前档位下标（0=最高，默认直接播放最大分辨率）
+  int _webQualityIndex = 0;
+
+  /// 面板/OSD 显示用：纯分辨率标签（如 1080P），不带「自动/蓝光」等字样
+  String get webQualityLabel => '${webQualityLevels[_webQualityIndex]}P';
+
+  /// 画质偏好 → 默认档位下标：自动/全高清/超清=最高档，高清=中间档，
+  /// 标清=最省流档（央视频中间=720P、央视网中间=576P）
+  int _webQualityIndexFromPref(List<String> levels) {
+    switch (_settings.preferredQuality) {
+      case VideoQuality.low:
+        return levels.length - 1;
+      case VideoQuality.medium:
+        return levels.length ~/ 2;
+      case VideoQuality.auto:
+      case VideoQuality.high:
+      case VideoQuality.ultra:
+        return 0;
+    }
+  }
+
+  /// 把当前档位下发给网页播放器（点击其自带清晰度菜单，OMTV 同款）
+  void _applyWebQuality() {
+    final eval = _webEval;
+    if (eval == null) return;
+    eval('window.__omSetRes && window.__omSetRes("${webQualityLevels[_webQualityIndex]}")');
+  }
+
+  /// 网页清晰度切换：网页频道前台时，遥控器左右键即调清晰度（档位并入
+  /// 切源逻辑，面板不单独设按钮）。档位列表从大到小排列，dir=1 升一档
+  /// （往更清晰）、dir=-1 降一档（往省流量），到顶/到底后环绕循环
+  String cycleWebQuality([int dir = 1]) {
+    final levels = webQualityLevels;
+    var i = _webQualityIndex - dir;
+    if (i < 0) i = levels.length - 1;
+    if (i >= levels.length) i = 0;
+    _webQualityIndex = i;
+    _applyWebQuality();
+    final label = webQualityLabel;
+    OsdBus.show('清晰度：$label', icon: Icons.hd_outlined);
+    notifyListeners();
+    return label;
+  }
+
+  /// 注销网页控制桥（WebView 销毁前）
+  void detachWebBridge() {
+    _webEval = null;
+    _webScreenshot = null;
+    _webPlaying = false;
+    WinHotkeys().setCursorHide(false);
+  }
+
+  /// 网页内播放/暂停状态回传
+  void setWebPlaying(bool playing) {
+    if (_webPlaying == playing) return;
+    _webPlaying = playing;
+    notifyListeners();
+  }
+
+  /// 网页起播后推到前台（由内嵌网页的 JS 回调触发）
+  void setWebForeground(bool value) {
+    if (_webPageForeground == value) return;
+    _webPageForeground = value;
+    // 网页到前台后 WebView2 HWND 会吞掉全部按键，低级钩子才需要拦截
+    // 转发；后台缓冲/普通视频时放行，保留 Flutter 完整按键事件
+    WinHotkeys().setWebForward(value);
+    // 起播成功：把 App 音量写入页面 video（attachWebBridge 时页面
+    // 可能还没有 video 元素，这里才是真正生效的时机）
+    if (value) _applyWebVolume();
+    notifyListeners();
+  }
+
+  /// 打开网页频道（TVBox webview:// 链接，如央视网网站播放器）
+  Future<void> _openWebPageChannel(Channel channel) async {
+    // 网页直播支持已关闭：不创建/调用 WebView，给一条提示后保持原状
+    if (!_settings.webEnabled) {
+      OsdBus.show('网页直播支持已关闭，可在 设置 → 系统 中开启',
+          icon: Icons.language);
+      return;
+    }
+    // 系统没有可用的内嵌网页运行时（老系统/未装 WebView2）：
+    // 绝不能创建 InAppWebView 平台视图——创建即抛异常，退出时也容易
+    // 连带崩溃。这里直接拦下并提示，普通频道/EPG/多源管理不受影响
+    if (!webEmbeddedRuntimeReady()) {
+      OsdBus.show('未检测到可用的 WebView2 运行时，网页频道不可用',
+          icon: Icons.language);
+      return;
+    }
+    // 已在播放同一个网页频道：保持现状（网页已在前台/后台缓冲中），
+    // 不要把前景状态重置回黑屏缓冲、重新走一遍探测流程
+    if (_webPageActive && _currentChannel?.id == channel.id) {
+      return;
+    }
+    _resetWebRecording();
+    await _disposeVideoController();
+    _currentChannel = channel;
+    _sourceIndex = 0;
+    // 清晰度档位复位：默认直接播放最大分辨率（设置里选了标清/高清的按偏好起步）
+    _webQualityIndex = _webQualityIndexFromPref(webQualityLevels);
+    _state = PlayerState.idle;
+    await _saveLastChannel();
+    // Windows/Android/macOS/Web：使用窗体内嵌网页控件（信息/节目单/EPG
+    // 浮层叠加其上，原视频控件隐藏）；Linux 无内嵌实现，回退系统浏览器
+    if (await supportsEmbeddedWeb()) {
+      // 网页先在后台全屏缓冲（视频位保持黑屏），起播后再推到前台
+      _webPageActive = true;
+      _webPageForeground = false;
+      notifyListeners();
+    } else {
+      await launchExternal(channel.webPageUrl);
+    }
+  }
+
+  /// 退出网页频道内嵌模式（隐藏网页控件，回到普通播放界面）
+  void exitWebPage() {
+    if (!_webPageActive) return;
+    _resetWebRecording();
+    _webPageActive = false;
+    _webPageForeground = false;
+    WinHotkeys().setCursorHide(false);
+    WinHotkeys().setWebForward(false);
+    notifyListeners();
+    // WebView 平台视图销毁后清理其用户数据目录：网页视频播放久了
+    // 缓存膨胀会让后续频道读入变慢（用户实测删除目录后立即变快）。
+    // InPrivate 下文件关闭即释放，可整个删除；仍有锁定时
+    // cleanWebView2Cache 内部退化为只删缓存子目录，下次启动再全删。
+    Timer(const Duration(milliseconds: 1500), () {
+      try {
+        cleanWebView2Cache();
+      } catch (_) {}
+    });
+  }
+
+  /// 嗅探转原生播放失败时回退用的原网页频道
+  Channel? _lastWebChannel;
+  bool _sniffedFromWeb = false;
+
+  /// 已判定无法内置播放、放弃自动切换的网页地址（内置播放失败回退
+  /// 网页后，同一页面本次运行内不再重复嗅探切换，避免循环）
+  String? _abandonedSniffWebUrl;
+
+  /// 用户通过控制面板手动切回网页播放的网页地址：该页本次运行内
+  /// 不再自动接管为内置（尊重用户选择，避免切回去又被自动切回来）
+  String? _userWebChoiceUrl;
+
+  /// overlay 是否应跳过自动嗅探接管：内置播放失败放弃的页面、
+  /// 或用户手动选择网页观看的页面
+  bool shouldSkipAutoSniff(String webUrl) =>
+      _abandonedSniffWebUrl == webUrl || _userWebChoiceUrl == webUrl;
+
+  /// 最近一次预检通过的嗅探目标（控制面板网页/内置来回切换用）
+  _SniffTarget? _sniffTarget;
+
+  /// 当前是否处于「网页频道→内置播放器」接管状态
+  bool _sniffNativeActive = false;
+
+  /// 控制面板「网页/内置切换」按钮是否可用：必须是网页频道且拿到过
+  /// 可直连的嗅探流（加密页/普通频道为 false，按钮置灰）
+  bool get canSwitchWebNative =>
+      _lastWebChannel != null && _sniffTarget != null;
+
+  /// 当前是否正在内置播放器中播放接管的网页流
+  bool get isNativeSniffPlayback => _sniffNativeActive && !_webPageActive;
+
+  /// 底部面板「网页/内置切换」按钮是否显示：仅网页频道体系内
+  /// （网页播放中 / 已接管为内置播放）。纯流频道没有机会转网页播放，
+  /// 按钮不显示
+  bool get showWebNativeButton => _webPageActive || _sniffNativeActive;
+
+  /// 该按钮当前是否可点：网页态需嗅探到可直连流；接管态可直接切回网页
+  bool get canToggleWebNative {
+    if (_webPageActive) return canSwitchWebNative;
+    return _sniffNativeActive;
+  }
+
+  /// 底部面板「网页/内置切换」：网页态 → 内置（用已登记的嗅探流）；
+  /// 内置接管态 → 回网页。纯流频道没有该按钮，不会走到这里
+  Future<void> switchWebNativePlayback() async {
+    final web = _lastWebChannel;
+    final t = _sniffTarget;
+    if (_webPageActive) {
+      if (web != null && t != null) {
+        // 网页 → 内置
+        _userWebChoiceUrl = null;
+        OsdBus.show('正在切换到内置播放器全屏播放',
+            icon: Icons.switch_video);
+        await playSniffedWebStream(
+          url: t.url,
+          referer: t.referer,
+          userAgent: t.ua,
+        );
+      }
+      return;
+    }
+    if (_sniffNativeActive && web != null) {
+      // 内置接管态 → 网页：标记用户选择，不再自动接管
+      OsdBus.show('正在切换到网页播放器全屏播放', icon: Icons.language);
+      _sniffNativeActive = false;
+      _userWebChoiceUrl = web.webPageUrl;
+      await _openWebPageChannel(web);
+    }
+  }
+
+  /// 预检嗅探到的媒体流能否被内置播放器（ffmpeg 内核）直接播放。
+  /// 带 Referer/UA 模拟网页环境；HLS/DASH 下载清单文本判断是否
+  /// DRM/自定义加密，HTTP-FLV 校验文件头。
+  Future<bool> checkSniffedStreamPlayable({
+    required String url,
+    required String kind,
+    required String referer,
+    required String userAgent,
+  }) async {
+    Map<String, String> hdrs() => {
+          'User-Agent': userAgent,
+          if (referer.isNotEmpty) 'Referer': referer,
+          'Accept': '*/*',
+        };
+    try {
+      if (kind == 'hls') {
+        final r = await http
+            .get(Uri.parse(url), headers: hdrs())
+            .timeout(const Duration(seconds: 8));
+        if (r.statusCode != 200 && r.statusCode != 206) return false;
+        final body = r.body;
+        if (!body.contains('#EXTM3U')) return false;
+        // FairPlay / SAMPLE-AES / 自定义 WASM 解密：内置播不了
+        if (body.contains('SAMPLE-AES') ||
+            body.contains('skd://') ||
+            body.contains('streamingkeydelivery') ||
+            body.contains('METHOD=UNKNOWN')) {
+          return false;
+        }
+        // AES-128 标准 HLS 加密 ffmpeg 可直接解密（key 可访问时），放行
+        return true;
+      } else if (kind == 'dash') {
+        final r = await http
+            .get(Uri.parse(url), headers: hdrs())
+            .timeout(const Duration(seconds: 8));
+        if (r.statusCode != 200 && r.statusCode != 206) return false;
+        final body = r.body;
+        if (!body.contains('<MPD')) return false;
+        // 含 ContentProtection（Widevine/PlayReady/Marlin）= DRM
+        if (body.contains('ContentProtection')) return false;
+        return true;
+      } else if (kind == 'flv') {
+        final h = hdrs()..['Range'] = 'bytes=0-4095';
+        final r =
+            await http.get(Uri.parse(url), headers: h).timeout(
+                const Duration(seconds: 8));
+        if (r.statusCode != 200 && r.statusCode != 206) return false;
+        final ct = r.headers['content-type'] ?? '';
+        if (ct.contains('x-flv') || ct.contains('video-flv')) return true;
+        final b = r.bodyBytes;
+        // FLV 文件头：0x46 0x4C 0x56 ("FLV")
+        return b.length >= 3 && b[0] == 0x46 && b[1] == 0x4C && b[2] == 0x56;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 登记嗅探到的可直连流为「内置播放器播放」按钮的手动目标。
+  /// 网页频道一律先按网页方式播放，不自动接管；用户点按钮才切换
+  void offerSniffTarget({
+    required String url,
+    required String referer,
+    required String userAgent,
+  }) {
+    if (_sniffNativeActive || !_webPageActive) return;
+    _sniffTarget = _SniffTarget(url: url, referer: referer, ua: userAgent);
+    notifyListeners();
+  }
+
+  /// 把网页内 XHR/fetch 嗅探到的真实媒体流（m3u8/mpd/flv 等）
+  /// 交给内置原生播放器全屏播放（完整遥控器/进度/录制交互）。
+  /// 保留原网页频道的全部身份字段（id/tvgId/台名/台标/分类），
+  /// 左上角台名与右侧 EPG 节目单保持不变。
+  Future<void> playSniffedWebStream({
+    required String url,
+    required String referer,
+    String? userAgent,
+  }) async {
+    final web =
+        (_currentChannel != null && _currentChannel!.isWebPage)
+            ? _currentChannel
+            : null;
+    _lastWebChannel = web;
+    // 记住最近一个可直连嗅探目标：控制面板可在网页/内置间来回切换
+    _sniffTarget = _SniffTarget(
+      url: url,
+      referer: referer,
+      ua: (userAgent ?? '').trim(),
+    );
+    _sniffNativeActive = true;
+    exitWebPage();
+    const desktopUa =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    final ua = (userAgent != null && userAgent.trim().isNotEmpty)
+        ? userAgent.trim()
+        : desktopUa;
+    final Channel ch;
+    if (web != null) {
+      // 只换流地址与防盗链头，身份字段原样保留：EPG 按原 id/tvgId
+      // 匹配，左上角台名/台标不丢
+      ch = web.copyWith(
+        streamUrls: [url],
+        userAgent: ua,
+        httpReferer: referer,
+      );
+    } else {
+      ch = Channel(
+        id: 'sniff_${DateTime.now().millisecondsSinceEpoch}',
+        name: '网页视频',
+        streamUrls: [url],
+        categoryId: '',
+        userAgent: ua,
+        httpReferer: referer,
+      );
+    }
+    _sniffedFromWeb = true;
+    await playChannel(ch);
+  }
+
+  /// 嗅探流原生播放失败：标记本页放弃自动切换，提示并自动回退到
+  /// 原网页全屏继续观看
+  void _sniffPlaybackFailed() {
+    if (!_sniffedFromWeb) return;
+    _sniffedFromWeb = false;
+    _sniffNativeActive = false;
+    // 预检放行但原生仍解不了（自定义加密/鉴权失败）：切换按钮置灰，
+    // 回退网页后本页不再自动接管
+    _sniffTarget = null;
+    final web = _lastWebChannel;
+    if (web != null) _abandonedSniffWebUrl = web.webPageUrl;
+    OsdBus.show('内置播放器无法播放该流，已切回网页播放',
+        icon: Icons.language);
+    if (web != null) {
+      Future(() => _openWebPageChannel(web));
+    }
+  }
+
+  /// 换台/退出网页时复位网页录制状态（旧 WebView 销毁后 JS 上下文
+  /// 随之消失，无法再取回末尾分块，已落盘部分保留为可用文件）
+  void _resetWebRecording() {
+    if (!_isRecording || !_webPageActive) return;
+    _isRecording = false;
+    _recordPath = null;
+    _webRecDone = null;
+    _webRecBytes = 0;
+  }
+
+  /// 切换到上一个播放源（网页频道前台时 = 降一档清晰度）
+  Future<void> prevSource() async {
+    if (_webPageActive) {
+      cycleWebQuality(-1);
+      return;
+    }
+    if (!hasPrevSource) return;
+    _sourceIndex--;
+    await _playCurrentSource();
+  }
+
+  /// 切换到下一个播放源（网页频道前台时 = 升一档清晰度）
+  Future<void> nextSource() async {
+    if (_webPageActive) {
+      cycleWebQuality(1);
+      return;
+    }
+    if (!hasNextSource) return;
+    _sourceIndex++;
+    await _playCurrentSource();
+  }
+
+  /// 上一个频道
+  Future<void> previousChannel() => playAdjacentChannel(-1);
+
+  /// 下一个频道
+  Future<void> nextChannel() => playAdjacentChannel(1);
+
+  /// 按偏移量切换频道（跨分类、循环）
+  Future<void> playAdjacentChannel(int delta) async {
+    final all = [for (final cat in _categories) ...cat.channels];
+    if (all.isEmpty) return;
+    if (_currentChannel == null) {
+      await playChannel(all.first);
+      return;
+    }
+    final idx = all.indexWhere((c) => c.id == _currentChannel!.id);
+    if (idx < 0) {
+      await playChannel(all.first);
+      return;
+    }
+    final next = (idx + delta + all.length) % all.length;
+    await playChannel(all[next]);
+  }
+
+  // ==================== 频道序号（数字选台） ====================
+
+  /// 全部频道按播放列表顺序展平（序号 = 下标 + 1）
+  List<Channel> get flatChannels =>
+      [for (final cat in _categories) ...cat.channels];
+
+  /// 频道序号（1 起），不在列表中返回 null
+  int? channelNumberOf(Channel? ch) {
+    if (ch == null) return null;
+    final idx = flatChannels.indexWhere((c) => c.id == ch.id);
+    return idx < 0 ? null : idx + 1;
+  }
+
+  /// 当前频道序号（1 起）
+  int? get currentChannelNumber => channelNumberOf(_currentChannel);
+
+  /// 按序号跳台（1 起），序号无效时忽略
+  Future<void> playChannelByNumber(int number) async {
+    final all = flatChannels;
+    if (number < 1 || number > all.length) return;
+    await playChannel(all[number - 1]);
+  }
+
+  /// 播放当前频道的当前源；初始化失败时自动尝试下一个源。
+  /// 使用代际令牌防止并发调用（Stop→换片、快速切台）的迟到 initialize
+  /// 覆盖当前播放器。
+  Future<void> _playCurrentSource() async {
+    final channel = _currentChannel;
+    if (channel == null || channel.streamUrls.isEmpty) {
+      _state = PlayerState.error;
+      notifyListeners();
+      return;
+    }
+    if (_sourceIndex < 0 || _sourceIndex >= channel.streamUrls.length) {
+      _sourceIndex = 0;
+    }
+    final gen = ++_playGeneration;
+    _state = PlayerState.loading;
+    notifyListeners();
+
+    // 缓冲设置即时生效：每次起播前按当前设置重新注册 fvp 选项，
+    // 不必重启程序（registerWith 的全局选项对之后创建的播放器生效）。
+    // 投屏点播（非 HLS）给独立的 15 秒缓冲：旧值 90 秒意味着 seek 后
+    // 要攒够 90 秒的媒体数据才恢复播放——视频号等 CDN 远距 seek 后限速
+    // 下载，实测 90 秒都填不满（看门狗超时重建→重新缓冲→永远播不出来）。
+    // 15 秒兼顾抗抖动与恢复速度（mpv/Macast 同样是小缓冲即开播）。
+    // 投屏 HLS 直播在用户设置基础上封顶 10 秒：直播分片实时生成，
+    // 播放列表滑动窗口只有十来秒可下，目标缓冲比窗口还大物理上
+    // 永远填不满，接收端迟迟不进播放态，发送端 SDK 等不到就直接
+    // 断开投屏（实测缓冲设 20 秒后抖音投屏必掉）
+    final rawUrl = channel.streamUrls[_sourceIndex].toLowerCase();
+    final isHls = rawUrl.contains('.m3u8') || rawUrl.contains('.m3u');
+    var bufSecs = _settings.bufferSeconds;
+    if (_isCasting) {
+      if (isHls) {
+        if (bufSecs > 10) bufSecs = 10;
+      } else {
+        bufSecs = 15;
+      }
+    }
+    registerFvp(bufferSeconds: bufSecs);
+
+    await _disposeVideoController();
+
+    // 等待释放期间用户已切新台（新代已接管）：本代直接作废，
+    // 不再做预检/建播放器，避免慢源迟到后与新台两路并存
+    if (gen != _playGeneration) return;
+
+    // 频道声明的自定义 UA（M3U http-user-agent）：部分源（如 APTV）
+    // 必须带指定 UA，否则返回 404/广告。fvp 经 ffmpeg 透传 HTTP 头。
+    // 注意：不要给投屏 URL 主动补 UA/Referer——视频号 CDN 实测对
+    // 带微信 UA 的断点请求直接挂死（v1.0.131 实验证伪，已回滚）。
+    final headers = <String, String>{};
+    if (channel.userAgent.trim().isNotEmpty) {
+      headers['User-Agent'] = channel.userAgent.trim();
+    }
+    // 网页嗅探出的真实流普遍校验 Referer 防盗链
+    if (channel.httpReferer.trim().isNotEmpty) {
+      headers['Referer'] = channel.httpReferer.trim();
+    }
+
+    // ExoPlayer（安卓）不嗅探内容：live.php?id=... 这类脚本入口 302 跳到
+    // m3u8，没有后缀又没有显式 MIME 时会被当作 progressive 文件解析而失败。
+    // 依据后缀或轻量预检推断格式，通过 formatHint 让其选择正确的 MediaSource
+    var streamUrl = channel.streamUrls[_sourceIndex];
+    // 投屏点播经本地中转代理：mdk 对视频号 CDN 的 Range 断点请求会挂死
+    // （服务器接受但永不回数据，mpv 无此问题）。代理保证每请求全新连接
+    // + 停滞 15 秒断开/重试，配合 avio.reconnect 实现 mpv 式断点续传。
+    // HLS 不走代理（m3u8 分片相对路径会破）。
+    if (_isCasting && !isHls) {
+      final proxied = await CastStreamProxy.instance.wrapUrl(streamUrl);
+      if (proxied != null) {
+        CastLog.write(
+            'cast proxy: ${Uri.parse(streamUrl).host} -> 127.0.0.1');
+        streamUrl = proxied;
+      }
+    }
+    final path = (Uri.tryParse(streamUrl)?.path ?? '').toLowerCase();
+    final segName = path.split('/').isEmpty ? '' : path.split('/').last;
+    final dotIdx = segName.lastIndexOf('.');
+    final ext = dotIdx >= 0 ? segName.substring(dotIdx + 1) : '';
+    const knownMediaExt = {
+      'mp4', 'mkv', 'avi', 'flv', 'ts', 'mov', 'wmv', 'm4v', 'webm', 'mpg',
+      'mpeg', '3gp', 'rmvb', 'rm', 'mp3', 'aac', 'flac', 'ogg', 'wav', 'mka',
+    };
+    VideoFormat? formatHint;
+    if (ext == 'm3u8' || ext == 'm3u') {
+      formatHint = VideoFormat.hls;
+    } else if (ext == 'mpd') {
+      formatHint = VideoFormat.dash;
+    } else if (!knownMediaExt.contains(ext)) {
+      // 后缀无法识别（php/html/无后缀等）：预检拿真实 Content-Type
+      final fmt =
+          await inferStreamFormat(url: streamUrl, headers: headers);
+      formatHint = fmt == 'hls'
+          ? VideoFormat.hls
+          : (fmt == 'dash' ? VideoFormat.dash : null);
+    }
+
+    // 慢源预检/代理等待期间用户已切新台：本代作废，不再创建播放器。
+    // 关键防并存点——否则迟到的旧代会覆盖 _videoController，出现
+    // 新台前播、旧台后台出声的双路直播
+    if (gen != _playGeneration) return;
+
+    final c = VideoPlayerController.networkUrl(
+      Uri.parse(streamUrl),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+      formatHint: formatHint,
+      // video_player 2.8.x 该参数为非空 Map（默认空）；空 map 时
+      // fvp 不会设置 avio.headers，与不传等价
+      httpHeaders: headers,
+    );
+    // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
+    final closure = () => _onVideoListener(c);
+    c.addListener(closure);
+    // 关键：initialize 完成前绝不能把 c 挂到 _videoController。
+    // 4K 等高码率台 initialize 很慢，用户此时切台会进入
+    // _disposeVideoController，对仍在初始化的实例调 pause/dispose，
+    // 与 fvp 原生初始化并发 → flutter_windows.dll 0xc0000409 崩溃
+    // （实测必现：浙江卫视 4K → 湖南卫视）
+
+    // 起播超时：
+    // - 普通频道按用户设置（默认 5 秒，超时自动切下一个源）
+    // - 投屏只有一个地址且没有备用源，HLS 跨网慢时给 45 秒，
+    //   其它流 15 秒（与投屏重试逻辑配合）
+    final Duration initTimeout;
+    if (_isCasting) {
+      initTimeout =
+          isHls ? const Duration(seconds: 45) : const Duration(seconds: 15);
+    } else {
+      initTimeout =
+          Duration(seconds: _settings.sourceTimeoutSeconds.clamp(3, 60));
+    }
+
+    // 代际已过期：静默移除监听并丢弃结果（controller 已被新代 dispose）
+    void discardLate() {
+      try {
+        c.removeListener(closure);
+      } catch (_) {}
+      // 必须真正释放：只移除监听会泄漏整个 native 播放器。
+      // 注意必须串行且不并发：fvp 对同一播放器同时调 pause/dispose
+      // 会直接崩溃（0xc0000409，快速切台时旧代迟到即命中此路径）
+      Future<void>(() async {
+        try {
+          await c.pause().timeout(const Duration(seconds: 1));
+        } catch (_) {
+          return; // 内核卡死：不再触碰该实例
+        }
+        try {
+          await c.dispose().timeout(const Duration(seconds: 3));
+        } catch (_) {}
+      });
+    }
+
+    try {
+      // 加超时：流地址失效或后端不支持时显示"播放失败"，避免永远转圈
+      await c.initialize().timeout(initTimeout);
+      if (gen != _playGeneration) {
+        discardLate();
+        return;
+      }
+      // initialize 完成、代际仍有效：此时才接管为当前播放器，
+      // 后续切台对它的释放不会与初始化并发
+      _videoController = c;
+      _videoListenerClosure = closure;
+      await c.setLooping(false);
+      await c.play();
+      await WakelockPlus.enable();
+
+      _state = PlayerState.playing;
+      // 起播成功：清错误提示与挂起的自动重试
+      _lastError = null;
+      _autoRetryTimer?.cancel();
+      _autoRetryTimer = null;
+      // 嗅探流起播成功：清回退标记
+      _sniffedFromWeb = false;
+      // 记录当前频道，下次启动时恢复。网页嗅探接管时保存的是原网页
+      // 频道（webview://），而不是带时效 token 的嗅探流地址
+      if (_lastWebChannel != null && _currentChannel?.id == _lastWebChannel!.id) {
+        await _saveLastChannel(channel: _lastWebChannel);
+      } else {
+        await _saveLastChannel();
+      }
+    } on TimeoutException {
+      if (gen != _playGeneration) {
+        discardLate();
+        return;
+      }
+      // initialize 超时只是 Dart 侧放弃等待，底层初始化/解码仍在进行。
+      // 此时绝不能 pause/dispose——与在途初始化并发会让 fvp 直接崩溃
+      // （0xc0000409）。该实例既不接管也不释放，任其自然结束
+      debugPrint('源 ${_sourceIndex + 1}/$sourceCount 初始化超时');
+      if (_isCasting) {
+        // 投屏首拉偶发"音频已通、视频尺寸迟迟不上报"导致 initialize 超时：
+        // 用同一 URL 原地重拉一次，仍失败再走备用源/报错
+        if (!_castInitRetried) {
+          _castInitRetried = true;
+          await _playCurrentSource();
+          return;
+        }
+      }
+      // 自动尝试下一个源
+      if (hasNextSource) {
+        _sourceIndex++;
+        await _playCurrentSource();
+        return;
+      }
+      if (_isCasting) {
+        // 投屏最终失败：清空 DLNA 媒体状态，发送端轮询会发现无媒体，
+        // 不再一直显示"已连接"或等待
+        dlnaService.clearCurrentMedia();
+      }
+      if (_sniffedFromWeb) {
+        _sniffPlaybackFailed();
+        return;
+      }
+      // 所有源都失败：按设置自动重试，次数用尽判定链接失效
+      _enterErrorOrRetry();
+    } catch (e) {
+      if (gen != _playGeneration) {
+        discardLate();
+        return;
+      }
+      // initialize 抛错（非超时）：实例已结束，可安全释放，避免泄漏
+      if (!identical(c, _videoController)) discardLate();
+      debugPrint('源 ${_sourceIndex + 1}/$sourceCount 播放失败: $e');
+      // 自动尝试下一个源
+      if (hasNextSource) {
+        _sourceIndex++;
+        await _playCurrentSource();
+        return;
+      }
+      if (_isCasting) {
+        dlnaService.clearCurrentMedia();
+      }
+      if (_sniffedFromWeb) {
+        _sniffPlaybackFailed();
+        return;
+      }
+      _enterErrorOrRetry();
+    }
+    notifyListeners();
+  }
+
+  void _onVideoListener(VideoPlayerController self) {
+    // 只处理当前 controller 的事件，旧实例的迟到事件一律忽略
+    if (!identical(self, _videoController)) return;
+    final v = self.value;
+    if (v.hasError) {
+      if (_isCasting) {
+        // 投屏只有一个源，出错基本意味着流真的断了（直播间关播/CDN 掐流）。
+        // 直接切回投屏前频道，比停在 error 等用户手动操作体验好。
+        stopCastAndRestore();
+        return;
+      }
+      // 播放中途出错且有备用源时自动切换
+      if (hasNextSource) {
+        nextSource();
+        return;
+      }
+      if (_sniffedFromWeb) {
+        _sniffPlaybackFailed();
+        return;
+      }
+      // 播放中途出错且无备用源：按设置自动重试，次数用尽判定链接失效
+      _enterErrorOrRetry();
+      return;
+    }
+    // 投屏点播内容正常播完：状态切到 ended（DLNA 上报 STOPPED），
+    // 发送端据此知道视频结束。之后按「投屏播完后」设置处理：
+    // 0=立即切回直播；N 秒=等待连播（电视剧下一集），超时才切回；
+    // -1=一直等待新投屏或用户手动切台/断开。
+    if (_isCasting &&
+        v.isCompleted &&
+        _state == PlayerState.playing) {
+      _state = PlayerState.ended;
+      notifyListeners();
+      _castEndedTimer?.cancel();
+      final wait = _settings.castEndWaitSeconds;
+      if (wait < 0) {
+        // 一直等待：停在本片结束画面（DLNA 已上报 STOPPED），
+        // 新投屏到来会被 playCastUrl 直接接管
+        OsdBus.show('投屏已播完，等待下一条投屏…', icon: Icons.cast);
+      } else {
+        _castEndedTimer = Timer(Duration(seconds: wait), () {
+          _castEndedTimer = null;
+          if (_isCasting && _state == PlayerState.ended) {
+            stopCastAndRestore();
+          }
+        });
+      }
+    }
+  }
+
+  /// 播放/暂停切换
+  Future<void> togglePlayPause() async {
+    // 网页频道：通过 JS 控制页面内主 <video>（含同源 iframe）
+    if (_webPageActive) {
+      final eval = _webEval;
+      if (eval == null) return;
+      try {
+        final r = await eval(_webToggleJs);
+        // '1' = 切换后已暂停，'0' = 播放中，'2' = 无可见视频（忽略）
+        final s = r?.toString();
+        if (s == '0' || s == '1') setWebPlaying(s == '0');
+      } catch (_) {}
+      return;
+    }
+    if (_videoController == null || !_videoController!.value.isInitialized) {
+      return;
+    }
+    if (_videoController!.value.isPlaying) {
+      await _videoController!.pause();
+      _state = PlayerState.paused;
+    } else {
+      await _videoController!.play();
+      _state = PlayerState.playing;
+    }
+    notifyListeners();
+  }
+
+  /// 设置音量 (0.0 - 1.0)
+  Future<void> setVolume(double value) async {
+    _volume = value.clamp(0.0, 1.0);
+    // 音量被外部调大时自动解除静音标记
+    if (_volume > 0.01) _isMuted = false;
+    if (_webPageActive) {
+      // 网页频道：只写页面 video 音量。系统音量与 WebView2 子进程
+      // 音频叠加会造成双重衰减；且不动系统音量，不影响其它程序
+      _applyWebVolume();
+    } else {
+      try {
+        await VolumeController.instance.setVolume(_volume);
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
+  /// 把当前音量/静音状态写入页面内所有 video（递归同源 iframe）
+  void _applyWebVolume() {
+    final eval = _webEval;
+    if (eval == null) return;
+    final v = _volume.toStringAsFixed(3);
+    final m = _volume <= 0.01 ? 'true' : 'false';
+    eval('(function(){window.__omVol=$v;'
+        'function av(root){var out=Array.prototype.slice.call('
+        'root.querySelectorAll("video"));var f=root.querySelectorAll("iframe");'
+        'for(var i=0;i<f.length;i++){try{var d=f[i].contentDocument;'
+        'if(d)out=out.concat(av(d));}catch(e){}}return out;}'
+        'var vs=av(document);for(var i=0;i<vs.length;i++){'
+        'try{vs[i].volume=$v;vs[i].muted=$m;}catch(e){}}})();');
+  }
+
+  /// 静音/恢复（M 键）
+  Future<void> toggleMute() async {
+    if (_isMuted) {
+      _isMuted = false;
+      // 恢复到静音前的音量；之前音量接近 0 则恢复默认
+      final restore = _volumeBeforeMute <= 0.01 ? 0.8 : _volumeBeforeMute;
+      await setVolume(restore);
+    } else {
+      _volumeBeforeMute = _volume;
+      _isMuted = true;
+      await setVolume(0.0);
+    }
+    notifyListeners();
+  }
+
+  /// 设置指定静音状态（DLNA 发送端调用，与当前状态相同则不动作）
+  Future<void> setMuted(bool muted) async {
+    if (_isMuted == muted) return;
+    await toggleMute();
+  }
+
+  /// 设置亮度 (0.0 - 1.0)
+  Future<void> setBrightness(double value) async {
+    _brightness = value.clamp(0.0, 1.0);
+    // Windows 桌面（非网页）：原生亮度走 gamma ramp，台式机/外接显示器
+    // 普遍不支持（调了没反应）；改由播放页黑色遮罩压暗视频画面，
+    // 这里跳过原生接口避免双重压暗
+    final skipNative = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.windows &&
+        !_webPageActive;
+    if (!skipNative) {
+      try {
+        await ScreenBrightness.instance
+            .setApplicationScreenBrightness(_brightness);
+      } catch (_) {}
+    }
+    // 网页频道：WebView2 原生 HWND 不受系统亮度影响，用 CSS filter 调光
+    if (_webPageActive) _applyWebBrightness();
+    notifyListeners();
+  }
+
+  /// 网页频道：把亮度写入所有 video 的 CSS filter
+  void _applyWebBrightness() {
+    final eval = _webEval;
+    if (eval == null) return;
+    final b = _brightness.toStringAsFixed(3);
+    eval('(function(){function av(root){var out=Array.prototype.slice.call('
+        'root.querySelectorAll("video"));var f=root.querySelectorAll("iframe");'
+        'for(var i=0;i<f.length;i++){try{var d=f[i].contentDocument;'
+        'if(d)out=out.concat(av(d));}catch(e){}}return out;}'
+        'var vs=av(document);for(var i=0;i<vs.length;i++){'
+        'try{vs[i].style.filter="brightness(" + $b + ")";}catch(e){}}})();');
+  }
+
+  /// 调节音量增量
+  Future<void> adjustVolume(double delta) async {
+    await setVolume(_volume + delta * _settings.gestureSensitivity);
+  }
+
+  /// 调节亮度增量
+  Future<void> adjustBrightness(double delta) async {
+    await setBrightness(_brightness + delta * _settings.gestureSensitivity);
+  }
+
+  /// 切换全屏（仅桌面端）
+  Future<void> toggleFullscreen() async {
+    if (!isDesktop) return;
+    // 小窗状态下按 F/F11 或双击画面：全屏没有意义（窗口只有 420×236），
+    // 先恢复原窗口，避免 miniWindow 与全屏状态并存
+    // （否则全屏后左上角仍挂着「恢复窗口」按钮、双击又变成缩窗）
+    if (_miniWindow) {
+      await toggleMiniWindow();
+      return;
+    }
+    _isFullscreen = !_isFullscreen;
+    await windowManager.setFullScreen(_isFullscreen);
+    await _applyAlwaysOnTop();
+    if (!_isFullscreen) {
+      // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
+      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+    }
+    notifyListeners();
+  }
+
+  /// 若当前处于全屏则退出全屏（用于返回键/ESC）
+  Future<bool> exitFullscreenIfNeeded() async {
+    if (!_isFullscreen) return false;
+    _isFullscreen = false;
+    await windowManager.setFullScreen(false);
+    await _applyAlwaysOnTop();
+    // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
+    await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+    notifyListeners();
+    return true;
+  }
+
+  // ==================== 锁定 / 小窗 / 重载 ====================
+
+  /// 频道锁定：屏蔽遥控器误触。锁定期间除「返回键」/ L 键解锁外，
+  /// 切台、切源、播放控制、打开面板全部忽略
+  bool _locked = false;
+  bool get locked => _locked;
+
+  void toggleLock() {
+    _locked = !_locked;
+    OsdBus.show(_locked ? '已锁定，按返回键或 L 键解锁' : '已解锁',
+        icon: _locked ? Icons.lock : Icons.lock_open);
+    notifyListeners();
+  }
+
+  void unlock() {
+    if (!_locked) return;
+    _locked = false;
+    OsdBus.show('已解锁', icon: Icons.lock_open);
+    notifyListeners();
+  }
+
+  /// 小窗播放（仅桌面端）：窗口缩成 420×236 并置顶，再点一次恢复原尺寸
+  bool _miniWindow = false;
+  bool get miniWindow => _miniWindow;
+  Size _sizeBeforeMini = const Size(1280, 720);
+
+  Future<void> toggleMiniWindow() async {
+    if (!isDesktop) return;
+    _miniWindow = !_miniWindow;
+    try {
+      if (_miniWindow) {
+        // 全屏时任务栏被盖住、无法操作小窗，先退出全屏；
+        // 最大化状态下 Windows 会忽略 setSize（窗口仍铺满），也先还原
+        if (await windowManager.isFullScreen()) {
+          _isFullscreen = false;
+          await windowManager.setFullScreen(false);
+          await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+        }
+        if (await windowManager.isMaximized()) {
+          await windowManager.unmaximize();
+        }
+        _sizeBeforeMini = await windowManager.getSize();
+        await windowManager.setAlwaysOnTop(true);
+        await windowManager.setSize(const Size(420, 236));
+      } else {
+        await windowManager.setSize(_sizeBeforeMini);
+        await _applyAlwaysOnTop();
+      }
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// 网页频道重载序号：每次重载 +1，播放页据此重建网页控件（页面重新加载）
+  int _webReloadSerial = 0;
+  int get webReloadSerial => _webReloadSerial;
+
+  /// 当前频道的自动重载次数（网页卡死看门狗用，换频道清零）
+  int _autoReloadCount = 0;
+  int get autoReloadCount => _autoReloadCount;
+
+  void markAutoReload() => _autoReloadCount++;
+
+  /// 重载当前频道：网页频道整页重新载入（站点脚本随后按频道名重新点台），
+  /// 直播流频道从第一个源重新播放。底部面板「重载」按钮与网页卡死
+  /// 看门狗都走这里
+  Future<void> reloadCurrentChannel() async {
+    final channel = _currentChannel;
+    if (channel == null) return;
+    // 投屏接收中：播放会话由发送端控制，本地重载只会与发送端进度
+    // 脱钩，直接忽略（投屏卡顿由投屏看门狗自愈，或发送端重新推流）
+    if (_isCasting) return;
+    OsdBus.show('正在重载「${channel.name}」', icon: Icons.refresh);
+    if (_webPageActive) {
+      _webReloadSerial++;
+      setWebForeground(false);
+      _webPlaying = false;
+      notifyListeners();
+      return;
+    }
+    _sourceIndex = 0;
+    await _playCurrentSource();
+  }
+
+  /// 播放失败统一入口：「失败自动重载」开启且次数未用尽时，3 秒后自动
+  /// 重载当前频道（从第一个源重新拉流，与手动点「重载」一致）；
+  /// 次数用尽仍失败则判定链接失效，停留错误页等用户手动处理。
+  /// 与网页频道卡死自动重载共用同一开关与次数（autoReloadStall/retryTimes）
+  void _enterErrorOrRetry() {
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    final total = _settings.retryTimes;
+    if (_settings.autoReloadStall &&
+        total > 0 &&
+        _autoReloadCount < total &&
+        _currentChannel != null &&
+        !_isCasting) {
+      _autoReloadCount++;
+      final n = _autoReloadCount;
+      _state = PlayerState.error;
+      _lastError = '3 秒后自动重试（第 $n/$total 次）…';
+      notifyListeners();
+      final ch = _currentChannel;
+      _autoRetryTimer = Timer(const Duration(seconds: 3), () {
+        _autoRetryTimer = null;
+        // 期间用户已切台/手动重试/开始投屏：放弃本次自动重试
+        if (!identical(_currentChannel, ch) ||
+            _state != PlayerState.error ||
+            _isCasting) {
+          return;
+        }
+        _sourceIndex = 0;
+        _playCurrentSource();
+      });
+      return;
+    }
+    _state = PlayerState.error;
+    _lastError = _autoReloadCount > 0
+        ? '链接失效：已自动重试 $_autoReloadCount 次仍无法播放，请更换频道或检查直播源'
+        : null;
+    notifyListeners();
+  }
+
+  // ==================== 设置持久化 ====================
+
+  static const _kAutoPlayNext = 'settings_auto_play_next';
+  static const _kSensitivity = 'settings_sensitivity';
+  static const _kAutoHide = 'settings_auto_hide';
+  static const _kLaunchAtStartup = 'settings_launch_at_startup';
+  static const _kStartFullscreen = 'settings_start_fullscreen';
+  static const _kShowClock = 'settings_show_clock';
+  static const _kAlwaysOnTop = 'settings_always_on_top';
+  static const _kDlnaEnabled = 'settings_dlna_enabled';
+  static const _kDefaultVolume = 'settings_default_volume';
+  static const _kDefaultBrightness = 'settings_default_brightness';
+  static const _kSourceTimeout = 'settings_source_timeout_seconds';
+  static const _kBufferSeconds = 'settings_buffer_seconds';
+  static const _kUiScale = 'settings_ui_scale';
+  static const _kUiScaleAuto = 'settings_ui_scale_auto';
+  static const _kRemoteAdmin = 'settings_remote_admin';
+  static const _kWebEnabled = 'settings_web_enabled';
+  static const _kAutoReloadStall = 'settings_auto_reload_stall';
+  static const _kRetryTimes = 'settings_retry_times';
+  static const _kCastEndWait = 'settings_cast_end_wait_seconds';
+  static const _kFavoriteChannelIds = 'omplayer_favorite_channel_ids';
+
+  Future<void> _loadSettings() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      _settings = PlayerSettings(
+        autoPlayNext: p.getBool(_kAutoPlayNext) ?? true,
+        gestureSensitivity: p.getDouble(_kSensitivity) ?? 1.0,
+        autoHideDelay: p.getInt(_kAutoHide) ?? 3000,
+        launchAtStartup: p.getBool(_kLaunchAtStartup) ?? false,
+        startFullscreen: p.getBool(_kStartFullscreen) ?? false,
+        showClock: p.getBool(_kShowClock) ?? false,
+        // 置顶默认开：避免窗口失焦后快捷键失灵
+        alwaysOnTop: p.getBool(_kAlwaysOnTop) ?? true,
+        dlnaEnabled: p.getBool(_kDlnaEnabled) ?? true,
+        defaultVolume: p.getDouble(_kDefaultVolume) ?? 0.8,
+        defaultBrightness: p.getDouble(_kDefaultBrightness) ?? 0.8,
+        sourceTimeoutSeconds: p.getInt(_kSourceTimeout) ?? 5,
+        bufferSeconds: p.getInt(_kBufferSeconds) ?? 5,
+        uiScale: p.getDouble(_kUiScale) ?? 1.0,
+        uiScaleAuto: p.getBool(_kUiScaleAuto) ?? true,
+        remoteAdminEnabled: p.getBool(_kRemoteAdmin) ?? true,
+        webEnabled: p.getBool(_kWebEnabled) ?? true,
+        autoReloadStall: p.getBool(_kAutoReloadStall) ?? true,
+        retryTimes: p.getInt(_kRetryTimes) ?? 3,
+        castEndWaitSeconds: p.getInt(_kCastEndWait) ?? 5,
+      );
+      _favoriteChannelIds
+        ..clear()
+        ..addAll(p.getStringList(_kFavoriteChannelIds) ?? const <String>[]);
+      // 同步独立时钟通知器的初值
+      clockVisible.value = _settings.showClock;
+    } catch (_) {}
+  }
+
+  Future<void> _saveSettings() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kAutoPlayNext, _settings.autoPlayNext);
+      await p.setDouble(_kSensitivity, _settings.gestureSensitivity);
+      await p.setInt(_kAutoHide, _settings.autoHideDelay);
+      await p.setBool(_kLaunchAtStartup, _settings.launchAtStartup);
+      await p.setBool(_kStartFullscreen, _settings.startFullscreen);
+      await p.setBool(_kShowClock, _settings.showClock);
+      await p.setBool(_kAlwaysOnTop, _settings.alwaysOnTop);
+      await p.setBool(_kDlnaEnabled, _settings.dlnaEnabled);
+      await p.setDouble(_kDefaultVolume, _settings.defaultVolume);
+      await p.setDouble(_kDefaultBrightness, _settings.defaultBrightness);
+      await p.setInt(_kSourceTimeout, _settings.sourceTimeoutSeconds);
+      await p.setInt(_kBufferSeconds, _settings.bufferSeconds);
+      await p.setDouble(_kUiScale, _settings.uiScale);
+      await p.setBool(_kUiScaleAuto, _settings.uiScaleAuto);
+      await p.setBool(_kRemoteAdmin, _settings.remoteAdminEnabled);
+      await p.setBool(_kWebEnabled, _settings.webEnabled);
+      await p.setBool(_kAutoReloadStall, _settings.autoReloadStall);
+      await p.setInt(_kRetryTimes, _settings.retryTimes);
+      await p.setInt(_kCastEndWait, _settings.castEndWaitSeconds);
+    } catch (_) {}
+  }
+
+  /// 启动时进入全屏（仅在程序启动时由播放器界面调用一次）。
+  /// 必须等窗口与 Flutter 首帧布局稳定后再延迟执行，否则在窗口显示
+  /// 瞬间切全屏会出现白屏方块+黑边、视频纹理不渲染（只有声音）。
+  /// 直接读持久化值，避免与 _loadSettings() 的异步加载竞态。
+  Future<void> applyStartupFullscreen() async {
+    if (!isDesktop) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      final want = p.getBool(_kStartFullscreen) ?? false;
+      if (!want) {
+        _isFullscreen = false;
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      final already = await windowManager.isFullScreen();
+      if (!already) {
+        await windowManager.setFullScreen(true);
+      }
+      _isFullscreen = true;
+      await _applyAlwaysOnTop();
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// 更新设置并持久化（开机启动项会同步到系统）
+  void updateSettings(PlayerSettings settings) {
+    final launchChanged = settings.launchAtStartup != _settings.launchAtStartup;
+    final topChanged = settings.alwaysOnTop != _settings.alwaysOnTop;
+    final dlnaChanged = settings.dlnaEnabled != _settings.dlnaEnabled;
+    final qualityChanged =
+        settings.preferredQuality != _settings.preferredQuality;
+    final remoteAdminChanged =
+        settings.remoteAdminEnabled != _settings.remoteAdminEnabled;
+    final webChanged = settings.webEnabled != _settings.webEnabled;
+    _settings = settings;
+    _saveSettings();
+    if (launchChanged && isDesktop) {
+      setAutoLaunchEnabled(settings.launchAtStartup);
+    }
+    if (topChanged && isDesktop) {
+      _applyAlwaysOnTop();
+    }
+    if (dlnaChanged) {
+      if (settings.dlnaEnabled) {
+        _startDlna();
+      } else {
+        _stopDlna();
+      }
+    }
+    if (remoteAdminChanged) {
+      if (settings.remoteAdminEnabled) {
+        _startRemoteAdmin();
+      } else {
+        _stopRemoteAdmin();
+      }
+    }
+    if (webChanged) {
+      if (settings.webEnabled) {
+        // 打开：按需创建 WebView2 运行时环境（启动时关闭过则此时才创建）
+        initWebViewEnvironment();
+      } else if (_webPageActive) {
+        exitWebPage();
+      }
+    }
+    if (qualityChanged) {
+      // 网页频道：画质偏好变化 → 重算默认档位并立即下发给站点播放器
+      _webQualityIndex = _webQualityIndexFromPref(webQualityLevels);
+      _applyWebQuality();
+      Timer(const Duration(seconds: 2), _applyWebQuality);
+    }
+    notifyListeners();
+  }
+
+  /// 单独切换「显示时间」。
+  ///
+  /// 时钟的显隐走独立的 [clockVisible]，只通知时钟本身，不调用
+  /// [notifyListeners]——因此切换时整棵播放 Stack 不会重建。旧实现复用
+  /// updateSettings，反复切换会反复整树重建，导致画面出现灰死。
+  void setShowClock(bool value) {
+    if (_settings.showClock == value) return;
+    _settings = _settings.copyWith(showClock: value);
+    _saveSettings();
+    clockVisible.value = value;
+  }
+
+  /// 应用窗口置顶设置（全屏时强制置顶，退出全屏后按设置恢复）
+  Future<void> _applyAlwaysOnTop() async {
+    if (!isDesktop) return;
+    try {
+      await windowManager
+          .setAlwaysOnTop(_isFullscreen ? true : _settings.alwaysOnTop);
+    } catch (_) {}
+  }
+
+  // ==================== EPG & 节目信息 ====================
+
+  /// 获取当前频道的 EPG（无真实数据时返回空，不使用模拟数据）
+  List<EpgProgram> getCurrentEpg() {
+    if (_currentChannel == null) return [];
+    return sourceManager.getProgramsForChannel(_currentChannel!);
+  }
+
+  /// 当前正在播放的节目
+  EpgProgram? get currentProgram {
+    final now = DateTime.now();
+    for (final p in getCurrentEpg()) {
+      if (now.isAfter(p.startTime) && now.isBefore(p.endTime)) return p;
+    }
+    return null;
+  }
+
+  /// 指定频道当前正在播出的节目名（无 EPG 数据时返回空串）。
+  /// 左侧频道列表用它显示每路的"正在播"小字
+  String currentProgramTitleFor(Channel channel) {
+    final now = DateTime.now();
+    for (final p in sourceManager.getProgramsForChannel(channel)) {
+      if (now.isAfter(p.startTime) && now.isBefore(p.endTime)) return p.title;
+    }
+    return '';
+  }
+
+  /// 即将播放的下一个节目
+  EpgProgram? get nextProgram {
+    final now = DateTime.now();
+    for (final p in getCurrentEpg()) {
+      if (p.startTime.isAfter(now)) return p;
+    }
+    return null;
+  }
+
+  /// 当前频道台标（M3U tvg-logo 或 EPG icon），无则空串
+  String get currentLogo =>
+      _currentChannel == null ? '' : sourceManager.getLogoForChannel(_currentChannel!);
+
+  /// 视频分辨率文字，如 "1280 × 720"
+  String get resolutionText {
+    final vc = _videoController;
+    if (vc == null || !vc.value.isInitialized) return '';
+    final w = vc.value.size.width.round();
+    final h = vc.value.size.height.round();
+    if (w <= 0 || h <= 0) return '';
+    return '$w × $h';
+  }
+
+  /// fvp 对直播流上报的时长极大（double.maxFinite 微秒 ≈ 9.2e18 秒），
+  /// 远超任何真实点播。用"超过 1 天"判定，避免在 web 下使用无法被 JS
+  /// 精确表示的大整数字面量导致编译失败。
+  static bool _isLiveDuration(Duration d) => d.inSeconds > 86400;
+
+  /// 是否为可拖动进度的点播（非直播流）
+  bool get isSeekable {
+    final vc = _videoController;
+    if (vc == null || !vc.value.isInitialized) return false;
+    final d = vc.value.duration;
+    // 直播（时长极大）或未知（时长<=0）一律不可拖动
+    if (d <= Duration.zero || _isLiveDuration(d)) return false;
+    // DLNA 投屏推送的是独立媒体文件：只要时长已知且有限就显示进度条。
+    // 视频号/腾讯视频的 stodownload 链接没有文件后缀，旧逻辑用">10 分钟"兜底，
+    // 导致几分钟的短视频不显示进度条
+    if (_isCasting) return true;
+    final raw = _currentChannel?.streamUrls[_sourceIndex] ?? '';
+    final path = raw.toLowerCase().split('?').first;
+    if (path.startsWith('rtmp') || path.startsWith('rtsp')) return false;
+    if (RegExp(r'\.(mp4|mkv|avi|mov|m4v|webm|flv)$').hasMatch(path)) {
+      return true;
+    }
+    // HLS/TS 通常是直播；时长超过 10 分钟的视为点播
+    if (path.endsWith('.m3u8') ||
+        path.endsWith('.m3u') ||
+        path.endsWith('.ts')) {
+      return d.inSeconds > 600;
+    }
+    return d.inSeconds > 600;
+  }
+
+  Duration get position => _videoController?.value.position ?? Duration.zero;
+  Duration get duration {
+    final d = _videoController?.value.duration ?? Duration.zero;
+    // 对 UI 隐藏 fvp 直播标记/未知时长，避免 Slider 拿到天文数字时长
+    return (d <= Duration.zero || _isLiveDuration(d)) ? Duration.zero : d;
+  }
+
+  Future<void> seekTo(Duration position) async {
+    // 直播/时长未知的投屏流不支持 seek：部分发送端（微信视频号等）会
+    // 周期性下发 Seek 做进度同步，对 HTTP-FLV/HLS 直播执行 seek 会把
+    // 播放内核挂起（画面永久卡死），直接忽略
+    final rawDur = _videoController?.value.duration ?? Duration.zero;
+    if (_isCasting &&
+        (rawDur <= Duration.zero || _isLiveDuration(rawDur))) {
+      CastLog.write(
+          'seekTo(${position.inSeconds}s) IGNORED rawDur=${rawDur.inSeconds}s (live/unknown)');
+      return;
+    }
+    CastLog.write('seekTo(${position.inSeconds}s) dur=${rawDur.inSeconds}s');
+    await _videoController?.seekTo(position);
+    CastLog.write('seekTo(${position.inSeconds}s) done pos=${_videoController?.value.position.inSeconds}s');
+    // seek 后位置会立即变化，重置看门狗观察计时，避免误判为卡顿
+    _watchPosMs = -1;
+    _watchAdvanceAt = null;
+    _stallNudged = false;
+    _lastBufferedEndMs = -1;
+    // 长视频 seek 到远处后播放内核要重新发起 Range 请求缓冲。
+    // 宽限期 30 秒：覆盖 CDN 断点请求的响应死寂（实测 10~25 秒）。
+    // 宽限期内既不判 stall 也不累积 buffering 超时；下载在推进时另有
+    // 缓冲增长豁免（见 _checkCastStall），慢速下载不受影响。
+    _seekGraceUntil = DateTime.now().add(const Duration(seconds: 30));
+    notifyListeners();
+  }
+
+  /// 投屏卡顿看门狗（500ms 一次）。
+  ///
+  /// 点播 seek 后下载【完全停滞】（缓冲零增长满 30 秒）时，重建内核换
+  /// 全新连接并从最后确认可播的位置（[_lastGoodPosMs]）恢复——CDN 挂死了
+  /// seek 目标的 Range 请求，恢复到那里必然再次挂死（同一内核上直接
+  /// seek 也会被拖进永久缓冲，必须重建）。回退性重建后仍停滞才断开。
+  /// 整场投屏【只重建一次】（[_castReinitDone] 统一守门，所有路径共用）：
+  /// - 未重建：位置 12 秒不推进先 play() 轻推，25 秒仍不动则重建；
+  ///   seek 宽限期结束后 buffering 再持续 30 秒则软回退/重建（宽限期内
+  ///   长视频远距 seek 的缓冲不计时）；有声无画 8 秒则重建
+  /// - 已重建：再卡/再缓冲 20 秒即判定流不可恢复，断开并恢复投屏前频道
+  void _checkCastStall() {
+    if (!_isCasting) return;
+    // 「恢复投屏前频道」的 800ms 延迟已在途时不再做任何检测/触发，
+    // 否则重复调用会把恢复 timer 无限重置（表现为几十秒无法真正断开）
+    if (_castRestoreTimer != null) return;
+    final vc = _videoController;
+    if (vc == null) return;
+    final now = DateTime.now();
+    final v = vc.value;
+
+    // initialize 尚未完成时不做任何判定
+    if (!v.isInitialized) return;
+
+    final posMs = v.position.inMilliseconds;
+    final isBuf = v.isBuffering;
+    final vw = v.size.width.toInt();
+    final vh = v.size.height.toInt();
+    final noVideo = vw <= 0 || vh <= 0;
+
+    // buffering 持续计时。两条豁免规则：
+    // 1. 已缓冲末尾仍在增长 = 下载在推进只是慢（长视频远距 seek 后 CDN
+    //    限速下载），不断刷新计时基准，只要在下就不判卡死；
+    // 2. seek 宽限期内缓冲不计时（见 seekTo）。
+    // 若 buffered 上报为空（部分平台），bufEnd 恒 0 不触发豁免，退化为
+    // 原来的固定超时判定，行为不回归。
+    final inSeekGrace =
+        _seekGraceUntil != null && now.isBefore(_seekGraceUntil!);
+    if (isBuf) {
+      var bufEnd = 0;
+      for (final r in v.buffered) {
+        if (r.end.inMilliseconds > bufEnd) bufEnd = r.end.inMilliseconds;
+      }
+      if (bufEnd > _lastBufferedEndMs) {
+        _lastBufferedEndMs = bufEnd;
+        _bufferingSince = now;
+      } else if (inSeekGrace) {
+        _bufferingSince = now;
+      } else {
+        _bufferingSince ??= now;
+      }
+    } else {
+      _bufferingSince = null;
+    }
+
+    // buffering：未重建持续 30 秒→先软回退再重建；已重建再持续 20 秒→放弃。
+    // 能进到 30 秒分支说明缓冲零增长（增长会不断刷新 _bufferingSince）。
+    // 点播零增长 = CDN 把该位置的 Range 请求挂死（实测多在 >93% 尾部）。
+    // 注意：同一内核在挂死的请求上直接 seek 会被拖进永久缓冲（实测），
+    // 所以回退必须走重建（全新连接）并从最后可播位置恢复，保住会话。
+    if (isBuf && _bufferingSince != null) {
+      final bufSecs = now.difference(_bufferingSince!).inSeconds;
+      if (!_castReinitDone && bufSecs >= 30) {
+        if (duration > Duration.zero &&
+            !_seekFallbackUsed &&
+            _lastGoodPosMs >= 0 &&
+            (posMs - _lastGoodPosMs).abs() > 5000) {
+          _seekFallbackUsed = true;
+          _triggerCastRecovery(resumePosMs: _lastGoodPosMs);
+          return;
+        }
+        _triggerCastRecovery();
+        return;
+      }
+      if (_castReinitDone && bufSecs >= 20) {
+        stopCastAndRestore();
+        return;
+      }
+    }
+
+    if (_state != PlayerState.playing) return;
+    // 正在缓冲时不判 stall：缓冲时位置本就不推进，已有上面的缓冲超时处理
+    if (isBuf) return;
+
+    // 有声无画：位置时钟照走但视频尺寸长时间为 0
+    if (noVideo) {
+      _noVideoSince ??= now;
+      final nvSecs = now.difference(_noVideoSince!).inSeconds;
+      if (!_castReinitDone && nvSecs >= 8) {
+        _triggerCastRecovery();
+      } else if (_castReinitDone && nvSecs >= 15) {
+        stopCastAndRestore();
+      }
+    } else {
+      _noVideoSince = null;
+    }
+
+    // stall：位置不推进（非缓冲）
+    if (posMs != _watchPosMs) {
+      _watchPosMs = posMs;
+      _watchAdvanceAt = now;
+      _stallNudged = false;
+      // 持续播放中的位置推进 = 该位置确认可播，记录为软回退锚点；
+      // 宽限期内的位置跳变（seek 落点）不算可播证据
+      if (!isBuf && !inSeekGrace && v.isPlaying) {
+        _lastGoodPosMs = posMs;
+        _seekFallbackUsed = false;
+      }
+      return;
+    }
+    _watchAdvanceAt ??= now;
+    final stalledMs = now.difference(_watchAdvanceAt!).inMilliseconds;
+    // seek 后宽限期：长视频缓冲慢，期间不检查卡顿
+    if (_seekGraceUntil != null && now.isBefore(_seekGraceUntil!)) return;
+    if (!_castReinitDone) {
+      if (!_stallNudged && stalledMs >= 12000) {
+        _stallNudged = true;
+        vc.play().catchError((_) {});
+      } else if (_stallNudged && stalledMs >= 25000) {
+        _triggerCastRecovery();
+      }
+    } else if (stalledMs >= 20000) {
+      // 重建后观察期位置仍不推进：流真断了（如直播间关播）
+      stopCastAndRestore();
+    }
+  }
+
+  /// 触发投屏自愈重建（整场投屏只允许一次）。
+  /// [resumePosMs] 非空时用指定位置作为重建后的恢复点——用于 seek 停滞
+  /// 软回退：CDN 挂死了目标位置的 Range 请求，恢复到那里必然再次挂死，
+  /// 改从最后确认可播的位置恢复。
+  void _triggerCastRecovery({int? resumePosMs}) {
+    if (_castReinitDone) return;
+    _castReinitDone = true;
+    _recoverCastPlayback(resumePosMs: resumePosMs);
+  }
+
+  /// 投屏流卡死的最终自愈：销毁内核、用同一 URL 重新拉流。
+  /// 点播等内核 ready 后从上次位置续播，直播从头缓冲。
+  /// [resumePosMs] 见 _triggerCastRecovery。
+  Future<void> _recoverCastPlayback({int? resumePosMs}) async {
+    final ch = _currentChannel;
+    if (ch == null) return;
+    final savedPos = resumePosMs != null
+        ? Duration(milliseconds: resumePosMs)
+        : _videoController?.value.position ?? Duration.zero;
+    final isLive = duration <= Duration.zero;
+    CastLog.write(
+        'cast RECOVERY triggered savedPos=${savedPos.inSeconds}s isLive=$isLive fallback=${resumePosMs != null}');
+    await _playCurrentSource();
+    // 代际守卫：上面的 await 期间用户可能已断开投屏、恢复了原频道，
+    // 甚至投了新片。若续体继续执行，会把【旧片卡死时记下的进度】
+    // seek 到新播放器上（还绕过了节流），新片被 seek 到错误位置
+    // 甚至超出片长——表现为换片后起播异常/有声无画。
+    // 用控制器实例身份判定（比代际号更准：init 超时原地重拉会让
+    // 代际号再 +1，但仍是本次重建自己的控制器）
+    final mine = _videoController;
+    if (mine == null || !_isCasting || _currentChannel != ch) {
+      CastLog.write('cast RECOVERY aborted: superseded by new play');
+      return;
+    }
+    bool stale() => !_isCasting ||
+        _currentChannel != ch ||
+        !identical(_videoController, mine);
+    if (!isLive && savedPos > const Duration(seconds: 2)) {
+      // 等内核真正开始播放再 seek：
+      // 仅 isInitialized && !isBuffering 不够——init 完成后有极短的
+      // 非缓冲窗口，此时 seek 会挂死内核（新流在断点处永久缓冲）。
+      // 要求位置已实际推进（>0.3s）且在播放中，最多等 10 秒。
+      var ready = false;
+      for (var i = 0; i < 20; i++) {
+        if (stale()) {
+          CastLog.write('cast RECOVERY aborted during ready-wait');
+          return;
+        }
+        final nv = mine.value;
+        if (nv.isInitialized &&
+            !nv.isBuffering &&
+            nv.isPlaying &&
+            nv.position.inMilliseconds > 300) {
+          ready = true;
+          break;
+        }
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+      if (ready) {
+        if (stale()) return; // seek 前最后确认，等待期间被新播放取代则放弃
+        CastLog.write(
+            'cast RECOVERY resume seek ${savedPos.inSeconds}s');
+        try {
+          await mine.seekTo(savedPos);
+          CastLog.write(
+              'cast RECOVERY seek done pos=${mine.value.position.inSeconds}s');
+        } catch (e) {
+          CastLog.write('cast RECOVERY seek FAILED: $e');
+        }
+      } else {
+        CastLog.write('cast RECOVERY ready timeout (10s), keeping from start');
+      }
+      // 10 秒都没正常起播：宁可从头播放，也不 seek 进可能挂死的断点
+    }
+    // 重置观察计时，给新流一个干净的开始（不动 _castReinitCount）。
+    // 否则 _watchAdvanceAt/_bufferingSince 仍是重建前的旧时间，
+    // 新流正常缓冲会被立即误判
+    if (stale()) return; // 已被新播放取代：新播放自己有干净的计时，不覆盖
+    _watchPosMs = -1;
+    _watchAdvanceAt = null;
+    _stallNudged = false;
+    _bufferingSince = null;
+    _noVideoSince = null;
+  }
+
+  /// 获取当前播放节目信息
+  NowPlayingInfo getNowPlayingInfo() {
+    if (_currentChannel == null) return NowPlayingInfo.empty;
+    final cur = currentProgram;
+    final next = nextProgram;
+    return NowPlayingInfo(
+      channelName: _currentChannel!.name,
+      programTitle: cur?.title ?? '',
+      nextProgramTitle: next?.title,
+      programStartTime: cur?.startTime,
+      programEndTime: cur?.endTime,
+    );
+  }
+
+  // ==================== 频道收藏 ====================
+
+  /// 切换频道收藏状态，返回切换后是否为已收藏
+  Future<bool> toggleFavoriteChannel(String channelId) async {
+    bool now;
+    if (_favoriteChannelIds.contains(channelId)) {
+      _favoriteChannelIds.remove(channelId);
+      now = false;
+    } else {
+      _favoriteChannelIds.add(channelId);
+      now = true;
+    }
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setStringList(
+          _kFavoriteChannelIds, _favoriteChannelIds.toList(growable: false));
+    } catch (_) {}
+    notifyListeners();
+    return now;
+  }
+
+  // ==================== 预约 ====================
+
+  /// 切换节目预约状态
+  Future<bool> toggleReservation(EpgProgram program) async {
+    // 防御：已结束或正在直播的节目不允许预约（UI 已拦，
+    // 此处兜底避免任何残留调用写入无效预约）
+    if (program.isPast || program.isNowPlaying) return false;
+    // 找到对应频道，记录：时间、节目名、频道名、播放地址（全部备用源）、
+    // 台标、EPG 标识。到点后直接用记录的地址播放，避免按名称反查跳错台。
+    // 注意：预约只能用「精确匹配」的频道，匹配不到时以当前频道兜底
+    // （EPG 面板展示的就是当前频道的节目单），绝不能用名称模糊匹配，
+    // 否则像 "CCTV" 这样的短名会错误命中列表里第一个 CCTV 频道。
+    final channel = _findChannelExact(program) ?? _currentChannel;
+    final r = ProgramReservation(
+      id: 'res_${program.channelId}_${program.startTime.millisecondsSinceEpoch}',
+      channelId: channel?.id ?? program.channelId,
+      channelName: channel?.name ?? '',
+      programTitle: program.title,
+      startTime: program.startTime,
+      endTime: program.endTime,
+      autoSwitch: true,
+      autoRecord: false,
+      createdAt: DateTime.now(),
+      streamUrls: channel?.streamUrls ?? const [],
+      logoUrl: channel?.logoUrl ?? '',
+      tvgId: channel?.tvgId ?? '',
+      tvgName: channel?.tvgName ?? program.channelId,
+    );
+    final result = await reservationManager.toggleReservation(r);
+    notifyListeners();
+    return result;
+  }
+
+  /// 根据 EPG 节目反查对应频道（tvgId 精确匹配，其次名称模糊匹配）
+  Channel? findChannelForProgram(EpgProgram program) {
+    final exact = _findChannelExact(program);
+    if (exact != null) return exact;
+    // 精确匹配不到时才做名称模糊匹配（供点击节目条目播放等
+    // 容错场景使用；预约存地址不可用这条路径，以免存错台）
+    final lowerId = program.channelId.toLowerCase();
+    for (final cat in _categories) {
+      for (final ch in cat.channels) {
+        final name = ch.name.toLowerCase();
+        if (name.contains(lowerId) || lowerId.contains(name)) return ch;
+      }
+    }
+    return null;
+  }
+
+  /// 仅用精确条件匹配频道：tvgId → tvgName → 规范化后的频道名。
+  /// 用于预约等「不允许匹配错误」的场景。
+  Channel? _findChannelExact(EpgProgram program) {
+    final lowerId = program.channelId.toLowerCase();
+    // 1) tvg-id 精确匹配
+    for (final cat in _categories) {
+      for (final ch in cat.channels) {
+        if (ch.tvgId.isNotEmpty && ch.tvgId == program.channelId) return ch;
+      }
+    }
+    // 2) tvg-name 精确匹配
+    for (final cat in _categories) {
+      for (final ch in cat.channels) {
+        if (ch.tvgName.isNotEmpty &&
+            ch.tvgName.toLowerCase() == lowerId) {
+          return ch;
+        }
+      }
+    }
+    // 3) 频道名规范化后精确匹配（忽略大小写/空格/连字符差异，
+    //    如 CCTV-1 / cctv1 / "CCTV 1"）
+    String norm(String s) =>
+        s.toLowerCase().replaceAll(RegExp(r'[\s\-_]+'), '');
+    final target = norm(program.channelId);
+    if (target.isNotEmpty) {
+      for (final cat in _categories) {
+        for (final ch in cat.channels) {
+          if (norm(ch.name) == target) return ch;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// 检查节目是否已预约。
+  /// 频道解析必须与 [toggleReservation] 完全一致
+  /// （精确匹配不到时兜底当前频道）：否则无 tvg-id 的频道会
+  /// 「预约时存频道UUID、查询时用XMLTV-id」导致图标不亮、
+  /// 第二次按 OK 仍提示"已预约"。
+  bool isProgramReserved(EpgProgram program) {
+    final channel = _findChannelExact(program) ?? _currentChannel;
+    final cid = channel?.id ?? program.channelId;
+    return reservationManager.isReserved(cid, program.startTime);
+  }
+
+  // ==================== 录制与截图（fvp/MDK 原生，桌面端） ====================
+
+  /// 开始录制当前画面到固定文件夹，返回是否成功。
+  /// 普通频道走 fvp/MDK 原生录制；网页频道用 MediaRecorder 录制
+  /// 播放中的 <video>（captureStream），分块经 JS bridge 落盘为 .webm。
+  Future<bool> startRecording() async {
+    if (_webPageActive) return _startWebRecording();
+    final vc = _videoController;
+    if (_currentChannel == null || vc == null || !vc.value.isInitialized ||
+        !isDesktop || _isRecording) {
+      return false;
+    }
+    try {
+      _recordPath =
+          await captureService.buildFilePath('recordings', _currentChannel!.name, 'mp4');
+      fvpRecord(vc, to: _recordPath);
+      _isRecording = true;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _lastError = '录制启动失败: $e';
+      _isRecording = false;
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// 停止录制，返回文件路径
+  Future<String?> stopRecording() async {
+    if (!_isRecording) return null;
+    if (_webPageActive) return _stopWebRecording();
+    final vc = _videoController;
+    try {
+      if (vc != null) fvpRecord(vc, to: null);
+      // 给编码器一点时间刷新文件尾
+      await Future.delayed(const Duration(milliseconds: 800));
+    } catch (_) {}
+    final path = _recordPath;
+    _isRecording = false;
+    _recordPath = null;
+    notifyListeners();
+    return path;
+  }
+
+  // ---- 网页频道录制（MediaRecorder） ----
+
+  /// 开始网页录制 JS：捕获正在播放的 video 流并启动 MediaRecorder。
+  /// 分块（base64）经 omRecChunk 回传，结束经 omRecEnd 通知。
+  static const _webRecStartJs = r'''
+(function(){
+  try {
+    if (window.__omRec) return 'busy';
+    function allVideos(root){
+      var out = Array.prototype.slice.call(root.querySelectorAll('video'));
+      var frames = root.querySelectorAll('iframe');
+      for (var i=0;i<frames.length;i++){
+        try { var d = frames[i].contentDocument;
+              if (d) out = out.concat(allVideos(d)); } catch(e) {}
+      }
+      return out;
+    }
+    var vs = allVideos(document);
+    // 录制目标 = 主视频（可见面积最大）；优先选在播的，隐藏预览/
+    // 广告播放器不参与，避免录到错误画面
+    function areaOf(v){
+      try {
+        var r = v.getBoundingClientRect();
+        return (r.width >= 80 && r.height >= 60) ? r.width * r.height : 0;
+      } catch(e) { return 0; }
+    }
+    var target = null, bestA = 0;
+    for (var i=0;i<vs.length;i++){
+      if (vs[i].paused || vs[i].ended || vs[i].readyState < 2) continue;
+      var a = areaOf(vs[i]);
+      if (a > bestA) { bestA = a; target = vs[i]; }
+    }
+    if (!target) {
+      bestA = 0;
+      for (var j=0;j<vs.length;j++){
+        var a2 = areaOf(vs[j]);
+        if (a2 > bestA) { bestA = a2; target = vs[j]; }
+      }
+    }
+    if (!target) return 'novideo';
+    var capture = target.captureStream || target.mozCaptureStream;
+    if (!capture) return 'nocapture';
+    var stream = capture.call(target);
+    var mime = '';
+    // 优先 mp4（与 fvp 原生录制格式一致），WebView2/Edge 支持 H.264
+    var cands = [
+      'video/mp4;codecs=h264,aac',
+      'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+      'video/mp4',
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm'
+    ];
+    for (var m=0;m<cands.length;m++){
+      try { if (MediaRecorder.isTypeSupported(cands[m])) { mime = cands[m]; break; } } catch(e){}
+    }
+    var rec = mime ? new MediaRecorder(stream, {mimeType: mime})
+                   : new MediaRecorder(stream);
+    window.__omRec = rec;
+    window.__omRecChain = Promise.resolve();
+    rec.ondataavailable = function(e){
+      if (!e.data || !e.data.size) return;
+      var blob = e.data;
+      window.__omRecChain = window.__omRecChain.then(function(){
+        return new Promise(function(resolve){
+          var fr = new FileReader();
+          fr.onload = function(){
+            try {
+              var s = (fr.result || '').toString();
+              var i = s.indexOf('base64,');
+              if (i >= 0) {
+                window.flutter_inappwebview.callHandler('omRecChunk', s.substring(i+7));
+              }
+            } catch(err) {}
+            resolve();
+          };
+          fr.onerror = function(){ resolve(); };
+          fr.readAsDataURL(blob);
+        });
+      });
+    };
+    rec.start(1000);
+    var ext = (mime && mime.indexOf('mp4') >= 0) ? 'mp4' : 'webm';
+    return 'ok:' + ext;
+  } catch(e) { return 'err'; }
+})();
+''';
+
+  /// 停止网页录制 JS：停止 MediaRecorder，所有分块回传完成后
+  /// 发 omRecEnd 通知 Dart 收尾。
+  static const _webRecStopJs = r'''
+(function(){
+  try {
+    var rec = window.__omRec;
+    if (!rec) return 'none';
+    window.__omRec = null;
+    rec.onstop = function(){
+      var chain = window.__omRecChain || Promise.resolve();
+      chain.then(function(){
+        try { window.flutter_inappwebview.callHandler('omRecEnd', 1); } catch(e) {}
+      });
+    };
+    rec.stop();
+    return 'ok';
+  } catch(e) {
+    try { window.flutter_inappwebview.callHandler('omRecEnd', 1); } catch(_) {}
+    return 'err';
+  }
+})();
+''';
+
+  /// 网页录制启动（由 startRecording 在网页频道时调用）
+  Future<bool> _startWebRecording() async {
+    final eval = _webEval;
+    if (eval == null || !isDesktop || _isRecording) return false;
+    try {
+      _webRecBytes = 0;
+      final r = await eval(_webRecStartJs);
+      final rs = r?.toString() ?? '';
+      if (!rs.startsWith('ok')) {
+        _lastError = rs == 'novideo'
+            ? '网页中未找到可录制的视频'
+            : '网页不支持视频录制';
+        return false;
+      }
+      // JS 返回实际容器格式（mp4 优先，回退 webm）
+      final ext = rs.substring(3) == 'mp4' ? 'mp4' : 'webm';
+      _recordPath = await captureService.buildFilePath(
+          'recordings', _currentChannel?.name ?? 'web', ext);
+      _webRecDone = Completer<void>();
+      _isRecording = true;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _lastError = '网页录制启动失败: $e';
+      _recordPath = null;
+      return false;
+    }
+  }
+
+  /// 网页录制停止：通知网页停止 MediaRecorder，等末尾分块全部落盘
+  Future<String?> _stopWebRecording() async {
+    final eval = _webEval;
+    final done = _webRecDone;
+    try {
+      await eval?.call(_webRecStopJs);
+      if (done != null) {
+        await done.future.timeout(const Duration(seconds: 5),
+            onTimeout: () {});
+      }
+    } catch (_) {}
+    final path = _webRecBytes > 0 ? _recordPath : null;
+    _isRecording = false;
+    _recordPath = null;
+    _webRecDone = null;
+    _webRecBytes = 0;
+    notifyListeners();
+    return path;
+  }
+
+  /// JS bridge 回传的录制分块（base64），追加写入录制文件
+  Future<void> appendWebRecordingChunk(String b64) async {
+    final path = _recordPath;
+    if (!_isRecording || path == null || b64.isEmpty) return;
+    try {
+      final bytes = base64Decode(b64);
+      await captureService.appendBytes(path, bytes);
+      _webRecBytes += bytes.length;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// JS bridge 通知录制流已结束（最后分块已回传）
+  void finishWebRecording() {
+    if (_webRecDone != null && !_webRecDone!.isCompleted) {
+      _webRecDone!.complete();
+    }
+  }
+
+  /// 截取当前视频帧保存为 PNG（固定文件夹）。
+  /// 网页频道走 WebView 截图桥，返回的就是 PNG 字节，直接落盘。
+  Future<String?> takeScreenshot() async {
+    if (_webPageActive) {
+      final shot = _webScreenshot;
+      if (shot == null) return null;
+      try {
+        final bytes = await shot();
+        if (bytes == null || bytes.isEmpty) return null;
+        final name = _currentChannel?.name ?? 'web_screenshot';
+        final path =
+            await captureService.buildFilePath('screenshots', name, 'png');
+        await captureService.saveBytes(path, Uint8List.fromList(bytes));
+        return path;
+      } catch (e) {
+        _lastError = '网页截图失败: $e';
+        return null;
+      }
+    }
+    final vc = _videoController;
+    if (vc == null || !vc.value.isInitialized) return null;
+    try {
+      final w = vc.value.size.width.round();
+      final h = vc.value.size.height.round();
+      final rgba = await fvpSnapshot(vc, width: w, height: h);
+      if (rgba == null || w == 0 || h == 0) return null;
+      final png = await captureService.rgbaToPng(rgba, w, h);
+      final name = _currentChannel?.name ?? 'screenshot';
+      final path = await captureService.buildFilePath('screenshots', name, 'png');
+      await captureService.saveBytes(path, png);
+      return path;
+    } catch (e) {
+      _lastError = '截图失败: $e';
+      return null;
+    }
+  }
+
+  // ==================== 播放列表/EPG 源管理（代理方法） ====================
+
+  Future<void> addPlaylist(PlaylistSource source) async {
+    await sourceManager.addPlaylist(source);
+    // 首个播放列表自动选中并加载频道，让左侧列表立即可读
+    if (sourceManager.currentPlaylistId == null) {
+      await selectPlaylist(source.id);
+    } else {
+      notifyListeners();
+    }
+  }
+
+  Future<void> removePlaylist(String id) async {
+    await sourceManager.removePlaylist(id);
+    if (sourceManager.currentPlaylistId == null) {
+      _categories = [];
+    }
+    notifyListeners();
+  }
+
+  /// 编辑播放列表（名称/地址/类型）；当前源地址变化时重新加载频道
+  Future<void> editPlaylist(PlaylistSource source) async {
+    final idx =
+        sourceManager.playlists.indexWhere((p) => p.id == source.id);
+    final urlChanged =
+        idx >= 0 && sourceManager.playlists[idx].url != source.url;
+    await sourceManager.updatePlaylist(source);
+    if (urlChanged && sourceManager.currentPlaylistId == source.id) {
+      await refreshChannels();
+    } else {
+      notifyListeners();
+    }
+  }
+
+  Future<void> selectPlaylist(String? id) async {
+    await sourceManager.selectPlaylist(id);
+    if (id != null) {
+      await refreshChannels();
+    } else {
+      _categories = [];
+      notifyListeners();
+    }
+  }
+
+  Future<void> addEpg(EpgSource source) async {
+    await sourceManager.addEpg(source);
+    // 首个 EPG 源自动选中并加载节目单
+    if (sourceManager.currentEpgId == null) {
+      await selectEpg(source.id);
+    } else {
+      notifyListeners();
+    }
+  }
+
+  Future<void> removeEpg(String id) async {
+    await sourceManager.removeEpg(id);
+    notifyListeners();
+  }
+
+  /// 编辑 EPG（名称/地址）；当前源地址变化时重新加载节目单
+  Future<void> editEpg(EpgSource source) async {
+    final idx = sourceManager.epgs.indexWhere((e) => e.id == source.id);
+    final urlChanged =
+        idx >= 0 && sourceManager.epgs[idx].url != source.url;
+    await sourceManager.updateEpg(source);
+    if (urlChanged && sourceManager.currentEpgId == source.id) {
+      await refreshEpg();
+    } else {
+      notifyListeners();
+    }
+  }
+
+  Future<void> selectEpg(String? id) async {
+    await sourceManager.selectEpg(id);
+    if (id != null) {
+      await refreshEpg();
+    } else {
+      notifyListeners();
+    }
+  }
+
+  // ==================== NumLock 状态守护（Windows runner 层实现） ====================
+  // Flutter Windows 引擎在窗口初始化时会把 NumLock 意外同步为关闭。
+  // 该修复必须在原生 runner 的 UI 线程做（Dart FFI 线程没有消息队列，
+  // GetKeyState 恒返回 0 会误判并主动翻转，反而把 NumLock 关掉）：
+  // CI 构建时由 .github/workflows/build.yml 向 windows/runner/main.cpp
+  // 注入「启动保存状态 + 15 秒定时器恢复」代码，见 Patch Windows runner 步骤。
+
+  Future<void> _disposeVideoController() async {
+    // 先尝试释放上一轮 dispose 挂起的孤儿实例
+    _retryOrphanDispose();
+    final c = _videoController;
+    if (c != null) {
+      final closure = _videoListenerClosure;
+      _videoListenerClosure = null;
+      _videoController = null;
+      if (closure != null) {
+        try {
+          c.removeListener(closure);
+        } catch (_) {}
+      }
+      // 先暂停：即使后续 dispose 在内核卡死时超时放弃，孤儿实例也
+      // 不会继续播放出声（双声音防线）。pause 本身可能挂，限时 2 秒。
+      //
+      // 关键：超时后底层 pause 仍在执行，此时绝不能再发 dispose——
+      // fvp 对同一 native 播放器的并发调用会直接崩（0xc0000409，
+      // 实测 4K 高码率台切台时 pause 超过 1 秒，随后 dispose 并发释放）
+      var paused = false;
+      try {
+        await c.pause().timeout(const Duration(seconds: 2));
+        paused = true;
+      } catch (_) {}
+      if (!paused) {
+        // 内核已卡死：不再触碰该实例（交给进程回收），保证后续起播不被拖住
+        return;
+      }
+      try {
+        await c.dispose().timeout(const Duration(seconds: 3));
+      } on TimeoutException {
+        // 底层释放仍在进行：不重复 dispose（并发释放同一实例会崩溃），
+        // 也不再登记重试，直接放弃该实例
+      } catch (_) {
+        // 明确失败（非超时）：登记孤儿，下次播放前再释放一次
+        _orphanControllers.add(c);
+      }
+    }
+  }
+
+  /// dispose 明确失败的控制器：不阻塞当前流程，后续单次重试释放。
+  /// 用 Set 防重复——同一实例两次 native dispose 并发会崩溃
+  final Set<VideoPlayerController> _orphanControllers = <VideoPlayerController>{};
+
+  void _retryOrphanDispose() {
+    if (_orphanControllers.isEmpty) return;
+    final list = List<VideoPlayerController>.from(_orphanControllers);
+    _orphanControllers.clear();
+    for (final c in list) {
+      // 只调一次：失败也不再放回（重复调用可能与其在途的释放并发）
+      c.dispose().timeout(const Duration(seconds: 8)).then((_) {},
+          onError: (_) {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _tickTimer?.cancel();
+    _castRestoreTimer?.cancel();
+    _castEndedTimer?.cancel();
+    _autoRetryTimer?.cancel();
+    _resetWebRecording();
+    if (_isRecording && _videoController != null) {
+      fvpRecord(_videoController!, to: null);
+    }
+    _disposeVideoController();
+    WakelockPlus.disable();
+    dlnaService.stop();
+    remoteAdminService.stop();
+    reservationManager.dispose();
+    clockVisible.dispose();
+    super.dispose();
+  }
+}
+
+/// 预检通过的网页嗅探媒体流（控制面板网页/内置来回切换时复用，
+/// 避免重新嗅探）
+class _SniffTarget {
+  final String url;
+  final String referer;
+  final String ua;
+  _SniffTarget({
+    required this.url,
+    required this.referer,
+    required this.ua,
+  });
+}

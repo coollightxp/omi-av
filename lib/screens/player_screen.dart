@@ -1,0 +1,6377 @@
+import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
+import 'package:window_manager/window_manager.dart';
+
+import '../services/osd_bus.dart';
+import '../services/pip.dart';
+import '../services/player_controller.dart';
+import '../services/system_power.dart';
+import '../services/web_diag.dart';
+import '../services/web_env.dart';
+import '../services/web_launch.dart';
+import '../services/win_hotkeys.dart';
+import '../services/window_drag.dart';
+import '../widgets/bottom_program_panel.dart';
+import '../widgets/gesture_indicator_overlay.dart';
+import '../widgets/left_channel_drawer.dart';
+import '../widgets/right_epg_panel.dart';
+import '../widgets/settings_panel.dart';
+import '../widgets/top_title_bar.dart';
+import '../widgets/video_player_widget.dart';
+
+/// 主播放器界面
+class PlayerScreen extends StatefulWidget {
+  const PlayerScreen({super.key});
+
+  @override
+  State<PlayerScreen> createState() => _PlayerScreenState();
+}
+
+class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
+  // 面板显隐状态
+  bool _leftDrawerOpen = false;
+  bool _rightEpgOpen = false;
+  bool _bottomPanelVisible = false;
+  bool _settingsOpen = false;
+
+  // 手势调节状态
+  bool _showBrightnessIndicator = false;
+  bool _showVolumeIndicator = false;
+
+  // 手势检测
+  double? _dragStartY;
+  double? _dragStartX;
+  double _lastBrightness = 0.8;
+  double _lastVolume = 0.8;
+  bool _isHorizontalDrag = false;
+  static const double _edgeWidth = 30;
+  static const double _dragSensitivity = 0.005;
+
+  // 底部面板自动隐藏定时器
+  Timer? _bottomHideTimer;
+
+  // 控制器监听
+  PlayerController? _controllerRef;
+  PlayerState _prevState = PlayerState.idle;
+  String? _prevChannelId;
+  bool _prevWebActive = false;
+
+  /// 小窗状态上一次值：切入小窗时关掉全部面板（小窗口 420×236 里
+  /// 这些按大屏排版的卡片会把画面整个盖住）
+  bool _prevMini = false;
+
+  // 鼠标自动隐藏（播放中 3 秒无动作）
+  Timer? _cursorHideTimer;
+  bool _cursorHidden = false;
+
+  // 侧边抽屉自动隐藏
+  Timer? _drawerHideTimer;
+  static const _drawerAutoHide = Duration(seconds: 3);
+
+  // 切台 OSD
+  Timer? _osdTimer;
+  bool _osdVisible = false;
+
+  // 数字选台输入缓存
+  String _numBuffer = '';
+  Timer? _numTimer;
+
+  // 遥控器/键盘长按检测：OK 短按与长按区分；左右键短按切源、长按拖进度。
+  // 部分平台按住时重复发 KeyDownEvent 而非 KeyRepeatEvent，
+  // 用 _okHeld/_arrowDown 去重，避免长按计时被反复重置
+  // （注意：布尔状态名不能与边沿回调方法 _okDown() 同名）
+  Timer? _okLongTimer;
+  bool _okHeld = false;
+
+  /// OK 按下边沿发生在面板打开期间：抬起时仍需走面板路径，
+  /// 不能落入「面板外短按」（播放/暂停、重开频道列表）
+  bool _okDownInPanel = false;
+  bool _okLongFired = false;
+  Timer? _arrowLongTimer;
+  bool _arrowDown = false;
+  bool _arrowLongFired = false;
+
+  // 菜单键：短按=EPG 节目单，长按=设置面板
+  Timer? _menuLongTimer;
+  bool _menuHeld = false;
+  bool _menuLongFired = false;
+
+  // 点播点按左右键：屏幕中央数字进度 OSD（不弹控制面板，避免面板打开后
+  // 左右键被按钮导航接管、与连续 seek 冲突）
+  Timer? _seekOsdHideTimer;
+  bool _seekOsdVisible = false;
+  bool _seekOsdForward = true;
+  Duration _seekOsdTarget = Duration.zero;
+  Duration _seekOsdDuration = Duration.zero;
+
+  // 播放加载防抖：按下键到内核真正初始化完成期间，遥控器连按的
+  // 切台/切源/面板 OK 全部排队忽略，防止"往下按了一下、松手后才加载完、
+  // 补按的 OK 直接落到停在很后面的频道"这类竞态（fvp 每次重建播放器
+  // 会回收原 controller 重建，窗口越大用户越容易感到「按了没反应」）
+  DateTime _loadingLockUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  static const _loadingLock = Duration(milliseconds: 900);
+
+  // 屏幕中央消息 OSD：替代页面底部 SnackBar（电视远距离看不清底部小字，
+  // 中央半透明大卡片更醒目）。新消息刷新文字并重新计时。
+  Timer? _msgOsdTimer;
+  bool _msgOsdVisible = false;
+  String _msgOsdText = '';
+  IconData _msgOsdIcon = Icons.info_outline;
+
+  // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）
+  static const String _appVersion = '1.0.201';
+
+  // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
+  int _exitDialogFocusIndex = 0; // 0=返回（其余项按 _exitOptions 顺序）
+  bool _exitDialogOpen = false;
+
+  // 投屏中「再按一次退出」的武装时间：第一次按返回/右键只提示不动作
+  DateTime? _castExitArmAt;
+
+  /// 对话框内部 StatefulBuilder 的刷新句柄：遥控器 ←/→ 改焦点后
+  /// 通过它只重建对话框（外层 setState 不会触发 showDialog 内容重建）
+  StateSetter? _exitDialogRefresh;
+
+  // 关机确认卡片：60 秒倒计时 + 取消/关机按钮，倒计时结束自动关机，
+  // 默认聚焦「取消」避免误关机（对标 OMTV）
+  bool _shutdownDialogOpen = false;
+  int _shutdownFocusIndex = 0; // 0=取消, 1=关机
+  StateSetter? _shutdownRefresh;
+  int _shutdownCountdown = 60;
+  Timer? _shutdownTimer;
+
+  // 两个侧边面板的状态句柄：遥控器/键盘导航由本页统一分发
+  // （HardwareKeyboard 与 Windows 低级钩子走同一入口）
+  final GlobalKey<LeftChannelDrawerState> _leftDrawerKey = GlobalKey();
+  final GlobalKey<RightEpgPanelState> _rightEpgKey = GlobalKey();
+  final GlobalKey<BottomProgramPanelState> _bottomPanelKey = GlobalKey();
+
+  // 底部面板 hover 状态（悬停时不自动隐藏）
+  bool _bottomHovering = false;
+
+  // 顶部悬停标题栏
+  bool _topBarVisible = false;
+
+  // 根焦点：硬件快捷键（含数字选台）都挂在这个节点上。
+  // 点击抽屉/面板内按钮后焦点会跑到子节点甚至随面板销毁而丢失，
+  // 导致数字键/快捷键失灵，需要在交互后把焦点抢回来。
+  final FocusNode _rootFocusNode = FocusNode();
+
+  /// Windows 低级键盘钩子桥：WebView2 吞焦点时数字选台仍可用
+  final WinHotkeys _winHotkeys = WinHotkeys();
+
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    // 全局硬件键盘监听：不依赖 Flutter 焦点，任何控件持有焦点、面板
+    // 关闭后都能收到按键；中文输入法状态下硬件 KeyDown 照样送达。
+    HardwareKeyboard.instance.addHandler(_onGlobalKeyEvent);
+    // 深层 widget（设置/EPG 面板）发来的中央 OSD 消息
+    OsdBus.message.addListener(_onBusOsd);
+    // 网页诊断日志随导出带版本号，便于定位是哪一版产生的故障
+    WebDiag.appVersion = _appVersion;
+    // Windows：低级键盘钩子转发数字键与动作键（网页 HWND 吞焦点时也有效）
+    _winHotkeys.setDigitHandler(_onNumberKey);
+    _winHotkeys.setActionHandler(_onNativeAction);
+    // 桌面端拦截窗口关闭：网页频道的 WebView2 若随引擎一起析构，
+    // 部分系统会在退出瞬间抛 0xc000000d。先让网页控件销毁再关窗。
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.linux ||
+            defaultTargetPlatform == TargetPlatform.macOS)) {
+      windowManager.addListener(this);
+      windowManager.setPreventClose(true);
+    }
+  }
+
+  @override
+  void onWindowClose() async {
+    final c = _controllerRef;
+    try {
+      if (c != null && c.webPageActive) {
+        c.exitWebPage();
+        // 等一帧让 WebView 平台视图完成原生销毁，规避退出崩溃
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+      }
+      // 释放 WebView2 环境及其宿主子进程，避免退出后残留
+      // WebView2 进程继续解码占用资源（Win10 家庭版报"已停止工作"）
+      try {
+        await webViewEnvironment?.dispose();
+      } catch (_) {}
+      await _windowsFastQuit();
+      await windowManager.setPreventClose(false);
+      await windowManager.destroy();
+    } catch (_) {
+      try {
+        await webViewEnvironment?.dispose();
+      } catch (_) {}
+      await _windowsFastQuit();
+      await windowManager.setPreventClose(false);
+      await windowManager.destroy();
+    }
+  }
+
+  /// Windows：请求 runner 恢复光标/卸载钩子后直接结束进程。
+  /// Windows 10 1607 等老系统上，引擎与插件析构会在 flutter_windows.dll
+  /// 内抛 0xc0000005，事件查看器表现为退出时"omplayer.exe 已停止工作"。
+  /// 这里在释放 WebView2 之后走快速退出，跳过会崩溃的析构链；runner 若是
+  /// 旧版本没有该指令，等待超时后仍按正常流程关闭窗口。
+  Future<void> _windowsFastQuit() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) return;
+    unawaited(WinHotkeys.quitApp());
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final c = context.read<PlayerController>();
+    if (_controllerRef != c) {
+      _controllerRef?.removeListener(_onControllerChanged);
+      _controllerRef = c..addListener(_onControllerChanged);
+      // 首帧布局完成后，按「启动全屏」设置决定是否进入全屏（只执行一次）
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) c.applyStartupFullscreen();
+      });
+    }
+  }
+
+  void _onControllerChanged() {
+    final c = _controllerRef;
+    if (c == null || !mounted) return;
+    final becamePlaying =
+        c.state == PlayerState.playing && _prevState != PlayerState.playing;
+    _prevState = c.state;
+
+    // 小窗（420×236）：面板都是按大屏排版的悬浮卡片，在这里会把画面
+    // 整个盖住。切入小窗瞬间把已打开/待打开的面板全部收起，之后
+    // 构建里也统一不再渲染这些面板
+    if (c.miniWindow != _prevMini) {
+      _prevMini = c.miniWindow;
+      if (c.miniWindow) {
+        _bottomHideTimer?.cancel();
+        _drawerHideTimer?.cancel();
+        _osdTimer?.cancel();
+        setState(() {
+          _bottomPanelVisible = false;
+          _bottomHovering = false;
+          _topBarVisible = false;
+          _leftDrawerOpen = false;
+          _rightEpgOpen = false;
+          _settingsOpen = false;
+          _osdVisible = false;
+        });
+        // 若刚才关掉的是设置面板，恢复低级钩子的数字键拦截
+        _winHotkeys.setCapture(true);
+      }
+    }
+    final mini = c.miniWindow;
+
+    // 切台：显示左上角台名/节目名 OSD（小窗里不显示，窗口太小）
+    final cid = c.currentChannel?.id;
+    if (cid != null && cid != _prevChannelId && !mini) {
+      _showChannelOsd();
+    }
+    _prevChannelId = cid;
+
+    if (becamePlaying && c.currentChannel != null && !mini) {
+      setState(() {
+        _bottomPanelVisible = true;
+        _bottomHovering = false;
+      });
+      _scheduleBottomHide();
+      _pokeCursor();
+    }
+
+    // 网页频道切入/切出：切入时像正常起播一样先显示信息面板再自动隐藏
+    if (c.webPageActive != _prevWebActive) {
+      _prevWebActive = c.webPageActive;
+      if (c.webPageActive && !mini) {
+        setState(() {
+          _bottomPanelVisible = true;
+          _bottomHovering = false;
+        });
+        _scheduleBottomHide();
+        _pokeCursor();
+      }
+    }
+  }
+
+  /// 切台提示：大字台名 + 小字当前节目，8 秒后消失
+  void _showChannelOsd() {
+    _osdTimer?.cancel();
+    setState(() => _osdVisible = true);
+    _osdTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted) setState(() => _osdVisible = false);
+    });
+  }
+
+  /// 数字键选台：追加到缓存，1.5 秒后跳转
+  void _onNumberKey(int n) {
+    // 设置面板打开时不拦截数字键（避免影响输入框）；锁定时同样忽略
+    if (_settingsOpen || context.read<PlayerController>().locked) return;
+    setState(() {
+      _numBuffer += n.toString();
+      _osdVisible = true;
+    });
+    _numTimer?.cancel();
+    _numTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted && _numBuffer.isNotEmpty) {
+        final number = int.tryParse(_numBuffer);
+        if (number != null) {
+          context.read<PlayerController>().playChannelByNumber(number);
+        }
+        setState(() => _numBuffer = '');
+      }
+    });
+  }
+
+  /// 网页频道内由 JS 转发来的按键（焦点在 WebView 时 Flutter
+  /// 收不到键盘消息）：d0-d9 数字选台，fullscreen 切换全屏，
+  /// back = 网页内鼠标右键（右键菜单已屏蔽，改为与返回键同效）
+  void _onWebKey(String key) {
+    if (_settingsOpen) return;
+    if (key.startsWith('d')) {
+      final n = int.tryParse(key.substring(1));
+      if (n != null) _onNumberKey(n);
+    } else if (key == 'back') {
+      _handleBackPressed();
+    } else if (key == 'fullscreen') {
+      context.read<PlayerController>().toggleFullscreen();
+    } else if (key == 'exitfullscreen') {
+      context.read<PlayerController>().exitFullscreenIfNeeded();
+    }
+  }
+
+  // 数字键（主键盘 + 小键盘）
+  static const List<LogicalKeyboardKey> _digitKeys = [
+    LogicalKeyboardKey.digit0,
+    LogicalKeyboardKey.digit1,
+    LogicalKeyboardKey.digit2,
+    LogicalKeyboardKey.digit3,
+    LogicalKeyboardKey.digit4,
+    LogicalKeyboardKey.digit5,
+    LogicalKeyboardKey.digit6,
+    LogicalKeyboardKey.digit7,
+    LogicalKeyboardKey.digit8,
+    LogicalKeyboardKey.digit9,
+  ];
+  static const List<LogicalKeyboardKey> _numpadKeys = [
+    LogicalKeyboardKey.numpad0,
+    LogicalKeyboardKey.numpad1,
+    LogicalKeyboardKey.numpad2,
+    LogicalKeyboardKey.numpad3,
+    LogicalKeyboardKey.numpad4,
+    LogicalKeyboardKey.numpad5,
+    LogicalKeyboardKey.numpad6,
+    LogicalKeyboardKey.numpad7,
+    LogicalKeyboardKey.numpad8,
+    LogicalKeyboardKey.numpad9,
+  ];
+
+  // 物理键（USB HID 码）：与输入法/布局无关，主键盘数字行
+  static const List<PhysicalKeyboardKey> _physDigitKeys = [
+    PhysicalKeyboardKey.digit0,
+    PhysicalKeyboardKey.digit1,
+    PhysicalKeyboardKey.digit2,
+    PhysicalKeyboardKey.digit3,
+    PhysicalKeyboardKey.digit4,
+    PhysicalKeyboardKey.digit5,
+    PhysicalKeyboardKey.digit6,
+    PhysicalKeyboardKey.digit7,
+    PhysicalKeyboardKey.digit8,
+    PhysicalKeyboardKey.digit9,
+  ];
+
+  // 小键盘数字（含安卓遥控器数字键常见映射）
+  static const List<PhysicalKeyboardKey> _physNumpadKeys = [
+    PhysicalKeyboardKey.numpad0,
+    PhysicalKeyboardKey.numpad1,
+    PhysicalKeyboardKey.numpad2,
+    PhysicalKeyboardKey.numpad3,
+    PhysicalKeyboardKey.numpad4,
+    PhysicalKeyboardKey.numpad5,
+    PhysicalKeyboardKey.numpad6,
+    PhysicalKeyboardKey.numpad7,
+    PhysicalKeyboardKey.numpad8,
+    PhysicalKeyboardKey.numpad9,
+  ];
+
+  /// 遥控器/键盘接管：立即隐藏鼠标指针（原生侧在鼠标移动时恢复显示，
+  /// 否则按钮上的手型光标会让指针一直挂着）
+  void _hidePointerForRemote() {
+    _cursorHideTimer?.cancel();
+    _winHotkeys.hideCursorNow();
+  }
+
+  /// 鼠标活动：恢复显示并重置 3 秒隐藏计时（仅播放中计时）
+  void _pokeCursor() {
+    if (!mounted) return;
+    if (_cursorHidden) setState(() => _cursorHidden = false);
+    _cursorHideTimer?.cancel();
+    final controller = context.read<PlayerController>();
+    // 网页频道：通知网页重置光标隐藏定时器
+    // （数字键切频道等 Flutter 侧交互不会触发网页 JS 事件）
+    if (controller.webPageActive && controller.webController != null) {
+      try {
+        controller.webController
+            .evaluateJavascript(source: 'window.__omShowCursor && window.__omShowCursor()');
+      } catch (_) {}
+    }
+    if (!controller.isPlaying) return;
+    _cursorHideTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted &&
+          controller.isPlaying &&
+          !_settingsOpen &&
+          !_leftDrawerOpen &&
+          !_rightEpgOpen) {
+        setState(() => _cursorHidden = true);
+      }
+    });
+  }
+
+  /// 鼠标在抽屉内：始终保持显示
+  void _cancelDrawerHide() {
+    _drawerHideTimer?.cancel();
+  }
+
+  /// 抽屉打开（桌面端 3 秒后无悬停自动隐藏；移动端需手动关闭）
+  void _armDrawerAutoHide() {
+    final desktop = context.read<PlayerController>().isDesktop;
+    if (!desktop) return;
+    _startDrawerHideTimer();
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onGlobalKeyEvent);
+    _winHotkeys.setDigitHandler(null);
+    _winHotkeys.setActionHandler(null);
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.linux ||
+            defaultTargetPlatform == TargetPlatform.macOS)) {
+      windowManager.removeListener(this);
+    }
+    _cursorHideTimer?.cancel();
+    _drawerHideTimer?.cancel();
+    _osdTimer?.cancel();
+    _numTimer?.cancel();
+    _okLongTimer?.cancel();
+    _arrowLongTimer?.cancel();
+    _menuLongTimer?.cancel();
+    _seekOsdHideTimer?.cancel();
+    _msgOsdTimer?.cancel();
+    _shutdownTimer?.cancel();
+    OsdBus.message.removeListener(_onBusOsd);
+    _rootFocusNode.dispose();
+    _controllerRef?.removeListener(_onControllerChanged);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
+  }
+
+  /// 把焦点收回根节点，保证硬件快捷键/数字选台随时可响应。
+  /// 设置面板打开时不抢焦点（里面有输入框）。
+  void _ensureShortcutFocus() {
+    if (_settingsOpen) return;
+    if (_rootFocusNode.hasPrimaryFocus) return;
+    _rootFocusNode.requestFocus();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+      // 返回键始终拦截，统一交给 _handleBackPressed 处理
+      // （含无面板时的退出确认）；否则 canPop=true 时系统会直接退出
+      return Focus(
+        focusNode: _rootFocusNode,
+        autofocus: true,
+        child: PopScope(
+          canPop: false,
+          onPopInvoked: (didPop) {
+            if (!didPop) _handleBackPressed();
+          },
+          child: Scaffold(
+      backgroundColor: Colors.black,
+      body: MouseRegion(
+        cursor: _cursorHidden ? SystemMouseCursors.none : MouseCursor.defer,
+        onHover: (event) {
+          _pokeCursor();
+          // 小窗里不呼出顶部标题栏（窗口只有 420×236，标题栏会盖住画面）
+          if (_controllerRef?.miniWindow ?? false) return;
+          // 鼠标靠近屏幕顶部时呼出悬停标题栏
+          final nearTop = event.position.dy < 40;
+          if (nearTop != _topBarVisible) {
+            setState(() => _topBarVisible = nearTop);
+          }
+        },
+        child: Listener(
+          // 任何鼠标/触摸活动都恢复显示鼠标，并把快捷键焦点收回根节点
+          onPointerDown: (_) {
+            _pokeCursor();
+            // 面板可能在静止光标下滑出（无 hover 事件），
+            // 用户开始点击时保持面板不自动隐藏
+            if (_leftDrawerOpen || _rightEpgOpen) {
+              _cancelDrawerHide();
+            }
+            _ensureShortcutFocus();
+          },
+          onPointerMove: (_) {
+            _pokeCursor();
+          },
+          child: Consumer<PlayerController>(
+            builder: (context, controller, _) {
+              // 信息面板显隐完全由 _bottomPanelVisible 控制：
+              // 用户主动呼出（长按 OK / 鼠标 hover）或底部边缘 hover 打开；
+              // 不再因 buffering/loading 强制显示——这会让 _bottomPanelActive
+              // 判断与视觉不同步，导致遥控器左右键被 seek 逻辑接管而面板
+              // 按钮收不到焦点，返回键也关不掉面板
+              final panelVisible = _bottomPanelVisible;
+              // 小窗（420×236）：所有面板/OSD 都按大屏尺寸排版，在小窗里
+              // 会把画面整个盖住，这里统一不渲染（只留左上角恢复按钮）
+              final mini = controller.miniWindow;
+              final webUrl = controller.webPageActive
+                  ? controller.currentChannel?.webPageUrl ?? ''
+                  : '';
+              return Stack(
+                children: [
+                  // 最底层：网页频道控件。网页在后台缓冲时也存在于此，
+                  // 被上方黑屏占位盖住；起播后黑屏移走，网页显露到全屏
+                  if (webUrl.isNotEmpty)
+                    Positioned.fill(
+                      child: _WebChannelOverlay(
+                        // 重载序号参与 key：手动重载/卡死自动重载时
+                        // 整个网页控件重建（页面重新加载）
+                        key: ValueKey('$webUrl#${controller.webReloadSerial}'),
+                        url: webUrl,
+                        title: controller.currentChannel?.name ?? '',
+                        foreground: controller.webPageForeground,
+                        onForeground: () =>
+                            controller.setWebForeground(true),
+                        onWebKey: _onWebKey,
+                        onPlayStateChanged: controller.setWebPlaying,
+                        onWebMouseMove: _pokeCursor,
+                        onBridgeAttached: controller.attachWebBridge,
+                        onBridgeDetached: controller.detachWebBridge,
+                      ),
+                    ),
+
+                  // 视频层：
+                  // - 普通频道：正常视频控件
+                  // - 网页频道后台缓冲中：黑屏占位（网页在其下方缓冲）
+                  // - 网页频道前台播放：空层（让下方网页全屏显露）
+                  // - 等待网络：显示网络等待提示
+                  Positioned.fill(
+                    child: controller.state == PlayerState.waitingForNetwork
+                        ? Container(
+                            color: Colors.black,
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: const [
+                                  CircularProgressIndicator(
+                                      color: Colors.blueAccent),
+                                  SizedBox(height: 16),
+                                  Text('正在等待网络连接...',
+                                      style: TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 16)),
+                                  SizedBox(height: 8),
+                                  Text('网络恢复后将自动开始播放',
+                                      style: TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 13)),
+                                ],
+                              ),
+                            ),
+                          )
+                        : !controller.webPageActive
+                            ? const VideoPlayerWidget()
+                            : (!controller.webPageForeground
+                                ? Container(
+                                    color: Colors.black,
+                                    child: Center(
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const CircularProgressIndicator(
+                                              color: Colors.blueAccent),
+                                          const SizedBox(height: 12),
+                                          const Text(
+                                              '正在打开网页频道，请稍候...',
+                                              style: TextStyle(
+                                                  color: Colors.white70,
+                                                  fontSize: 14)),
+                                        ],
+                                      ),
+                                    ),
+                                  )
+                                : const SizedBox.shrink()),
+                  ),
+
+                  // Windows 桌面亮度遮罩：原生 gamma ramp 在台式机/外接
+                  // 显示器上普遍无效（调了没反应），改为在视频层上压一层
+                  // 黑色遮罩调暗画面。仅内置播放；网页频道走 CSS filter，
+                  // 安卓/macOS 走系统亮度。IgnorePointer 不拦手势。
+                  if (!kIsWeb &&
+                      defaultTargetPlatform == TargetPlatform.windows &&
+                      !controller.webPageActive &&
+                      controller.brightness < 1.0)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: Container(
+                          color: Colors.black.withOpacity(
+                              (1.0 - controller.brightness) * 0.85),
+                        ),
+                      ),
+                    ),
+
+                  // 切台 OSD（左上角序号/台名/节目名）
+                  // 放在手势层与各面板【之下】：面板滑出时盖住它，
+                  // 避免 OSD 卡片挡住频道面板顶部的返回按钮
+                  if (!mini) _buildChannelOsd(controller),
+
+                  // 右上角系统时间：独立自治，切换不重建整棵 Stack
+                  if (!mini) const ClockOverlay(),
+
+                  // 锁定角标：顶部居中提示已锁定与解锁方式
+                  if (controller.locked) _buildLockBadge(),
+
+                  // 手势检测层：普通模式全功能；网页模式仅保留左右两侧
+                  // 垂直滑动（亮度/音量），中间区域完全穿透不拦截网页点击，
+                  // 面板由边缘触发区弹出
+                  _buildGestureLayer(controller,
+                      webMode: controller.webPageActive),
+
+                  // 网页模式的双击全屏：JS 侧已屏蔽网页自身 dblclick，
+                  // 这里接管为 App 窗口全屏切换（双击手势不吞单击，网页播放器
+                  // 的单击暂停/播放不受影响）。后台缓冲（黑屏占位）期间同样
+                  // 需要——此时网页还没推前台，双击全屏不该失效
+                  if (controller.webPageActive && controller.isDesktop)
+                    Positioned.fill(
+                      child: _WebDoubleTapFullScreen(
+                        // 小窗模式下双击 = 恢复原窗口（此时切换全屏没有意义）
+                        onToggle: () => controller.miniWindow
+                            ? controller.toggleMiniWindow()
+                            : controller.toggleFullscreen(),
+                      ),
+                    ),
+
+                  // 小窗模式：左上角常驻「恢复窗口」按钮。小窗口（420×236）
+                  // 里底部控制面板会被窄窗口裁切，只靠面板按钮容易点不到
+                  if (controller.isDesktop && controller.miniWindow)
+                    _buildMiniRestoreButton(controller),
+
+                  // 移动端：屏幕分三区，单击左/中/右分别呼出频道菜单/
+                  // 控制面板/EPG（见 _buildGestureLayer），不再使用贴边
+                  // 窄热区；桌面端保留 hover 边缘自动弹出
+
+                  // 桌面端 hover 边缘自动弹出（小窗里不响应，避免面板盖画面）
+                  if (controller.isDesktop && !mini) ...[
+                    // 左边缘：不在 onExit 里启动隐藏计时——面板滑入会覆盖
+                    // 这个 20px 触发区，触发区合成 onExit 与面板 onEnter 的
+                    // 回调顺序若为「先入后出」，会把面板刚取消的隐藏定时器
+                    // 重新启动，导致光标明明停在面板内、3 秒后仍自动关闭，
+                    // 表现为顶部返回/关闭钮点不到。隐藏统一由面板自身
+                    // onExit 负责。
+                    Positioned(
+                      left: 0,
+                      top: 0,
+                      bottom: 0,
+                      width: 20,
+                      child: MouseRegion(
+                        onEnter: (_) {
+                          if (_leftDrawerOpen) {
+                            _cancelDrawerHide();
+                          } else {
+                            _openDrawer(left: true);
+                          }
+                        },
+                      ),
+                    ),
+                    // 右边缘
+                    Positioned(
+                      right: 0,
+                      top: 0,
+                      bottom: 0,
+                      width: 20,
+                      child: MouseRegion(
+                        onEnter: (_) {
+                          if (_rightEpgOpen) {
+                            _cancelDrawerHide();
+                          } else {
+                            _openDrawer(left: false);
+                          }
+                        },
+                      ),
+                    ),
+                    // 底部边缘
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      height: 20,
+                      child: MouseRegion(
+                        onEnter: (_) => _showBottomPanel(),
+                        onExit: (_) => _scheduleBottomHide(),
+                      ),
+                    ),
+                  ],
+
+                  // 底部信息/控制面板（hover 回调由面板内部 MouseRegion 处理，
+                  // 不能在外面用 MouseRegion 包裹：根是 AnimatedPositioned 的
+                  // 组件被其它 RenderObjectWidget 包裹会破坏 Stack parentData，
+                  // release 下直接灰屏）
+                  if (!mini)
+                    BottomProgramPanel(
+                      key: _bottomPanelKey,
+                      isVisible: panelVisible,
+                      onHoverEnter: _cancelBottomHide,
+                      onHoverExit: _scheduleBottomHide,
+                      onHoverMove: _cancelBottomHide,
+                      onTogglePlayPause: controller.togglePlayPause,
+                      onScreenshot: _takeScreenshot,
+                      onToggleRecord: () => _toggleRecording(controller),
+                      onSwitchWebNative: () =>
+                          controller.switchWebNativePlayback(),
+                      onReload: controller.reloadCurrentChannel,
+                      onDismissRemote: () {
+                        if (_bottomPanelVisible) {
+                          setState(() => _bottomPanelVisible = false);
+                        }
+                        _bottomHideTimer?.cancel();
+                      },
+                    ),
+
+                  // 左侧频道抽屉（小窗里不渲染，下同）
+                  if (!mini)
+                    LeftChannelDrawer(
+                      key: _leftDrawerKey,
+                      isOpen: _leftDrawerOpen,
+                      onClose: () {
+                        setState(() => _leftDrawerOpen = false);
+                        WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => _ensureShortcutFocus());
+                      },
+                      onHoverEnter: _cancelDrawerHide,
+                      onHoverExit: _startDrawerHideTimer,
+                      onHoverMove: _cancelDrawerHide,
+                      onOpenSettings: () {
+                        setState(() => _leftDrawerOpen = false);
+                        _toggleSettings();
+                      },
+                    ),
+
+                  // 右侧 EPG 面板
+                  if (!mini)
+                    RightEpgPanel(
+                      key: _rightEpgKey,
+                      isOpen: _rightEpgOpen,
+                      onClose: () {
+                        setState(() => _rightEpgOpen = false);
+                        WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => _ensureShortcutFocus());
+                      },
+                      onHoverEnter: _cancelDrawerHide,
+                      onHoverExit: _startDrawerHideTimer,
+                      onHoverMove: _cancelDrawerHide,
+                    ),
+
+                  // 设置面板
+                  if (!mini)
+                    SettingsPanel(
+                      isOpen: _settingsOpen,
+                      onClose: () {
+                        setState(() => _settingsOpen = false);
+                        // 关闭后恢复低级钩子对数字键的选台拦截
+                        _winHotkeys.setCapture(true);
+                        WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => _ensureShortcutFocus());
+                      },
+                    ),
+
+                  // 鼠标右键 = 遥控器返回：按层级关闭 投屏→抽屉→面板，
+                  // 再按弹退出确认（网页频道前台时右键被 WebView 消费，
+                  // 网页区内不触发；网页菜单已在 JS 层禁用）。
+                  // 设置面板打开时不拦截：输入框里右键要能弹「全选/复制/
+                  // 粘贴」系统菜单，不能被当成返回。
+                  if (controller.isDesktop && !mini && !_settingsOpen)
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onSecondaryTapUp: (_) => _handleBackPressed(),
+                      ),
+                    ),
+
+                  // 亮度调节指示
+                  GestureIndicatorOverlay(
+                    isVisible: _showBrightnessIndicator,
+                    icon: Icons.brightness_6,
+                    iconColor: Colors.amber,
+                    value: controller.brightness,
+                    label: '亮度 ${(controller.brightness * 100).round()}%',
+                  ),
+
+                  // 音量调节指示
+                  GestureIndicatorOverlay(
+                    isVisible: _showVolumeIndicator,
+                    icon: controller.volume == 0
+                        ? Icons.volume_off
+                        : (controller.volume < 0.5
+                            ? Icons.volume_down
+                            : Icons.volume_up),
+                    iconColor: Colors.blueAccent,
+                    value: controller.volume,
+                    label: '音量 ${(controller.volume * 100).round()}%',
+                  ),
+
+                  // 点播长按左右键：数字进度 OSD（不拦截手势）
+                  _buildSeekOsd(),
+
+                  // 屏幕中央消息 OSD（截图/录制/关机等提示）
+                  _buildMessageOsd(),
+
+                  // 录制指示器（网页/原生均显示）
+                  if (controller.isRecording)
+                    Positioned(
+                      top: 48,
+                      left: 16,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: const BoxDecoration(
+                              color: Colors.red,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            controller.webPageActive
+                                ? 'REC · ${_formatBytes(controller.webRecordingBytes)}'
+                                : 'REC',
+                            style: const TextStyle(
+                              color: Colors.red,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  // 顶部悬停标题栏（桌面端，置于最顶层，
+                  // 避免被右上角时钟/切台 OSD 遮挡导致点不到）
+                  // 频道抽屉 / EPG / 设置打开时不显示，以免挡住它们
+                  // 顶部的关闭、返回按钮
+                  if (controller.isDesktop &&
+                      !mini &&
+                      !_leftDrawerOpen &&
+                      !_rightEpgOpen &&
+                      !_settingsOpen)
+                    TopTitleBar(
+                      visible: _topBarVisible,
+                      onHide: () {
+                        if (_topBarVisible) {
+                          setState(() => _topBarVisible = false);
+                        }
+                      },
+                    ),
+
+                  // 启动画面：配置、节目列表、EPG 读入期间盖住全屏，
+                  // 读完后自动消失（详见 PlayerController.bootReady）
+                  if (!controller.bootReady)
+                    _BootSplash(status: controller.bootStatus),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+        ),
+        ),
+      );
+  }
+
+  /// 安卓返回键/遥控器返回处理（PopScope 拦截后调用）：
+  /// 按层级关闭 设置→投屏→面板→全屏；都没有时弹退出确认
+  Future<void> _handleBackPressed() async {
+    // 关机确认卡片：返回键 = 取消关机
+    if (_shutdownDialogOpen) {
+      _confirmShutdown(false);
+      return;
+    }
+    // 重入守卫：退出确认框已在显示时直接忽略，
+    // 防止连按返回弹出两个路由、关闭时连带弹掉播放器（黑屏）
+    if (_exitDialogOpen) return;
+    final c = context.read<PlayerController>();
+    // 锁定状态：返回键只用于解锁（安卓系统返回键也走这里）
+    if (c.locked) {
+      c.unlock();
+      return;
+    }
+    if (_settingsOpen) {
+      setState(() => _settingsOpen = false);
+      // 与设置面板右上角关闭、S 键切换保持一致：恢复低级钩子的数字键
+      // 拦截，否则网页前台时数字选台会失灵
+      _winHotkeys.setCapture(true);
+      return;
+    }
+    if (c.isCasting) {
+      // 投屏中按返回/右键：第一次只提示，2 秒内再按才真正断开，防误触
+      final now = DateTime.now();
+      if (_castExitArmAt != null &&
+          now.difference(_castExitArmAt!) < const Duration(seconds: 2)) {
+        _castExitArmAt = null;
+        await c.stopCastAndRestore();
+      } else {
+        _castExitArmAt = now;
+        OsdBus.show('再按一次退出投屏', icon: Icons.cast_connected);
+      }
+      return;
+    }
+    if (_leftDrawerOpen) {
+      setState(() => _leftDrawerOpen = false);
+      return;
+    }
+    if (_rightEpgOpen) {
+      setState(() => _rightEpgOpen = false);
+      return;
+    }
+    if (_bottomPanelVisible) {
+      _bottomHideTimer?.cancel();
+      setState(() => _bottomPanelVisible = false);
+      return;
+    }
+    // 缓冲中（内置播放器 loading / 网页起播阶段）同样允许呼出退出卡片：
+    // 此时画面还没出来，但用户按返回/右键就是想退出，不能吞掉按键
+    // 全屏下无其他面板时：直接弹退出确认，不先退回小窗
+    //
+    // 无任何可关闭项：退出前确认，避免误触
+    _exitDialogOpen = true;
+    _exitDialogFocusIndex = 0; // 默认聚焦「返回」，避免误触退出/关机
+    final action = await showDialog<String?>(
+      context: context,
+      builder: (dialogCtx) {
+        // 遥控器友好：AlertDialog 用 StatefulBuilder 包裹，按钮高亮
+        // 随 _exitDialogFocusIndex 变化；遥控器 ←/→ 在 _handleExitDialogKey
+        // 里改字段后调用 _exitDialogRefresh 刷新本对话框
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            _exitDialogRefresh = setDialogState;
+            // 自绘退出面板：不显示程序图标，内容全部居中，
+            // 紧凑布局（短小精悍）：程序名称/版本两行 +
+            // 「返回/锁定/设置/退出/关机」方块图标按钮（无文字，
+            // 鼠标悬停或遥控器框选时在方块下方显示对应文字）。
+            // 安卓电视逻辑分辨率较小（常见 960x540），按屏宽等比缩小面板
+            final double panelScale =
+                (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.55, 1.0);
+            final options = _exitOptions(c);
+            // 按钮多于 4 个（锁定/小窗/扫码/设置/关机全出现）时加宽卡片，
+            // 避免 FittedBox 把标题和图标整体缩得太小
+            final double cardW =
+                (options.length > 5 ? 500 : (options.length > 4 ? 430 : 340)) *
+                    panelScale;
+            return Dialog(
+              backgroundColor: const Color(0xFF12151A),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: const BorderSide(color: Colors.white24),
+              ),
+              child: SizedBox(
+                width: cardW,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 28, vertical: 18),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        const Text(
+                          '欧米直播',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '版本 $_appVersion',
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            for (var i = 0; i < options.length; i++)
+                              Padding(
+                                padding: EdgeInsets.only(
+                                    right:
+                                        i == options.length - 1 ? 0 : 16),
+                                child: _buildExitIconOption(
+                                    ctx, i, options[i]),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    _exitDialogOpen = false;
+    _exitDialogRefresh = null;
+    if (!mounted) return;
+    switch (action) {
+      case 'exit':
+        // SystemNavigator.pop() 只在 Android/iOS 有效，桌面端需要用 windowManager
+        if (!kIsWeb &&
+            (defaultTargetPlatform == TargetPlatform.windows ||
+                defaultTargetPlatform == TargetPlatform.linux ||
+                defaultTargetPlatform == TargetPlatform.macOS)) {
+          await windowManager.close();
+        } else {
+          await SystemNavigator.pop();
+        }
+        break;
+      case 'lock':
+        c.toggleLock();
+        break;
+      case 'mini':
+        // 桌面端窗口置顶缩小；移动端系统画中画（PiP）
+        if (c.isDesktop) {
+          c.toggleMiniWindow();
+        } else if (!kIsWeb) {
+          await _enterPip();
+        }
+        break;
+      case 'remoteAdmin':
+        _showRemoteAdminQr(c);
+        break;
+      case 'settings':
+        _toggleSettings();
+        break;
+      case 'shutdown':
+        // 不直接执行 shutdown：先弹应用内关机卡片（60 秒倒计时，
+        // 默认聚焦「取消」），确认后才关机（对标 OMTV）
+        await _showShutdownDialog();
+        break;
+    }
+  }
+
+  /// 退出框是否提供「关闭系统」：仅 Windows/Linux 原生（Web/安卓/iOS/macOS 不显示）
+  bool get _canShutdownSystem =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux);
+
+  /// 退出框按钮列表（顺序即遥控器 ←/→ 的移动顺序）。
+  /// 「锁定/小窗/扫码/设置」统一收在这里，底部信息栏只保留播放相关按钮
+  List<_ExitOption> _exitOptions(PlayerController c) => <_ExitOption>[
+        const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
+        if (!c.locked)
+          const _ExitOption(
+              Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
+        // 小窗播放：桌面端窗口置顶缩小；移动端系统画中画（Web 端不支持，不显示）
+        if (!kIsWeb)
+          _ExitOption(
+              c.miniWindow
+                  ? Icons.fullscreen
+                  : Icons.picture_in_picture_alt,
+              c.miniWindow ? '恢复窗口' : '小窗播放',
+              Colors.greenAccent,
+              'mini'),
+        // Web 扫码管理：局域网管理服务未启动（地址为空）时不显示
+        if (c.remoteAdminUrl.isNotEmpty)
+          const _ExitOption(
+              Icons.qr_code_2, '扫码管理', Colors.lightBlueAccent,
+              'remoteAdmin'),
+        const _ExitOption(Icons.settings, '设置', Colors.tealAccent, 'settings'),
+        const _ExitOption(Icons.logout, '退出', Colors.redAccent, 'exit'),
+        // 关闭系统仅 Windows/Linux 原生显示
+        if (_canShutdownSystem)
+          const _ExitOption(
+              Icons.power_settings_new, '关机', Colors.orangeAccent,
+              'shutdown'),
+      ];
+
+  /// 退出框按钮数（锁定项随锁定状态消失，关机仅桌面端显示）
+  int get _exitOptionCount =>
+      _exitOptions(context.read<PlayerController>()).length;
+
+  /// 构建退出框中的一个方块图标按钮（不取键盘焦点，高亮由全局按键维护）。
+  /// 方块仅显示图标；鼠标悬停或遥控器框选时，方块下方显示文字标签。
+  Widget _buildExitIconOption(
+      BuildContext ctx, int index, _ExitOption opt) {
+    final selected = _exitDialogFocusIndex == index;
+    final color = opt.color;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) {
+        // 鼠标移入即框选该项（与遥控器左右移动等效），下方显示文字
+        if (_exitDialogFocusIndex != index) {
+          _exitDialogFocusIndex = index;
+          _exitDialogRefresh?.call(() {});
+        }
+      },
+      child: GestureDetector(
+        // 一次性守卫：先摘标志再 pop，鼠标点击与遥控器 OK 都不会双 pop
+        onTap: () {
+          _exitDialogOpen = false;
+          Navigator.of(ctx).pop<String?>(
+              opt.action == 'back' ? null : opt.action);
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: selected
+                    ? color.withOpacity(0.22)
+                    : Colors.white.withOpacity(0.04),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: selected ? color : Colors.white24,
+                  width: selected ? 2.0 : 1.0,
+                ),
+              ),
+              child: Icon(
+                opt.icon,
+                color: selected ? color : Colors.white70,
+                size: 22,
+              ),
+            ),
+            // 标签行固定高度：仅框选/悬停项显示文字，避免布局跳动
+            SizedBox(
+              height: 18,
+              child: Center(
+                child: selected
+                    ? Text(
+                        opt.label,
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ==================== 硬件按键快捷键 ====================
+
+  /// 是否有对话框/弹层盖在播放页之上（二维码、退出确认等
+  /// showDialog 路由；设置面板是内嵌 overlay 不算）
+  bool get _modalRouteOpen {
+    final r = ModalRoute.of(context);
+    return r != null && !r.isCurrent;
+  }
+
+  /// 对话框打开期间的遥控器/键盘按键收口。
+  /// 返回 true=已消费；不认识的键放行给弹层内控件（如输入框）。
+  bool _handleKeyWhileModal(
+      LogicalKeyboardKey k, bool isDown, bool isUp) {
+    final isOk = k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA;
+    final isLr = k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight;
+    // 关机确认卡片有独立按键逻辑，优先于退出框处理
+    if (_shutdownDialogOpen) {
+      return _handleShutdownDialogKey(k, isDown, isUp);
+    }
+    // 退出确认对话框有遥控器友好界面，走专用逻辑
+    if (_exitDialogOpen) {
+      return _handleExitDialogKey(k, isDown, isUp);
+    }
+    if (isOk) {
+      if (isDown) {
+        // 复位配对状态并关闭弹层（等同「关闭」按钮）
+        _okHeld = true;
+        _okLongTimer?.cancel();
+        Navigator.of(context).maybePop();
+      } else if (isUp) {
+        _okHeld = false;
+        _okLongTimer?.cancel();
+        _okLongFired = false;
+      }
+      return true;
+    }
+    if (isLr) {
+      // 仅消费并复位，避免弹层关闭后被当成短按切源
+      if (isUp) {
+        _arrowDown = false;
+        _arrowLongTimer?.cancel();
+        _arrowLongFired = false;
+      }
+      return true;
+    }
+    if (k == LogicalKeyboardKey.arrowUp ||
+        k == LogicalKeyboardKey.arrowDown) {
+      return true; // 弹层内无列表导航需求，吞掉防穿透切台
+    }
+    if (k == LogicalKeyboardKey.contextMenu) {
+      if (isDown) Navigator.of(context).maybePop();
+      if (isUp) {
+        _menuHeld = false;
+        _menuLongTimer?.cancel();
+        _menuLongFired = false;
+      }
+      return true;
+    }
+    if (k == LogicalKeyboardKey.escape) {
+      if (isDown) Navigator.of(context).maybePop();
+      return true;
+    }
+    return false;
+  }
+
+  /// 退出确认对话框的遥控器按键处理：
+  /// ←/→ 在「取消」「退出」间移动高亮，OK 确认当前选中项，返回/Esc 直接取消
+  bool _handleExitDialogKey(
+      LogicalKeyboardKey k, bool isDown, bool isUp) {
+    final isOk = k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA;
+    final isLr = k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight;
+    if (isOk) {
+      if (isDown && _exitDialogOpen) {
+        // 先置标志位，防止同一按键事件被路由双处理（全局 handler + 按钮 Focus）
+        final opts = _exitOptions(context.read<PlayerController>());
+        final idx =
+            _exitDialogFocusIndex.clamp(0, opts.length - 1) as int;
+        _exitDialogOpen = false;
+        Navigator.of(context).pop<String?>(
+            opts[idx].action == 'back' ? null : opts[idx].action);
+      }
+      return true;
+    }
+    if (isLr) {
+      if (isDown) {
+        // 按钮间循环移动：showDialog 里的 StatefulBuilder
+        // 需要内部 setState 才能看到高亮移动
+        final count = _exitOptionCount;
+        final step = k == LogicalKeyboardKey.arrowRight ? 1 : -1;
+        _exitDialogFocusIndex =
+            (_exitDialogFocusIndex + step) % count;
+        if (_exitDialogFocusIndex < 0) _exitDialogFocusIndex += count;
+        _exitDialogRefresh?.call(() {});
+      }
+      return true;
+    }
+    if (k == LogicalKeyboardKey.arrowUp ||
+        k == LogicalKeyboardKey.arrowDown) {
+      return true; // 两按钮水平排列，上下无意义
+    }
+    if (k == LogicalKeyboardKey.contextMenu) {
+      if (isDown && _exitDialogOpen) {
+        _exitDialogOpen = false;
+        Navigator.of(context).pop<String?>(null);
+      }
+      return true;
+    }
+    if (k == LogicalKeyboardKey.escape) {
+      if (isDown && _exitDialogOpen) {
+        _exitDialogOpen = false;
+        Navigator.of(context).pop<String?>(null);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// 关机确认卡片：60 秒秒倒计时 + 取消/关机按钮，默认聚焦「取消」。
+  /// 倒计时到 0 自动执行关机；按返回/Esc/菜单键取消。
+  /// Windows 端不再用系统 shutdown 倒计时（系统会弹「几分钟后关机」提示框），
+  /// 改为应用内倒计时后直接 `shutdown /s /t 0 /f`（对标 OMTV）
+  Future<void> _showShutdownDialog() async {
+    _shutdownFocusIndex = 0;
+    _shutdownCountdown = 60;
+    _shutdownDialogOpen = true;
+    _shutdownTimer?.cancel();
+    _shutdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!_shutdownDialogOpen) return;
+      if (_shutdownCountdown > 0) {
+        _shutdownCountdown--;
+        _shutdownRefresh?.call(() {});
+      }
+      if (_shutdownCountdown <= 0) {
+        _confirmShutdown(true);
+      }
+    });
+    final result = await showDialog<String?>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            _shutdownRefresh = setDialogState;
+            final double panelScale =
+                (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.72, 1.0);
+            // autofocus：网页频道的 WebView 平台视图不跟随 Flutter 焦点，
+            // 卡片打开时把焦点拉回 Flutter，遥控器按键才收得到
+            return Focus(
+              autofocus: true,
+              child: Dialog(
+                backgroundColor: const Color(0xFF12151A),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Colors.white24),
+                ),
+                child: SizedBox(
+                  width: 360 * panelScale,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 30, vertical: 24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.power_settings_new,
+                                  color: Colors.orangeAccent, size: 26),
+                              const SizedBox(width: 8),
+                              const Text(
+                                '关机倒计时',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          // 倒计时数字：大号显示，最后 10 秒变红
+                          Text(
+                            '$_shutdownCountdown',
+                            style: TextStyle(
+                              color: _shutdownCountdown <= 10
+                                  ? Colors.redAccent
+                                  : Colors.blueAccent,
+                              fontSize: 44,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _shutdownButton(
+                                label: '取消',
+                                color: Colors.white70,
+                                selected: _shutdownFocusIndex == 0,
+                                onTap: () => _confirmShutdown(false),
+                              ),
+                              const SizedBox(width: 18),
+                              _shutdownButton(
+                                label: '关机',
+                                color: Colors.orangeAccent,
+                                selected: _shutdownFocusIndex == 1,
+                                onTap: () => _confirmShutdown(true),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    _shutdownTimer?.cancel();
+    _shutdownTimer = null;
+    _shutdownDialogOpen = false;
+    _shutdownRefresh = null;
+    // 卡片确认后才真正关机（系统侧 t=0 立即执行，不再弹系统倒计时框）
+    if (result == 'confirm' && mounted) {
+      await shutdownSystem();
+    }
+  }
+
+  /// 关机卡片里的一个按钮（高亮由全局按键维护，不自建 FocusNode）
+  Widget _shutdownButton({
+    required String label,
+    required Color color,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) {
+        final idx = label == '取消' ? 0 : 1;
+        if (_shutdownFocusIndex != idx) {
+          _shutdownFocusIndex = idx;
+          _shutdownRefresh?.call(() {});
+        }
+      },
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 100,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: selected
+                ? color.withOpacity(0.22)
+                : Colors.white.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected ? color : Colors.white24,
+              width: selected ? 2.0 : 1.0,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? color : Colors.white70,
+              fontSize: 16,
+              fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 关机确认卡片按键处理：
+  /// ←/→ 在「取消」「关机」间切换；OK 确认当前选中；返回/Esc/菜单键 = 取消
+  bool _handleShutdownDialogKey(
+      LogicalKeyboardKey k, bool isDown, bool isUp) {
+    final isOk = k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA;
+    if (isOk) {
+      if (isDown && _shutdownDialogOpen) {
+        _confirmShutdown(_shutdownFocusIndex == 1);
+      }
+      return true;
+    }
+    if (k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight) {
+      if (isDown) {
+        _shutdownFocusIndex = _shutdownFocusIndex == 0 ? 1 : 0;
+        _shutdownRefresh?.call(() {});
+      }
+      return true;
+    }
+    // 上下键消费掉，防止穿透切台
+    if (k == LogicalKeyboardKey.arrowUp ||
+        k == LogicalKeyboardKey.arrowDown) {
+      return true;
+    }
+    if (k == LogicalKeyboardKey.contextMenu ||
+        k == LogicalKeyboardKey.escape) {
+      if (isDown && _shutdownDialogOpen) _confirmShutdown(false);
+      return true;
+    }
+    return false;
+  }
+
+  /// 确认或取消关机：关卡片并记下结果，调用方据此执行关机
+  void _confirmShutdown(bool confirm) {
+    if (!_shutdownDialogOpen) return;
+    _shutdownDialogOpen = false;
+    _shutdownTimer?.cancel();
+    _shutdownTimer = null;
+    Navigator.of(context).pop<String?>(confirm ? 'confirm' : null);
+  }
+
+  /// 侧边面板（频道列表/EPG）是否有一个打开：打开期间方向键与 OK
+  /// 全部转作面板内导航，不触发播放控制
+  bool get _navPanelOpen => _leftDrawerOpen || _rightEpgOpen;
+
+  /// 底部控制面板是否由用户主动呼出（长按 OK / 鼠标 hover）。
+  /// 为 true 期间 ←/→ 与 OK 用于面板内按钮导航，返回键关闭面板。
+  /// 面板显隐与 _bottomPanelVisible 一对一，不再被 state 强制联动
+  bool get _bottomPanelActive => _bottomPanelVisible;
+
+  /// 把遥控器动作分发给当前打开的侧边面板，并取消桌面端自动隐藏
+  /// （遥控器没有鼠标 hover，面板应一直保留到返回键关闭）
+  void _panelKey(String action, bool isDown) {
+    _cancelDrawerHide();
+    if (_leftDrawerOpen) {
+      _leftDrawerKey.currentState?.handleRemoteKey(action, isDown: isDown);
+    } else if (_rightEpgOpen) {
+      _rightEpgKey.currentState?.handleRemoteKey(action, isDown: isDown);
+    }
+  }
+
+  /// 把遥控器动作分发给底部控制面板，并取消自动隐藏
+  void _bottomPanelRemoteKey(String action, bool isDown) {
+    _bottomHideTimer?.cancel();
+    _bottomPanelKey.currentState?.handleRemoteKey(action, isDown: isDown);
+  }
+
+  /// 全局硬件按键处理（注册在 HardwareKeyboard 上，不依赖焦点）。
+  /// 返回 true 表示事件已消费，不再向焦点链传递。
+  ///
+  /// 遥控器适配（TV 盒子 / HTPC 遥控器在系统层就是键盘+媒体键）：
+  /// - OK（select/enter）：短按=直播出节目列表 / 点播暂停播放；长按=控制面板；
+  ///   面板打开时方向键/OK 全部用于面板内导航
+  /// - ←/→：短按=切源；长按=点播拖动进度（直播忽略长按）
+  /// - ↑/↓：切台；⏯ 媒体键：播放/暂停；⏮/⏭：切台；⏪/⏩：单步 ±10s
+  /// - 菜单键（contextMenu）：短按=EPG 节目单，长按=手机扫码管理二维码
+  /// - 返回/Esc：按层级关闭 设置→投屏→面板→全屏，再按弹退出确认。
+  ///   Windows 与 Android 行为一致（Android 系统 Back 走 PopScope）
+  bool _onGlobalKeyEvent(KeyEvent event) {
+    final k = event.logicalKey;
+    final isDown = event is KeyDownEvent;
+    final isUp = event is KeyUpEvent;
+
+    // 键盘/遥控器一有动作就隐藏鼠标指针（鼠标一移动原生侧自动恢复）
+    if (isDown) _hidePointerForRemote();
+
+    // 锁定状态：除「返回键 / 菜单键」解锁外，所有按键一律屏蔽，
+    // 防止遥控器/键盘误触切台、改设置或退出（屏幕上有锁定角标提示）
+    final lockedCtl = context.read<PlayerController>();
+    if (lockedCtl.locked) {
+      if (isDown &&
+          (k == LogicalKeyboardKey.escape ||
+              k == LogicalKeyboardKey.contextMenu ||
+              k == LogicalKeyboardKey.arrowLeft ||
+              k == LogicalKeyboardKey.arrowRight ||
+              k == LogicalKeyboardKey.arrowUp ||
+              k == LogicalKeyboardKey.arrowDown ||
+              k == LogicalKeyboardKey.enter ||
+              k == LogicalKeyboardKey.space)) {
+        lockedCtl.unlock();
+      }
+      return true;
+    }
+
+    // 设置面板里有输入框（URL、数字等）：仅返回/菜单键负责关面板，
+    // 其余按键放行给输入框
+    if (_settingsOpen) {
+      if (isDown &&
+          (k == LogicalKeyboardKey.escape ||
+              k == LogicalKeyboardKey.contextMenu)) {
+        _handleBackPressed();
+        return true;
+      }
+      return false;
+    }
+    // 有对话框（二维码/退出确认等）盖在页面上时：遥控器按键统一收口——
+    // OK/返回/菜单关闭弹层，方向键消费不穿透，避免弹层是在 OK 按下后
+    // 才弹出时抬起事件丢失，导致按住状态卡死、关弹层后误触节目列表
+    if (_modalRouteOpen) {
+      return _handleKeyWhileModal(k, isDown, isUp);
+    }
+
+    // OK 与左右方向键要区分短按/长按，走按下-抬起配对处理
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA) {
+      if (isDown) _okDown();
+      if (isUp) _okUp();
+      return true;
+    }
+    if (k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight) {
+      final left = k == LogicalKeyboardKey.arrowLeft;
+      if (isDown) _lrDown(left);
+      if (isUp) _lrUp(left);
+      return true;
+    }
+    // 菜单键（遥控器/键盘菜单键）：短按 EPG / 长按二维码，走按下-抬起配对
+    if (k == LogicalKeyboardKey.contextMenu) {
+      if (isDown) _menuDown();
+      if (isUp) _menuUp();
+      return true;
+    }
+    // 上下：面板打开时面板内移动，否则切台
+    if (k == LogicalKeyboardKey.arrowUp) {
+      if (isDown) _verticalKey(true);
+      return true;
+    }
+    if (k == LogicalKeyboardKey.arrowDown) {
+      if (isDown) _verticalKey(false);
+      return true;
+    }
+    // Esc / 遥控器返回：层级关闭（与 Android Back 同一入口）
+    if (k == LogicalKeyboardKey.escape) {
+      if (isDown) _handleBackPressed();
+      return true;
+    }
+
+    // 其余按键只处理首次按下；长按重复事件是 KeyRepeatEvent，天然被排除
+    if (!isDown) return false;
+
+    final p = event.physicalKey;
+
+    // 数字键（主键盘 / 小键盘）选台。
+    // 同时按逻辑键与物理键（USB HID 码）匹配：
+    // 物理键不受输入法/键盘布局影响，避免中文输入法下逻辑键
+    // 映射异常导致数字选台失灵；安卓遥控器数字键也走小键盘码。
+    for (var i = 0; i < 10; i++) {
+      if (k == _digitKeys[i] ||
+          k == _numpadKeys[i] ||
+          p == _physDigitKeys[i] ||
+          p == _physNumpadKeys[i]) {
+        _onNumberKey(i);
+        return true;
+      }
+    }
+
+    String? action;
+    if (k == LogicalKeyboardKey.space) {
+      action = 'playpause';
+    } else if (k == LogicalKeyboardKey.keyF ||
+        k == LogicalKeyboardKey.f11) {
+      action = 'fullscreen';
+    } else if (k == LogicalKeyboardKey.keyM) {
+      action = 'mute';
+    } else if (k == LogicalKeyboardKey.printScreen) {
+      action = 'screenshot';
+    } else if (k == LogicalKeyboardKey.keyC) {
+      action = 'channels';
+    } else if (k == LogicalKeyboardKey.keyE) {
+      action = 'epg';
+    } else if (k == LogicalKeyboardKey.keyS) {
+      action = 'settings';
+    } else if (k == LogicalKeyboardKey.keyR) {
+      action = 'record';
+    } else if (k == LogicalKeyboardKey.keyW &&
+        isDown &&
+        (HardwareKeyboard.instance.isAltPressed ||
+            HardwareKeyboard.instance.isControlPressed)) {
+      // Alt+W / Ctrl+W：弹出 Web 管理二维码（遥控器按 Info 也能呼出）
+      action = 'webadmin';
+    } else if (k == LogicalKeyboardKey.info) {
+      // 遥控器 Info 键：弹出 Web 管理二维码
+      action = 'webadmin';
+    } else if (k == LogicalKeyboardKey.mediaPlayPause ||
+        k == LogicalKeyboardKey.mediaPlay ||
+        k == LogicalKeyboardKey.mediaPause) {
+      // 遥控器 ⏯ 播放/暂停键
+      action = 'playpause';
+    }
+    if (action != null) {
+      _onShortcut(action);
+      return true;
+    }
+
+    // ⏮/⏭ 曲目键 = 切台；⏪/⏩ 快退快进键 = 点播单步 ±10 秒
+    if (k == LogicalKeyboardKey.mediaTrackNext) {
+      _onArrow('nextChannel');
+      return true;
+    }
+    if (k == LogicalKeyboardKey.mediaTrackPrevious) {
+      _onArrow('prevChannel');
+      return true;
+    }
+    if (k == LogicalKeyboardKey.mediaFastForward) {
+      _singleSeekStep(false);
+      return true;
+    }
+    if (k == LogicalKeyboardKey.mediaRewind) {
+      _singleSeekStep(true);
+      return true;
+    }
+
+    return false;
+  }
+
+  /// OK 按下边沿（首次按下；系统自动重复由 _okHeld 去重）。
+  /// 面板打开：转发面板；否则启动 500ms 长按计时。
+  void _okDown() {
+    if (_okHeld) return;
+    _okHeld = true;
+    _okLongFired = false;
+    if (_navPanelOpen) {
+      _okDownInPanel = true;
+      _panelKey('ok', true);
+      return;
+    }
+    if (_bottomPanelActive) {
+      _okDownInPanel = true;
+      _bottomPanelRemoteKey('ok', true);
+      return;
+    }
+    _okLongTimer?.cancel();
+    _okLongTimer = Timer(const Duration(milliseconds: 500), () {
+      _okLongFired = true;
+      // 长按 OK = 呼出/收起控制面板（内部有播放状态守卫）
+      _toggleBottomPanel();
+    });
+  }
+
+  /// OK 抬起边沿：面板打开时转发；否则长按不触发、短按按播放状态处理
+  void _okUp() {
+    if (!_okHeld) return;
+    _okHeld = false;
+    _okLongTimer?.cancel();
+    // 按下时面板是打开的（选台/按钮操作可能在按下边沿已关闭面板），
+    // 这次抬起仍属于面板内操作，绝不能落到短按逻辑里——否则频道列表
+    // 选台后松手会触发「面板外短按」= 播放/暂停切换或重开列表（串台感）
+    if (_okDownInPanel) {
+      _okDownInPanel = false;
+      if (_navPanelOpen) {
+        _panelKey('ok', false);
+      } else if (_bottomPanelActive) {
+        _bottomPanelRemoteKey('ok', false);
+      }
+      _okLongFired = false;
+      return;
+    }
+    if (_navPanelOpen) {
+      _panelKey('ok', false);
+      return;
+    }
+    if (_bottomPanelActive) {
+      _bottomPanelRemoteKey('ok', false);
+      return;
+    }
+    if (!_okLongFired) {
+      final c = context.read<PlayerController>();
+      // 点播短按 OK = 暂停/播放；直播/网页频道 = 呼出或收起节目列表
+      if (c.isSeekable && !c.webPageActive) {
+        c.togglePlayPause();
+      } else {
+        _toggleDrawer(left: true);
+      }
+    }
+    _okLongFired = false;
+  }
+
+  /// ←/→ 按下边沿。面板打开：转发面板内导航；
+  /// 可 seek（点播）：点按直接 ±60s seek（不再长按，避免面板冲突）；
+  /// 不可 seek（直播/网页）：启动短按切源计时
+  void _lrDown(bool isLeft) {
+    if (_arrowDown) return;
+    _arrowDown = true;
+    _arrowLongFired = false;
+    _arrowLongTimer?.cancel();
+    if (_navPanelOpen) {
+      _panelKey(isLeft ? 'left' : 'right', true);
+      return;
+    }
+    if (_bottomPanelActive) {
+      _bottomPanelRemoteKey(isLeft ? 'left' : 'right', true);
+      return;
+    }
+    final c = context.read<PlayerController>();
+    // 可 seek（点播）：点按直接 seek，不再长按——长按会误弹面板、
+    // 与面板打开后的左右导航冲突，体验不好
+    if (c.isSeekable && !c.webPageActive) {
+      _singleSeekStep(isLeft);
+      return;
+    }
+    // 不可 seek（直播/网页）：抬起前快速操作即切源（防抖避免按多次切多台）
+    _arrowLongTimer = Timer(const Duration(milliseconds: 400), () {
+      _arrowLongFired = true;
+    });
+  }
+
+  /// ←/→ 抬起边沿：点播点按 seek 后淡出 OSD；直播/网页短按切源
+  void _lrUp(bool isLeft) {
+    if (!_arrowDown) return;
+    _arrowDown = false;
+    _arrowLongTimer?.cancel();
+    if (_navPanelOpen) {
+      _panelKey(isLeft ? 'left' : 'right', false);
+      _arrowLongFired = false;
+      return;
+    }
+    if (_bottomPanelActive) {
+      _bottomPanelRemoteKey(isLeft ? 'left' : 'right', false);
+      _arrowLongFired = false;
+      return;
+    }
+    final c = context.read<PlayerController>();
+    if (c.isSeekable && !c.webPageActive) {
+      // 点播点按 seek：OSD 再停留 1.2 秒后淡出
+      if (_seekOsdVisible) _armSeekOsdHide();
+    } else if (_arrowLongFired) {
+      // 直播/网页长按无动作
+    } else {
+      _onArrow(isLeft ? 'prevSource' : 'nextSource');
+    }
+    _arrowLongFired = false;
+  }
+
+  /// ↑/↓ 按下边沿：侧边面板打开时面板内移动；底部控制面板打开时忽略
+  /// （按钮只有一行，避免误触切台）；其余情况切台
+  void _verticalKey(bool isUp) {
+    if (_navPanelOpen) {
+      _panelKey(isUp ? 'up' : 'down', true);
+      return;
+    }
+    if (_bottomPanelActive) return;
+    _onArrow(isUp ? 'prevChannel' : 'nextChannel');
+  }
+
+  /// 菜单键按下：启动 500ms 长按 = 手机扫码管理二维码卡片
+  /// （短按 = 右侧 EPG 节目单面板）
+  void _menuDown() {
+    if (_menuHeld) return;
+    _menuHeld = true;
+    _menuLongFired = false;
+    _menuLongTimer?.cancel();
+    _menuLongTimer = Timer(const Duration(milliseconds: 500), () {
+      _menuLongFired = true;
+      final c = context.read<PlayerController>();
+      if (c.remoteAdminUrl.isEmpty) {
+        _showOsd('Web 管理服务未开启，请在设置中打开',
+            icon: Icons.qr_code_2);
+        return;
+      }
+      _showRemoteAdminQr(c);
+    });
+  }
+
+  /// 菜单键抬起：未到长按时长=短按，打开 EPG 节目单
+  void _menuUp() {
+    if (!_menuHeld) return;
+    _menuHeld = false;
+    _menuLongTimer?.cancel();
+    if (!_menuLongFired) {
+      _toggleDrawer(left: false);
+    }
+    _menuLongFired = false;
+  }
+
+  /// 媒体键（⏪/⏩）单步 seek ±60 秒：以当前播放位置为基准，
+  /// 屏幕中央显示数字进度 OSD，不弹控制面板
+  void _singleSeekStep(bool isLeft) {
+    final c = context.read<PlayerController>();
+    if (!c.isSeekable) return;
+    final dur = c.duration;
+    if (dur <= Duration.zero) return;
+    var t = c.position + Duration(seconds: isLeft ? -60 : 60);
+    if (t < Duration.zero) t = Duration.zero;
+    if (t > dur) t = dur;
+    c.seekTo(t);
+    _showSeekOsd(target: t, duration: dur, forward: !isLeft);
+    _armSeekOsdHide();
+  }
+
+  /// 显示屏幕中央数字进度 OSD（持续到松手后 1.2 秒）
+  void _showSeekOsd({
+    required Duration target,
+    required Duration duration,
+    required bool forward,
+  }) {
+    _seekOsdHideTimer?.cancel();
+    setState(() {
+      _seekOsdVisible = true;
+      _seekOsdTarget = target;
+      _seekOsdDuration = duration;
+      _seekOsdForward = forward;
+    });
+  }
+
+  /// 松手后让 seek OSD 停留片刻再淡出
+  void _armSeekOsdHide() {
+    _seekOsdHideTimer?.cancel();
+    _seekOsdHideTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() => _seekOsdVisible = false);
+    });
+  }
+
+  /// 在屏幕中央显示一条消息 OSD（截图/录制/关机等提示），
+  /// 取代底部 SnackBar。[duration] 后自动淡出。
+  void _showOsd(
+    String text, {
+    IconData icon = Icons.info_outline,
+    Duration duration = const Duration(milliseconds: 2200),
+  }) {
+    if (!mounted) return;
+    _msgOsdTimer?.cancel();
+    setState(() {
+      _msgOsdText = text;
+      _msgOsdIcon = icon;
+      _msgOsdVisible = true;
+    });
+    _msgOsdTimer = Timer(duration, () {
+      if (mounted) setState(() => _msgOsdVisible = false);
+    });
+  }
+
+  /// 深层 widget 通过 OsdBus 发来的消息 → 中央 OSD
+  void _onBusOsd() {
+    final m = OsdBus.message.value;
+    if (m != null) _showOsd(m.text, icon: m.icon);
+  }
+
+  /// 锁定角标：顶部居中的小胶囊，提示当前已锁定及解锁方式
+  Widget _buildLockBadge() {
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: IgnorePointer(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Center(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.62),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.amber.withOpacity(0.55)),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.lock, color: Colors.amber, size: 16),
+                    SizedBox(width: 6),
+                    Text(
+                      '已锁定 · 按返回键解锁',
+                      style: TextStyle(color: Colors.white70, fontSize: 12.5),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 小窗模式的「恢复窗口」按钮：左上角常驻，鼠标可直接点回原尺寸
+  /// （小窗口里底部面板会被裁切，面板按钮不总是点得到）
+  ///
+  /// top 取 48 而不是 8：鼠标移到顶部 40px 内会弹出 44px 高的悬停标题栏，
+  /// 标题栏在本按钮之上（Stack 后者居上）的命中层会吞掉点击，导致
+  /// 按钮看似存在却点不动。下移到标题栏下沿以外即可避开。
+  Widget _buildMiniRestoreButton(PlayerController c) {
+    return Positioned(
+      top: 48,
+      left: 8,
+      child: Material(
+        color: Colors.black.withOpacity(0.62),
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: c.toggleMiniWindow,
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.crop_free, color: Colors.white, size: 16),
+                SizedBox(width: 6),
+                Text('恢复窗口',
+                    style: TextStyle(color: Colors.white, fontSize: 12.5)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 屏幕中央消息 OSD：半透明深色圆角卡片 + 图标 + 文字，不拦截输入
+  Widget _buildMessageOsd() {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          opacity: _msgOsdVisible ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 180),
+          child: Center(
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 560),
+              margin: const EdgeInsets.symmetric(horizontal: 48),
+              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 22),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.72),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(_msgOsdIcon, color: Colors.blueAccent, size: 30),
+                  const SizedBox(width: 14),
+                  Flexible(
+                    child: Text(
+                      _msgOsdText,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 19,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 时长格式化：不足 1 小时显示 m:ss，否则 h:mm:ss
+  String _fmtClock(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return h > 0 ? '$h:$m:$s' : '$m:$s';
+  }
+
+  /// 点播快进/快退数字进度浮层：方向图标 + 大号目标时间 + 总时长 + 进度条
+  Widget _buildSeekOsd() {
+    final totalMs = _seekOsdDuration.inMilliseconds;
+    final ratio = totalMs > 0
+        ? (_seekOsdTarget.inMilliseconds / totalMs).clamp(0.0, 1.0)
+        : 0.0;
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          opacity: _seekOsdVisible ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 150),
+          child: Center(
+            child: Container(
+              width: 288,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.68),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        _seekOsdForward
+                            ? Icons.fast_forward
+                            : Icons.fast_rewind,
+                        color: Colors.blueAccent,
+                        size: 38,
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        _fmtClock(_seekOsdTarget),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 34,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '/ ${_fmtClock(_seekOsdDuration)}    每格 60 秒',
+                    style: const TextStyle(color: Colors.white60, fontSize: 13),
+                  ),
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: LinearProgressIndicator(
+                      value: ratio,
+                      minHeight: 5,
+                      backgroundColor: Colors.white24,
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                          Colors.blueAccent),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ==================== 抽屉控制 ====================
+
+  void _openDrawer({required bool left}) {
+    final c = context.read<PlayerController>();
+    if (c.locked) return;
+    setState(() {
+      // 打开面板时隐藏悬停标题栏，避免遮挡面板顶部按钮
+      _topBarVisible = false;
+      if (left) {
+        _leftDrawerOpen = true;
+        _rightEpgOpen = false;
+      } else {
+        _rightEpgOpen = true;
+        _leftDrawerOpen = false;
+      }
+    });
+    _armDrawerAutoHide();
+  }
+
+  /// 快捷键用：再次按键时关闭对应面板
+  void _toggleDrawer({required bool left}) {
+    final c = context.read<PlayerController>();
+    if (c.locked) return;
+    setState(() {
+      _topBarVisible = false;
+      if (left) {
+        if (_leftDrawerOpen) {
+          _leftDrawerOpen = false;
+        } else {
+          _leftDrawerOpen = true;
+          _rightEpgOpen = false;
+        }
+      } else {
+        if (_rightEpgOpen) {
+          _rightEpgOpen = false;
+        } else {
+          _rightEpgOpen = true;
+          _leftDrawerOpen = false;
+        }
+      }
+    });
+    _armDrawerAutoHide();
+  }
+
+  // ==================== 切台 OSD / 时钟 ====================
+
+  Widget _buildChannelOsd(PlayerController controller) {
+    final ch = controller.currentChannel;
+    final program = controller.currentProgram?.title;
+    final number = controller.currentChannelNumber;
+    final showOsd = (_osdVisible && ch != null) || _numBuffer.isNotEmpty;
+    final isPhone = defaultTargetPlatform == TargetPlatform.android &&
+        MediaQuery.of(context).size.shortestSide < 600;
+    return Positioned(
+      top: 0,
+      left: 0,
+      child: AnimatedOpacity(
+        opacity: showOsd ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 300),
+        child: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.all(isPhone ? 12 : 24),
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                  horizontal: isPhone ? 14 : 20, vertical: isPhone ? 10 : 16),
+              decoration: BoxDecoration(
+                color: const Color(0xCC1A1A2E),
+                borderRadius: BorderRadius.circular(isPhone ? 10 : 12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 第一行：左侧大号频道号；右侧上下两行——上：频道名（大字），
+                  // 下：当前节目名（小字）
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        number != null ? number.toString().padLeft(2, '0') : '--',
+                        style: TextStyle(
+                          color: Colors.blueAccent,
+                          // 手机上 48 过大，缩到 30
+                          fontSize: isPhone ? 30 : 48,
+                          fontWeight: FontWeight.bold,
+                          height: 1,
+                        ),
+                      ),
+                      SizedBox(width: isPhone ? 10 : 14),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            ch?.name ?? '',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: isPhone ? 16 : 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          if (program != null && program.isNotEmpty)
+                            Padding(
+                              padding: EdgeInsets.only(top: isPhone ? 3 : 5),
+                              child: Text(
+                                '正在直播 · $program',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: isPhone ? 12 : 14,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  // 数字选台输入提示
+                  if (_numBuffer.isNotEmpty)
+                    Padding(
+                      padding: EdgeInsets.only(top: isPhone ? 5 : 8),
+                      child: Text(
+                        '输入: $_numBuffer',
+                        style: TextStyle(
+                          color: Colors.blueAccent,
+                          fontSize: isPhone ? 12 : 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ==================== 手势层 ====================
+
+  Widget _buildGestureLayer(PlayerController controller,
+      {bool webMode = false}) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        return Row(
+          children: [
+            // 左侧：上下滑动调亮度、左边缘右滑/单击开频道菜单
+            Expanded(
+              child: GestureDetector(
+                // 移动端左三分之一：单击开/关频道菜单（不必贴左边缘）
+                onTap: controller.isDesktop
+                    ? null
+                    : () => _toggleDrawer(left: true),
+                onVerticalDragStart: (details) {
+                  _isHorizontalDrag = false;
+                  _dragStartY = details.globalPosition.dy;
+                  _dragStartX = details.globalPosition.dx;
+                  _lastBrightness = controller.brightness;
+                  setState(() => _showBrightnessIndicator = true);
+                },
+                onVerticalDragUpdate: (details) {
+                  if (_isHorizontalDrag || _dragStartY == null) return;
+                  final dy = _dragStartY! - details.globalPosition.dy;
+                  controller.setBrightness(
+                      _lastBrightness + dy * _dragSensitivity);
+                },
+                onVerticalDragEnd: (_) => _onBrightnessDragEnd(),
+                onHorizontalDragStart: (details) {
+                  _isHorizontalDrag = true;
+                  _dragStartX = details.globalPosition.dx;
+                },
+                onHorizontalDragEnd: (details) {
+                  if (_dragStartX != null &&
+                      _dragStartX! <= _edgeWidth &&
+                      details.velocity.pixelsPerSecond.dx > 100) {
+                    _openDrawer(left: true);
+                  }
+                },
+              ),
+            ),
+            // 中间：点击切换面板，双击播放暂停（桌面端双击全屏，按住拖动窗口）。
+            // 网页模式：桌面端完全穿透（点击/滑动全交给网页，面板由边缘
+            // hover 与底部点击区触发，双击全屏由 _WebDoubleTapFullScreen 接管）；
+            // 移动端保留点击呼出信息面板
+            Expanded(
+              child: webMode
+                  ? (controller.isDesktop
+                      ? const SizedBox.expand()
+                      : GestureDetector(onTap: _toggleBottomPanel))
+                  : GestureDetector(
+                      onTap: _toggleBottomPanel,
+                      onDoubleTap: controller.isDesktop
+                          ? (controller.miniWindow
+                              ? controller.toggleMiniWindow
+                              : controller.toggleFullscreen)
+                          : controller.togglePlayPause,
+                      // 全屏状态下绝不能拖动窗口，否则窗口会掉到最底层、点击穿透
+                      onPanStart:
+                          (controller.isDesktop && !controller.isFullscreen)
+                              ? (_) => startWindowDrag()
+                              : null,
+                    ),
+            ),
+            // 右侧：音量调节 + 右边缘滑出 EPG；移动端右三分之一
+            // 单击开/关 EPG 菜单（不必贴右边缘）
+            Expanded(
+              child: GestureDetector(
+                onTap: controller.isDesktop
+                    ? null
+                    : () => _toggleDrawer(left: false),
+                onVerticalDragStart: (details) {
+                  _isHorizontalDrag = false;
+                  _dragStartY = details.globalPosition.dy;
+                  _lastVolume = controller.volume;
+                  setState(() => _showVolumeIndicator = true);
+                },
+                onVerticalDragUpdate: (details) {
+                  if (_isHorizontalDrag || _dragStartY == null) return;
+                  final dy = _dragStartY! - details.globalPosition.dy;
+                  controller.setVolume(_lastVolume + dy * _dragSensitivity);
+                },
+                onVerticalDragEnd: (_) => _onVolumeDragEnd(),
+                onHorizontalDragStart: (details) {
+                  _isHorizontalDrag = true;
+                  _dragStartX = details.globalPosition.dx;
+                },
+                onHorizontalDragEnd: (details) {
+                  if (_dragStartX != null &&
+                      _dragStartX! >= width - _edgeWidth &&
+                      details.velocity.pixelsPerSecond.dx < -100) {
+                    _openDrawer(left: false);
+                  }
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _onBrightnessDragEnd() {
+    _dragStartY = null;
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (mounted) setState(() => _showBrightnessIndicator = false);
+    });
+  }
+
+  void _onVolumeDragEnd() {
+    _dragStartY = null;
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (mounted) setState(() => _showVolumeIndicator = false);
+    });
+  }
+
+  // ==================== 面板控制 ====================
+
+  void _toggleBottomPanel() {
+    final c = context.read<PlayerController>();
+    // 锁定时屏蔽所有面板呼出
+    if (c.locked) return;
+    // 网页模式下没有原生播放状态（_state 通常仍是 loading），
+    // 不能用 state==playing 拦截，否则左右点击永远呼不出面板；
+    // 暂停/出错中也允许呼出（出错时要能点面板上的「重载频道」自救，
+    // 遥控器长按 OK 在暂停时同样要看进度/恢复播放）
+    if (!c.webPageActive &&
+        c.state != PlayerState.playing &&
+        c.state != PlayerState.paused &&
+        c.state != PlayerState.error) {
+      return;
+    }
+    setState(() {
+      _bottomPanelVisible = !_bottomPanelVisible;
+      if (_bottomPanelVisible) {
+        _scheduleBottomHide();
+      }
+    });
+  }
+
+  void _toggleSettings() {
+    setState(() {
+      _settingsOpen = !_settingsOpen;
+      // 打开设置时隐藏悬停标题栏
+      if (_settingsOpen) _topBarVisible = false;
+    });
+    // 设置面板有输入框：打开时放行数字键给输入框，关闭后恢复选台拦截
+    _winHotkeys.setCapture(!_settingsOpen);
+  }
+
+  /// 底部控制面板「手机扫码管理」按钮：弹出二维码
+  void _showRemoteAdminQr(PlayerController controller) {
+    final url = controller.remoteAdminUrl;
+    if (url.isEmpty) return;
+    showRemoteAdminQrDialog(context, url);
+  }
+
+  /// 移动端系统画中画（Android 8.0+）：把播放缩成小窗，
+  /// 切到桌面/其它应用后视频继续播。系统不支持（Android 7 及以下、
+  /// 或未注入原生实现）时提示而不是静默失败。
+  Future<void> _enterPip() async {
+    final ok = await enterPip();
+    if (!ok && mounted) {
+      _showOsd('当前系统不支持小窗播放',
+          icon: Icons.picture_in_picture_alt);
+    }
+  }
+
+  /// 桌面端快捷键：空格 播放/暂停，F/F11 全屏，M 静音，
+  /// PrintScreen 截屏，C 频道列表开/关，E 节目单开/关，S 设置，R 录制
+  void _onShortcut(String action) {
+    if (_settingsOpen && action != 'settings') return;
+    final controller = context.read<PlayerController>();
+    switch (action) {
+      case 'channels':
+        _toggleDrawer(left: true);
+      case 'epg':
+        _toggleDrawer(left: false);
+      case 'settings':
+        _toggleSettings();
+      case 'record':
+        _toggleRecording(controller);
+      case 'playpause':
+        controller.togglePlayPause();
+      case 'fullscreen':
+        controller.toggleFullscreen();
+      case 'mute':
+        controller.toggleMute();
+      case 'screenshot':
+        _takeScreenshot();
+      case 'webadmin':
+        final url = controller.remoteAdminUrl;
+        if (url.isNotEmpty) _showRemoteAdminQr(controller);
+    }
+  }
+
+  /// 播放加载防抖：按下键到内核真正初始化完成期间，遥控器连按的
+  /// 切台/切源动作全部忽略。防止"往下按了一下、松手后才加载完、
+  /// 补按的 OK/方向键落到停在很后面的频道"这类竞态
+  bool _throttled() {
+    if (DateTime.now().isBefore(_loadingLockUntil)) return true;
+    _loadingLockUntil = DateTime.now().add(_loadingLock);
+    return false;
+  }
+
+  /// 方向键：←/→ 切换播放源，↑/↓ 切换频道
+  void _onArrow(String action) {
+    if (_settingsOpen || _leftDrawerOpen || _rightEpgOpen) return;
+    if (_throttled()) return;
+    final controller = context.read<PlayerController>();
+    switch (action) {
+      case 'prevSource':
+        controller.prevSource();
+      case 'nextSource':
+        controller.nextSource();
+      case 'prevChannel':
+        controller.previousChannel();
+      case 'nextChannel':
+        controller.nextChannel();
+    }
+  }
+
+  /// 钩子按住期间系统会重复发 WM_KEYDOWN：记录已按下动作去重，
+  /// 保证一次物理按下只派发一次按下边沿
+  final Set<String> _nativeHeld = <String>{};
+
+  /// 原生钩子转发的动作键（网页持有焦点时 HardwareKeyboard 收不到，
+  /// 由 WH_KEYBOARD_LL 经 omplayer/win_hotkeys 通道送达）。
+  /// isDown=true 按下边沿、false 抬起边沿，与 Flutter 路径共用
+  /// 同一套短按/长按/面板导航逻辑。
+  void _onNativeAction(String action, bool isDown) {
+    if (!mounted) return;
+    if (isDown) _hidePointerForRemote();
+    if (isDown) {
+      if (!_nativeHeld.add(action)) return; // 自动重复，忽略
+    } else {
+      _nativeHeld.remove(action);
+    }
+    // 锁定状态：原生钩子路径（网页前台时 HardwareKeyboard 收不到键）
+    // 同样屏蔽全部操作，仅返回键解锁
+    final lockedCtl = context.read<PlayerController>();
+    if (lockedCtl.locked) {
+      if (isDown && (action == 'esc' || action == 'back')) {
+        lockedCtl.unlock();
+      }
+      return;
+    }
+    // 设置面板打开：仅返回键关面板，其余（字母键/空格等）忽略，
+    // 此时钩子捕获本就由 setCapture(false) 关闭，这里是双保险
+    if (_settingsOpen) {
+      if (isDown && (action == 'esc' || action == 'back')) {
+        _handleBackPressed();
+      }
+      return;
+    }
+    // 对话框（二维码/退出确认等）打开：统一收口；抬起边沿复位配对状态，
+    // 绝不能落到 _handleBackPressed（否则会退全屏/缩小窗口）
+    if (_modalRouteOpen) {
+      if (!isDown) {
+        if (action == 'ok') {
+          _okHeld = false;
+          _okLongTimer?.cancel();
+          _okLongFired = false;
+        } else if (action == 'left' || action == 'right') {
+          _arrowDown = false;
+          _arrowLongTimer?.cancel();
+          _arrowLongFired = false;
+        } else if (action == 'menu') {
+          _menuHeld = false;
+          _menuLongTimer?.cancel();
+          _menuLongFired = false;
+        }
+        return;
+      }
+      // 关机确认卡片：←/→ 切换「取消」「关机」，OK 确认当前选中，
+      // 返回/菜单取消（与 _handleShutdownDialogKey 逻辑一致，原生钩子路径）
+      if (_shutdownDialogOpen) {
+        if (action == 'left' || action == 'right') {
+          _shutdownFocusIndex = _shutdownFocusIndex == 0 ? 1 : 0;
+          _shutdownRefresh?.call(() {});
+        } else if (action == 'ok') {
+          _confirmShutdown(_shutdownFocusIndex == 1);
+        } else if (action == 'back' || action == 'esc' || action == 'menu') {
+          _confirmShutdown(false);
+        }
+        return;
+      }
+      // 退出确认对话框：←/→ 循环移动焦点，OK 确认，返回/菜单取消
+      if (_exitDialogOpen) {
+        if (action == 'left' || action == 'right') {
+          final count = _exitOptionCount;
+          final step = action == 'right' ? 1 : -1;
+          _exitDialogFocusIndex = (_exitDialogFocusIndex + step) % count;
+          if (_exitDialogFocusIndex < 0) _exitDialogFocusIndex += count;
+          _exitDialogRefresh?.call(() {});
+        } else if (action == 'ok') {
+          // 一次性守卫：先摘标志再 pop，任何重复/残余事件都不会
+          // 再弹一次（第二次 pop 会把播放器路由弹掉 → 黑屏）
+          final opts = _exitOptions(context.read<PlayerController>());
+          final idx =
+              _exitDialogFocusIndex.clamp(0, opts.length - 1) as int;
+          _exitDialogOpen = false;
+          Navigator.of(context).pop<String?>(
+              opts[idx].action == 'back' ? null : opts[idx].action);
+        } else if (action == 'back' ||
+            action == 'esc' ||
+            action == 'menu') {
+          _exitDialogOpen = false;
+          Navigator.of(context).pop<String?>(null);
+        }
+        return;
+      }
+      if (action == 'ok' ||
+          action == 'back' ||
+          action == 'esc' ||
+          action == 'menu') {
+        Navigator.of(context).maybePop();
+      }
+      return;
+    }
+    // OK / 左右 / 菜单需要按下-抬起配对
+    if (action == 'ok') {
+      isDown ? _okDown() : _okUp();
+      return;
+    }
+    if (action == 'left') {
+      isDown ? _lrDown(true) : _lrUp(true);
+      return;
+    }
+    if (action == 'right') {
+      isDown ? _lrDown(false) : _lrUp(false);
+      return;
+    }
+    if (action == 'menu') {
+      isDown ? _menuDown() : _menuUp();
+      return;
+    }
+    if (!isDown) return; // 其余动作只响应按下边沿
+    final controller = context.read<PlayerController>();
+    switch (action) {
+      case 'up':
+        _verticalKey(true);
+      case 'down':
+        _verticalKey(false);
+      case 'esc':
+      case 'back':
+        _handleBackPressed();
+      case 'space':
+        controller.togglePlayPause();
+      case 'm':
+        _onShortcut('mute');
+      case 'f':
+        _onShortcut('fullscreen');
+      case 'r':
+        _onShortcut('record');
+      case 'c':
+        _onShortcut('channels');
+      case 'e':
+        _onShortcut('epg');
+      case 's':
+        _onShortcut('settings');
+    }
+  }
+
+  Future<void> _takeScreenshot() async {
+    final controller = context.read<PlayerController>();
+    final path = await controller.takeScreenshot();
+    if (mounted) {
+      _showOsd(
+        path != null ? '截图已保存: $path' : '截图失败',
+        icon: Icons.photo_camera,
+        duration: const Duration(seconds: 3),
+      );
+    }
+  }
+
+  Future<void> _toggleRecording(PlayerController controller) async {
+    if (!controller.isDesktop) return;
+    if (controller.isRecording) {
+      final path = await controller.stopRecording();
+      if (mounted) {
+        _showOsd(
+          path != null
+              ? '录制已停止，保存至: $path'
+              : '录制已停止（未捕获到视频数据）',
+          icon: Icons.stop,
+          duration: const Duration(seconds: 3),
+        );
+      }
+    } else {
+      final ok = await controller.startRecording();
+      if (mounted) {
+        _showOsd(
+          ok
+              ? (controller.webPageActive
+                  ? '开始录制网页视频，保存到程序所在文件夹的 recordings 子文件夹'
+                  : '开始录制，视频保存到程序所在文件夹的 recordings 子文件夹')
+              : (controller.lastError ?? '录制失败'),
+          icon: Icons.fiber_manual_record,
+          duration: const Duration(seconds: 2),
+        );
+      }
+    }
+  }
+
+  /// 录制指示器的字节数格式化（网页录制显示实时落盘大小）
+  static String _formatBytes(int bytes) {
+    if (bytes < 1024) return '${bytes}B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)}KB';
+    }
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)}MB';
+  }
+
+  /// 底部面板 hover 取消隐藏
+  void _cancelBottomHide() {
+    _bottomHideTimer?.cancel();
+    // 避免鼠标每次移动都触发重建
+    if (!_bottomHovering && mounted) {
+      setState(() => _bottomHovering = true);
+    }
+  }
+
+  /// 底部面板 hover 离开后启动隐藏计时
+  void _scheduleBottomHide() {
+    setState(() => _bottomHovering = false);
+    _bottomHideTimer?.cancel();
+    final delay =
+        context.read<PlayerController>().settings.autoHideDelay;
+    _bottomHideTimer = Timer(Duration(milliseconds: delay), () {
+      if (mounted && !_bottomHovering) {
+        setState(() => _bottomPanelVisible = false);
+      }
+    });
+  }
+
+  /// 桌面端 hover 到底部边缘时显示面板
+  void _showBottomPanel() {
+    final c = context.read<PlayerController>();
+    if (c.locked) return;
+    setState(() => _bottomPanelVisible = true);
+    _bottomHideTimer?.cancel();
+  }
+
+  /// 抽屉 hover 移出后 3 秒自动隐藏
+  void _startDrawerHideTimer() {
+    _drawerHideTimer?.cancel();
+    _drawerHideTimer = Timer(_drawerAutoHide, () {
+      if (mounted) {
+        setState(() {
+          _leftDrawerOpen = false;
+          _rightEpgOpen = false;
+        });
+        _ensureShortcutFocus();
+      }
+    });
+  }
+}
+
+/// 网页频道前台的双击全屏层。
+/// 用 Listener（透明命中，不参与手势竞技场）手动识别双击：单击指针
+/// 事件原样穿透给下方的 WebView（不影响网页播放器的单击暂停/播放），
+/// 只在 300ms 内两次相邻点按时触发 [onToggle] 切换 App 窗口全屏。
+class _WebDoubleTapFullScreen extends StatefulWidget {
+  final VoidCallback onToggle;
+  const _WebDoubleTapFullScreen({required this.onToggle});
+
+  @override
+  State<_WebDoubleTapFullScreen> createState() =>
+      _WebDoubleTapFullScreenState();
+}
+
+class _WebDoubleTapFullScreenState extends State<_WebDoubleTapFullScreen> {
+  DateTime? _lastTap;
+  Offset _lastPos = Offset.zero;
+
+  void _onDown(PointerDownEvent e) {
+    final now = DateTime.now();
+    final last = _lastTap;
+    if (last != null &&
+        now.difference(last).inMilliseconds <= 300 &&
+        (e.position - _lastPos).distance < 40) {
+      _lastTap = null;
+      widget.onToggle();
+      return;
+    }
+    _lastTap = now;
+    _lastPos = e.position;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _onDown,
+      child: const SizedBox.expand(),
+    );
+  }
+}
+
+
+/// 内嵌网页频道控件：充满整个窗口，由网站自身播放器播放
+/// （如央视频网页版）。网页先在【后台】加载缓冲（被 PlayerScreen 的
+/// 黑屏占位盖住），JS 探测到视频有声起播后通过 [onForeground] 通知
+/// 父层把网页推到全屏前台；信息面板/节目单/EPG 抽屉由 PlayerScreen
+/// 叠加在本控件之上。退出网页请从左侧频道列表选普通频道。
+class _WebChannelOverlay extends StatefulWidget {
+  final String url;
+
+  /// 频道名：站点脚本页内切台时按名称匹配（芒果TV 点频道、央视频找节目单）
+  final String title;
+
+  /// 网页是否已处于前台播放（false=后台缓冲，被黑屏占位覆盖）
+  final bool foreground;
+
+  /// 探测到有声起播，请求父层把网页推到前台
+  final VoidCallback onForeground;
+
+  /// 网页内按键（焦点在 WebView 中时 Flutter 收不到键盘消息，
+  /// 由 JS 转发）：'d0'..'d9' 数字选台，'fullscreen' 全屏切换
+  final ValueChanged<String> onWebKey;
+
+  /// 网页播放/暂停状态变化（底部面板按钮图标）
+  final ValueChanged<bool> onPlayStateChanged;
+
+  /// 网页内鼠标移动（自动隐藏/呼出系统鼠标）
+  final VoidCallback onWebMouseMove;
+
+  /// WebView 创建后注册控制桥（执行 JS / 截图）
+  final void Function({
+    required Future<dynamic> Function(String) eval,
+    required Future<List<int>?> Function() screenshot,
+  }) onBridgeAttached;
+
+  /// WebView 销毁前注销控制桥
+  final VoidCallback onBridgeDetached;
+
+  const _WebChannelOverlay({
+    super.key,
+    required this.url,
+    required this.title,
+    required this.foreground,
+    required this.onForeground,
+    required this.onWebKey,
+    required this.onPlayStateChanged,
+    required this.onWebMouseMove,
+    required this.onBridgeAttached,
+    required this.onBridgeDetached,
+  });
+
+  @override
+  State<_WebChannelOverlay> createState() => _WebChannelOverlayState();
+}
+
+class _WebChannelOverlayState extends State<_WebChannelOverlay> {
+  bool _loaded = false;
+  String? _error;
+  bool _runtimeMissing = false;
+  /// WebView 是否报告过任何加载进度（有进度即证明 WebView2 运行时正常）
+  bool _sawProgress = false;
+
+  /// 诊断用：加载进度分桶（25/50/75/100）去重，避免每帧进度回调刷屏
+  int _progBucket = 0;
+  InAppWebViewController? _webController;
+
+  /// 后台缓冲期间每秒探测一次页面 <video> 的真实起播状态
+  Timer? _probeTimer;
+
+  /// 超时兜底：网站不允许自动播放（需用户手动点播放按钮）时，
+  /// 不能永远黑屏把用户卡死——8 秒后若网页自身也没起播，
+  /// 直接把网页推到前台（网页已起播则等嗅探决策出结论）
+  Timer? _forceForegroundTimer;
+
+  /// 最终决策窗口（15 秒）：期间没识别出可直连直播主流，
+  /// 判定加密/无流，直接网页全屏播放（不提示、不跳内置）
+  Timer? _decisionTimer;
+
+  /// 网页自身起播后的宽限定时器：再给嗅探 6 秒确认直播主流，
+  /// 仍无结论则立刻网页全屏（加密页用户不用黑屏等满总窗口）
+  Timer? _webReadyGraceTimer;
+
+  /// 页面 <video> 是否已报告起播（决定兜底窗口结束时
+  /// 一次性嗅探候选是否值得接管）
+  bool _webPlayReady = false;
+
+  /// 15 秒内 WebView 毫无加载进度：判定为缺少 WebView2 运行时
+  Timer? _runtimeTimer;
+
+  /// XHR/fetch 嗅探到的媒体流候选：自动聚合 + 服务端预检，
+  /// 可直连则自动切内置播放器全屏播放；加密/不可直连则留在网页
+  /// 全屏播放，不弹任何常驻提示
+  final Map<String, _SniffCandidate> _sniffCandidates = {};
+  Timer? _sniffAggTimer;
+  Timer? _sniffDeadline;
+  bool _sniffChecking = false;
+  bool _sniffDone = false;
+  bool _sniffAbandoned = false;
+
+  /// 嗅探是否启用。默认 false：页面保持零 hook 纯净环境（对齐 NewBox
+  /// webview:// 纯网页播放策略，咪咕等带完整性检测的播放器才能工作）；
+  /// 仅当 8 秒兜底时页面连 video 元素都还没有才置 true，由 _inject()
+  /// 运行时注入轻嗅探（不重建 WebView）
+  bool _sniffEnabled = false;
+
+  /// 轻嗅探只注入一次，避免反复注入
+  bool _sniffRetried = false;
+  /// 最近一次探测到的页面 video 元素数量（0 = 页面还没挂出播放器）。
+  /// 8 秒兜底据此判断该不该注入嗅探：页面已有播放器时不做任何干预
+  int _pageVideoCount = 0;
+  /// 站点脚本（芒果/央视频）提前注入定时器。
+  /// 日志实测根因：站点脚本只在 onLoadStop 注入，而芒果/央视频首屏很慢
+  /// （8 秒时进度仍只有 66%），onLoadStop 迟迟不来 → 站点脚本永不注入、
+  /// 永不点台 → 页面永远不挂 video（永久黑屏）。改为 2.5 秒提前注入一次
+  Timer? _siteInjectTimer;
+  /// 探针节拍计数（每 3 拍 = 3 秒触发一次点台重试）
+  int _siteRetryTick = 0;
+  /// 站点页无 video 时的点台重试次数，上限 8 次避免反复打扰页面
+  int _siteRetryCount = 0;
+
+  /// 卡死看门狗：每 3 秒采样页面主视频播放位置
+  Timer? _stallWatchTimer;
+  int _stallTicks = 0;
+  double _lastVideoCt = -1;
+  bool _stallBusy = false;
+  DateTime _stallCooldownUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 读取页面主视频 [有元素, 是否暂停, 当前播放位置]。
+  /// 优先取面积最大的视频，iframe 内一并统计
+  static const String _healthJs = r'''
+(function(){
+  function collect(root, out){
+    try{
+      var l = root.querySelectorAll('video,audio');
+      for (var i=0;i<l.length;i++) out.push(l[i]);
+    }catch(e){}
+    try{
+      var fs = root.querySelectorAll('iframe');
+      for (var i=0;i<fs.length;i++){
+        try{ var d = fs[i].contentDocument; if (d) collect(d, out); }catch(e){}
+      }
+    }catch(e){}
+  }
+  var vs = [];
+  collect(document, vs);
+  if (!vs.length) return [0, 0, 0];
+  var best = null, bestA = 0;
+  for (var i=0;i<vs.length;i++){
+    var r;
+    try{ r = vs[i].getBoundingClientRect(); }catch(e){ continue; }
+    var a = (r.width >= 80 && r.height >= 60) ? r.width * r.height : 0;
+    if (a > bestA) { bestA = a; best = vs[i]; }
+  }
+  if (!best) {
+    for (var i=0;i<vs.length;i++){ if (!vs[i].paused) { best = vs[i]; break; } }
+    if (!best) best = vs[0];
+  }
+  var ct = 0;
+  try{ ct = best.currentTime || 0; }catch(e){}
+  return [1, best.paused ? 1 : 0, ct];
+})();
+''';
+
+  /// 网页卡死自动重载：前台播放且已起播时，播放位置连续 8 拍
+  /// （24 秒）没有推进且不是用户暂停 → 重载当前频道。
+  /// 设置「失败自动重载」可关闭；每频道最多重载「自动重试次数」次。
+  Future<void> _checkStall() async {
+    if (!mounted || _stallBusy || !widget.foreground || !_webPlayReady) return;
+    final ctl = Provider.of<PlayerController>(context, listen: false);
+    if (!ctl.settings.autoReloadStall) return;
+    if (DateTime.now().isBefore(_stallCooldownUntil)) return;
+    // 重载次数用设置里的「自动重试次数」（与内置播放器失败重试共用）
+    if (ctl.autoReloadCount >= ctl.settings.retryTimes) return;
+    final c = _webController;
+    if (c == null) return;
+    _stallBusy = true;
+    try {
+      dynamic r;
+      var stalled = false;
+      try {
+        r = await c
+            .evaluateJavascript(source: _healthJs)
+            .timeout(const Duration(seconds: 4));
+      } on TimeoutException {
+        // 页面主线程完全无响应（连注入 JS 都执行不了）：同样按无进展计拍
+        stalled = true;
+      } catch (_) {
+        return;
+      }
+      if (!mounted) return;
+      if (!stalled) {
+        if (r is! List || r.length < 3) return;
+        bool flag(dynamic v) => v == 1 || v?.toString() == '1';
+        // 页面没有视频元素 / 视频处于暂停：都不算卡死
+        if (!flag(r[0]) || flag(r[1])) {
+          _stallTicks = 0;
+          _lastVideoCt = -1;
+          return;
+        }
+        final ct = double.tryParse(r[2]?.toString() ?? '') ?? -1;
+        if (ct < 0) {
+          _stallTicks = 0;
+          return;
+        }
+        final last = _lastVideoCt;
+        _lastVideoCt = ct;
+        if (last < 0) return; // 首次采样只记基准
+        if ((ct - last).abs() > 0.3) {
+          _stallTicks = 0; // 播放位置在推进：正常
+          return;
+        }
+      }
+      if (++_stallTicks < 8) return;
+      // 24 秒没有任何推进：判定卡死，自动重载当前频道
+      _stallTicks = 0;
+      _lastVideoCt = -1;
+      ctl.markAutoReload();
+      _stallCooldownUntil = DateTime.now().add(const Duration(seconds: 40));
+      WebDiag.log('auto_reload',
+          'n=${ctl.autoReloadCount}|title=${widget.title}');
+      await ctl.reloadCurrentChannel();
+    } finally {
+      _stallBusy = false;
+    }
+  }
+
+  static int _sniffKindPri(String kind) =>
+      kind == 'hls' ? 3 : (kind == 'dash' ? 2 : 1);
+
+  void _onSniffedStream(dynamic raw) {
+    if (_sniffAbandoned || _sniffDone) return;
+    try {
+      final s = raw is String ? raw : raw.toString();
+      final m = jsonDecode(s) as Map<dynamic, dynamic>;
+      final url = (m['u'] as String?) ?? '';
+      if (url.isEmpty || !mounted) return;
+      final kind = (m['k'] as String?) ?? 'hls';
+      final now = DateTime.now();
+      final isNew = !_sniffCandidates.containsKey(url);
+      final c = _sniffCandidates.putIfAbsent(
+          url,
+          () => _SniffCandidate(
+                url: url,
+                kind: kind,
+                referer: (m['r'] as String?) ?? widget.url,
+                ua: m['ua'] as String?,
+              ));
+      c.count++;
+      c.last = now;
+      WebDiag.log('sniff',
+          'k=$kind|cnt=${c.count}|new=${isNew ? 1 : 0}|u=$url');
+      // 更高优先级类型可升级标注
+      if (_sniffKindPri(kind) > _sniffKindPri(c.kind)) c.kind = kind;
+      // 首个候选出现后 15 秒兜底：强制执行最后一轮选择，仍不可接管
+      // 就留在网页全屏播放（_decisionTimer 是无候选时的总兜底）
+      _sniffDeadline ??= Timer(const Duration(seconds: 15), () {
+        if (!_sniffDone) _autoPick(force: true);
+      });
+      // 请求持续到达期间反复安排聚合选择；正在预检时不重入
+      if (!_sniffChecking && _sniffAggTimer == null) {
+        _sniffAggTimer = Timer(const Duration(seconds: 4), () {
+          _sniffAggTimer = null;
+          _autoPick(force: false);
+        });
+      }
+    } catch (_) {}
+  }
+
+  /// 网页自身播放器起播：默认无嗅探时立即推前台网页全屏；
+  /// 仅兜底重载带嗅探时才再给 6 秒确认是否存在可直连直播主流，
+  /// 确认不到就网页全屏（加密 MSE 页）。只安排一次。
+  void _markWebPlayReady() {
+    if (_webPlayReady || _sniffDone) return;
+    _webPlayReady = true;
+    WebDiag.log('web_ready', 'sniff=$_sniffEnabled');
+    // 默认无嗅探：网页起播即推前台（没有接管候选的来源，不必黑屏
+    // 等宽限）；仅兜底重载带嗅探时才给 6 秒确认直连主流
+    if (!_sniffEnabled) {
+      _finishWithWeb(via: 'web_ready');
+      return;
+    }
+    _webReadyGraceTimer ??= Timer(const Duration(seconds: 6), () {
+      if (mounted && !_sniffDone) _autoPick(force: true);
+    });
+  }
+
+  /// 决策结束：不再尝试接管，直接让网页全屏播放（加密/DRM/无流，
+  /// 或网页自身已在播而嗅探候选只是侧栏推荐）。全程不弹提示。
+  void _finishWithWeb({String via = '?'}) {
+    if (_sniffDone) return;
+    // 嗅探预检进行中：此时把网页推前台，会出现"网页先播放一会、预检
+    // 完成后又切回内置"的闪切。推迟 3 秒再审，等预检出结果自行收尾
+    if (_sniffChecking) {
+      WebDiag.log('finish_defer', 'via=$via');
+      _decisionTimer = Timer(const Duration(seconds: 3),
+          () => _finishWithWeb(via: 'defer3s'));
+      return;
+    }
+    WebDiag.log('finish_web',
+        'via=$via|cand=${_sniffCandidates.length}|ready=${_webPlayReady ? 1 : 0}');
+    _sniffDone = true;
+    _sniffDeadline?.cancel();
+    _sniffAggTimer?.cancel();
+    _forceForegroundTimer?.cancel();
+    _webReadyGraceTimer?.cancel();
+    if (mounted && !widget.foreground) {
+      WebDiag.log('push_fg', 'via=finish_web($via)');
+      widget.onForeground();
+    }
+  }
+
+  Future<void> _autoPick({required bool force}) async {
+    if (_sniffDone || _sniffChecking || !mounted) return;
+    final now = DateTime.now();
+    var list = _sniffCandidates.values.toList();
+    // 近 10 秒仍在被请求的才是当前播放的主流（直播清单持续轮询；
+    // 页面上的推荐位/其他频道/广告片段只请求一两次）
+    var alive =
+        list.where((c) => now.difference(c.last).inSeconds <= 10).toList();
+    if (alive.isEmpty) {
+      if (!force) return; // 聚合太早，等后续真实请求或兜底窗口
+      alive = list;
+    }
+    WebDiag.log('autopick',
+        'force=${force ? 1 : 0}|cand=${list.length}|alive=${alive.length}');
+    if (alive.isEmpty) {
+      if (force) _finishWithWeb(via: 'autopick_empty');
+      return;
+    }
+    alive.sort((a, b) {
+      final p = _sniffKindPri(b.kind).compareTo(_sniffKindPri(a.kind));
+      if (p != 0) return p;
+      return b.count.compareTo(a.count);
+    });
+    _sniffChecking = true;
+    final pc = context.read<PlayerController>();
+    for (final c in alive.take(3)) {
+      // 非强制轮次：只认被持续轮询（count>=2）的直播清单主流，
+      // 页面刚打开时一次性请求的广告/侧栏推荐流不接管；
+      // 强制兜底时：若网页自身已经在播（MSE/blob 加密流），一次性
+      // 候选也不接管——正片显然已由网页播放器处理，安心留网页；
+      // 网页没起播时才允许用唯一候选尝试内置接管
+      if (c.count < 2 && (!force || _webPlayReady)) continue;
+      final ok = await pc.checkSniffedStreamPlayable(
+        url: c.url,
+        kind: c.kind,
+        referer: c.referer ?? widget.url,
+        userAgent: (c.ua != null && c.ua!.trim().isNotEmpty)
+            ? c.ua!.trim()
+            : '',
+      );
+      WebDiag.log('precheck',
+          'ok=${ok ? 1 : 0}|cnt=${c.count}|k=${c.kind}|u=${c.url}');
+      if (!mounted) return;
+      if (ok) {
+        // 不自动接管：网页一律以网页方式播放。把预检通过的直连流登记为
+        // 底部面板「内置播放器播放」按钮的手动目标，用户点击才切换
+        WebDiag.log('offer', 'k=${c.kind}|u=${c.url}');
+        pc.offerSniffTarget(
+          url: c.url,
+          referer: c.referer ?? widget.url,
+          userAgent: c.ua ?? '',
+        );
+        _sniffChecking = false;
+        _finishWithWeb(via: 'offer');
+        return;
+      }
+    }
+    _sniffChecking = false;
+    WebDiag.log('autopick_fail', 'force=${force ? 1 : 0}');
+    // 预检全部不通过：兜底窗口结束则留网页全屏（加密/DRM，不提示）；
+    // 未到点则等页面后续请求触发下一轮
+    if (force) _finishWithWeb(via: 'autopick_fail');
+  }
+
+  /// 禁用网页右键菜单（<video> 默认的“循环/复制视频地址/另存”等菜单
+  /// 不该出现在播放应用里），并把右键改为与返回键同效（呼出退出卡片）。
+  /// 捕获阶段拦截 contextmenu，对所有同源 iframe 递归挂载；
+  /// MutationObserver 处理后续动态插入的 iframe。
+  /// 幂等：顶层与各文档各自打 __omNoCtx 标记，可重复注入。
+  static const String _noContextMenuJs = r'''
+(function(){
+  function back(){
+    try{
+      // 只在顶层调用 bridge：iframe 统一向父文档转发，避免一次右键
+      // 在父子文档各触发一次返回（关一层面板又弹一次退出卡片）
+      if(window.top!==window)return false;
+      if(window.flutter_inappwebview&&window.flutter_inappwebview.callHandler){
+        window.flutter_inappwebview.callHandler('omKey','back');
+        return true;
+      }
+    }catch(e){}
+    return false;
+  }
+  function up(){
+    try{
+      if(window.parent&&window.parent!==window){
+        window.parent.postMessage('__omBack','*');
+        return true;
+      }
+    }catch(e){}
+    return false;
+  }
+  function kill(e){
+    try { e.preventDefault(); e.stopImmediatePropagation(); } catch(_){}
+    if(back())return;
+    up();
+  }
+  function bindDoc(d){
+    try {
+      if (!d || d.__omNoCtx) return;
+      d.__omNoCtx = true;
+      d.addEventListener('contextmenu', kill, true);
+      // iframe 内没有 JS bridge：向父文档转发，由有 bridge 的顶层调用
+      var w = d.defaultView;
+      if (w && !w.__omBackMsg) {
+        w.__omBackMsg = true;
+        w.addEventListener('message', function(ev){
+          try {
+            if (ev && ev.data === '__omBack' && !back()) up();
+          } catch(_){}
+        }, false);
+      }
+      bindFrames(d);
+    } catch(e) {}
+  }
+  function bindFrames(root){
+    var fs;
+    try { fs = root.querySelectorAll('iframe'); } catch(e) { return; }
+    for (var i=0;i<fs.length;i++){
+      try { bindDoc(fs[i].contentDocument); } catch(e) {}
+    }
+  }
+  bindDoc(document);
+  if (!window.__omNoCtxObs) {
+    window.__omNoCtxObs = true;
+    try {
+      new MutationObserver(function(muts){
+        for (var i=0;i<muts.length;i++){
+          var added = muts[i].addedNodes;
+          for (var j=0;j<added.length;j++){
+            var n = added[j];
+            if (n.nodeType !== 1) continue;
+            if (n.tagName === 'IFRAME') { try { bindDoc(n.contentDocument); } catch(e) {} }
+            else { try { bindFrames(n); } catch(e) {} }
+          }
+        }
+      }).observe(document.documentElement, {childList:true, subtree:true});
+    } catch(e) {}
+  }
+})();
+''';
+
+  /// CSS：把页面里的 <video> 伪全屏铺满窗口；隐藏主流网页播放器的
+  /// 控制条/信息浮层（借鉴 TVBox 系 live.webview.js 的选择器表），
+  /// 让网页兜底播放看起来接近原生全屏。注意不隐藏大播放按钮/海报，
+  /// 否则自动开播逻辑（getBoundingClientRect 尺寸判定）会失效。
+  static const String _cssJs = r'''
+(function(){
+  var CSS_TEXT = 'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;height:100%!important;width:100%!important}'
+      + '*{-webkit-user-select:none!important;user-select:none!important}'
+      + 'input,textarea{-webkit-user-select:text!important;user-select:text!important}'
+      + 'video{position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;object-fit:contain!important;z-index:2147483647!important;background:#000!important;outline:none!important}'
+      + '.xg-controls,.xgplayer-controls,.prism-controlbar,.prism-detect-info,.prism-info-display,'
+      + '.vjs-control-bar,.dplayer-controller,.dplayer-bezel,.dplayer-menu,#control_bar_player,#pic_in_pic_player{display:none!important}'
+      + 'html.__om_hide_cursor,html.__om_hide_cursor *{cursor:none!important}'
+      + '#__om_web_layer{position:fixed!important;inset:0!important;background:#000!important;z-index:2147483646!important}';
+  function inject(d){
+    try {
+      if (!d || !d.head) return;
+      var old = d.getElementById('__om_fullscreen_style');
+      if (old) return;
+      var s = d.createElement('style');
+      s.id = '__om_fullscreen_style';
+      s.textContent = CSS_TEXT;
+      d.head.appendChild(s);
+    } catch(e) {}
+  }
+  function walk(root){
+    inject(root);
+    try {
+      var frames = root.querySelectorAll('iframe');
+      for (var i=0;i<frames.length;i++){
+        try { var d = frames[i].contentDocument; if (d) walk(d); } catch(e) {}
+      }
+    } catch(e) {}
+  }
+  walk(document);
+  window.__omCssText = CSS_TEXT;
+})();
+''';
+
+  /// 常驻注入：强制解除静音/调大音量/拉起播放，探测起播；
+  /// 转发鼠标移动 / 数字键与全屏键 / play-pause 状态到 Dart；
+  /// 屏蔽网页自身双击全屏（由 Flutter 统一处理）。
+  /// 央视频等站点的播放器可能位于同源 iframe 内，需要递归遍历。
+  static const String _bootJs = r'''
+(function(){
+  if (window.__omBooted) return;
+  window.__omBooted = true;
+  function fire(name, arg){
+    try { window.flutter_inappwebview.callHandler(name, arg); } catch(e) {}
+  }
+  // 修复 iframe 自动播放：给所有 iframe 加 allow="autoplay"
+  function fixIframes(doc){
+    try {
+      var frames = doc.querySelectorAll('iframe');
+      for (var i=0;i<frames.length;i++){
+        var f = frames[i];
+        var allow = f.getAttribute('allow') || '';
+        if (allow.indexOf('autoplay') === -1) {
+          f.setAttribute('allow', (allow ? allow + '; ' : '') + 'autoplay; fullscreen; encrypted-media');
+        }
+      }
+    } catch(e) {}
+  }
+  setInterval(function(){ fixIframes(document); }, 1000);
+  fixIframes(document);
+  // 网页自己的双击全屏与 App 窗口全屏冲突，屏蔽之
+  document.addEventListener('dblclick', function(e){
+    e.stopPropagation(); e.preventDefault();
+  }, true);
+
+  // ===== 鼠标 / 键盘 桥接（含同源 iframe）=====
+  var hideCursorTimer = null;
+  var cursorHidden = false;
+  var hookedDocs = [];
+  function allElsCursor(h, doc){
+    try {
+      doc.documentElement.style.cursor = h ? 'none' : '';
+      var vids = doc.querySelectorAll('video');
+      for (var i=0;i<vids.length;i++) vids[i].style.cursor = h ? 'none' : '';
+    } catch(e){}
+  }
+  function setCursorHidden(h){
+    cursorHidden = h;
+    for (var i=0;i<hookedDocs.length;i++){
+      try {
+        var root = hookedDocs[i].documentElement;
+        if (h) root.classList.add('__om_hide_cursor');
+        else root.classList.remove('__om_hide_cursor');
+        allElsCursor(h, hookedDocs[i]);
+      } catch(e){}
+    }
+  }
+  setInterval(function(){
+    if (cursorHidden) {
+      for (var i=0;i<hookedDocs.length;i++){
+        try {
+          var root = hookedDocs[i].documentElement;
+          if (!root.classList.contains('__om_hide_cursor'))
+            root.classList.add('__om_hide_cursor');
+          allElsCursor(true, hookedDocs[i]);
+        } catch(e){}
+      }
+    }
+  }, 500);
+  function showCursor(){
+    setCursorHidden(false);
+    if (hideCursorTimer) clearTimeout(hideCursorTimer);
+    hideCursorTimer = setTimeout(function(){ setCursorHidden(true); }, 3000);
+  }
+  // 暴露给 Dart 侧：数字键切频道等 Flutter 侧交互时调用，
+  // 否则网页收不到事件，光标不会自动隐藏
+  window.__omShowCursor = showCursor;
+  // 暴露给 Dart 侧：网络断开/恢复时暂停/继续网页播放
+  window.__omPause = function(){
+    window.__omUserPaused = true;
+    var vs = allVideos(document);
+    for (var i=0;i<vs.length;i++){ try { vs[i].pause(); } catch(e){} }
+  };
+  window.__omResume = function(){
+    window.__omUserPaused = false;
+    kick();
+  };
+  var lastMM = 0;
+  function onMouseMove(){
+    var n = Date.now();
+    if (n - lastMM < 300) return;
+    lastMM = n;
+    showCursor();
+    fire('omMouse');
+  }
+  // 点击后也要重置隐藏定时器，否则点完不挪鼠标就不会自动隐藏
+  function onMouseActivity(){
+    showCursor();
+  }
+  function onKeyDown(e){
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+        || t.isContentEditable)) return;
+    var k = e.key;
+    if (k >= '0' && k <= '9') {
+      fire('omKey', 'd' + k);
+      e.preventDefault();
+    } else if (k === 'F11' || k === 'f' || k === 'F') {
+      fire('omKey', 'fullscreen');
+      e.preventDefault();
+    } else if (k === 'Escape') {
+      fire('omKey', 'exitfullscreen');
+    }
+  }
+  function hookDoc(d){
+    if (!d || d.__omHooked) return;
+    d.__omHooked = true;
+    hookedDocs.push(d);
+    d.addEventListener('mousemove', onMouseMove, true);
+    d.addEventListener('mousedown', onMouseActivity, true);
+    d.addEventListener('click', onMouseActivity, true);
+    d.addEventListener('keydown', onKeyDown, true);
+    try {
+      var ss = d.createElement('style');
+      ss.textContent = 'html.__om_hide_cursor,html.__om_hide_cursor *{cursor:none!important}';
+      (d.head || d.documentElement).appendChild(ss);
+    } catch(e){}
+  }
+  hookDoc(document);
+  showCursor();
+
+  function eachFrameDoc(root, fn){
+    var frames = root.querySelectorAll('iframe');
+    for (var i=0;i<frames.length;i++){
+      try {
+        var d = frames[i].contentDocument;
+        if (d) { hookDoc(d); fn(d); eachFrameDoc(d, fn); }
+      } catch(e) {}
+    }
+  }
+
+  var bootT0 = Date.now();
+  function collectVideos(root, out, deep){
+    var i, list;
+    try { list = root.querySelectorAll('video'); } catch(e) { return; }
+    for (i = 0; i < list.length; i++) out.push(list[i]);
+    if (deep) {
+      var all;
+      try { all = root.querySelectorAll('*'); } catch(e) { all = []; }
+      for (i = 0; i < all.length; i++) {
+        try { if (all[i].shadowRoot) collectVideos(all[i].shadowRoot, out, true); } catch(e) {}
+      }
+    }
+    try {
+      var fs = root.querySelectorAll('iframe');
+      for (i = 0; i < fs.length; i++) {
+        try { var d = fs[i].contentDocument; if (d) collectVideos(d, out, deep); } catch(e) {}
+      }
+    } catch(e) {}
+  }
+  function allVideos(root){
+    // 加载后 60 秒窗口内做 Shadow DOM 全遍历（部分站点把 video 放进
+    // shadow root），之后退回轻量扫描避免弹幕重页面长期掉帧
+    var deep = (Date.now() - bootT0) < 60000;
+    var out = [];
+    collectVideos(root, out, deep);
+    return out;
+  }
+  // inline 固定铺满：对元素本身写 cssText，shadow DOM 内的 video 与
+  // 跨域 iframe（内容不可达但元素可写样式）都能铺满
+  function unclip(el){
+    var n = el;
+    while (n && n !== document.documentElement) {
+      if (n.style) {
+        n.style.setProperty('overflow', 'visible', 'important');
+        n.style.setProperty('transform', 'none', 'important');
+        n.style.setProperty('filter', 'none', 'important');
+        n.style.setProperty('clip-path', 'none', 'important');
+      }
+      n = n.parentElement;
+    }
+  }
+  var PIN_CSS = 'display:block!important;position:fixed!important;left:0!important;top:0!important;'
+      + 'width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;'
+      + 'object-fit:contain!important;z-index:2147483647!important;margin:0!important;padding:0!important;'
+      + 'border:none!important;background:#000!important;transform:none!important';
+  function pinEl(el){
+    if (!el || !el.style) return;
+    if (el.getAttribute('data-om-pin') === '1') return;
+    el.setAttribute('data-om-pin', '1');
+    unclip(el);
+    el.style.cssText = PIN_CSS;
+  }
+  // 页面没有可达 video 时（播放器在跨域 iframe 里，如芒果TV），把
+  // 占视口 40% 以上的最大 iframe 铺满；40% 门槛避开广告小窗
+  function largestIframe(){
+    var fs;
+    try { fs = document.querySelectorAll('iframe'); } catch(e) { return null; }
+    var best = null, bestA = 0;
+    var va = (window.innerWidth || 0) * (window.innerHeight || 0);
+    for (var i = 0; i < fs.length; i++) {
+      var r;
+      try { r = fs[i].getBoundingClientRect(); } catch(e) { continue; }
+      var a = (r.width >= 160 && r.height >= 120) ? r.width * r.height : 0;
+      if (a > bestA) { bestA = a; best = fs[i]; }
+    }
+    return (va > 0 && bestA >= va * 0.4) ? best : null;
+  }
+  var clickCooldown = 0;
+  var videoClickCooldown = 0;
+  function collectAll(root, sels, out){
+    for (var s=0;s<sels.length;s++){
+      try {
+        var found = root.querySelectorAll(sels[s]);
+        for (var i=0;i<found.length;i++) out.push(found[i]);
+      } catch(e){}
+    }
+    var frames = root.querySelectorAll('iframe');
+    for (var i=0;i<frames.length;i++){
+      try {
+        var d = frames[i].contentDocument;
+        if (d) collectAll(d, sels, out);
+      } catch(e){}
+    }
+  }
+  function clickBigPlayButton(){
+    var sels = [
+      '.vjs-big-play-button','.vjs-poster',
+      '.xgplayer-start','.xgplayer-start-button','.xgplayer-poster',
+      '.prism-player .vjs-big-play-button','.vcp-bigplay',
+      '.dplayer-play-icon','.art-play-btn','.art-video-poster',
+      '.tvplayer-play','.player-start-btn','.tv-player-start',
+      '[class*="big-play"]','[class*="bigPlay"]','[class*="start-button"]',
+      '[class*="player-start"]','[class*="cover-play"]','[class*="video-cover"]',
+      '[class*="poster"]'
+    ];
+    var els = [];
+    collectAll(document, sels, els);
+    for (var i=0;i<els.length;i++){
+      var b = els[i];
+      var cls = (b.className && b.className.toString) ? b.className.toString() : '';
+      if (/control|bar|small/i.test(cls)) continue;
+      var r;
+      try { r = b.getBoundingClientRect(); } catch(e) { continue; }
+      if (r.width >= 48 && r.height >= 48) {
+        try { b.click(); } catch(e) {}
+        clickCooldown = 3;
+        return true;
+      }
+    }
+    return false;
+  }
+  var pausedTicks = 0;
+  var lastUrl = location.href;
+  function bindMedia(v){
+    if (v.__omMediaBound) return;
+    v.__omMediaBound = true;
+    v.addEventListener('play', function(){ fire('omPlay', 1); });
+    v.addEventListener('pause', function(){ fire('omPlay', 0); });
+  }
+  function kick(){
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      window.__omUserPaused = false;
+    }
+    var vs = allVideos(document);
+    var up = !!window.__omUserPaused;
+    var anyPaused = false;
+    var anyPlaying = false;
+    for (var i=0;i<vs.length;i++){
+      var v = vs[i];
+      try {
+        bindMedia(v);
+        try { v.removeAttribute('muted'); } catch(e) {}
+        v.muted = false;
+        var wv = window.__omVol;
+        v.volume = (typeof wv === 'number') ? wv : 1;
+        if (!v.paused) anyPlaying = true;
+        if (!up && v.paused && v.play) {
+          anyPaused = true;
+          var p = v.play();
+          if (p && p.catch) p.catch(function(){});
+        }
+      } catch(e) {}
+      // 必须有视频画面尺寸才算起播：音频先行（声音出了画面还没
+      // 出来）时不推前台，避免黑屏干等
+      if (!window.__omPlayingFired && !v.paused && v.readyState >= 2
+          && v.currentTime > 0
+          && (v.videoWidth || 0) * (v.videoHeight || 0) >= 8160) {
+        window.__omPlayingFired = true;
+        fire('omDiag', 'playing|via=boot_video');
+        fire('omPlaying');
+      }
+    }
+    // 固定铺满：可见面积最大的主视频（inline 样式对 shadow DOM 内
+    // video 同样生效）；没有可达 video 时（跨域 iframe 播放器，
+    // 如芒果TV）铺满占视口 40% 以上的最大 iframe。
+    // 站点专用脚本（芒果TV 等）置 __omSkipPin 自行接管铺满，让位
+    if (!window.__omSkipPin) {
+      var bestV = null, bestVA = 0;
+      for (var k = 0; k < vs.length; k++) {
+        var rr;
+        try { rr = vs[k].getBoundingClientRect(); } catch(e) { continue; }
+        var aa = (rr.width >= 80 && rr.height >= 60) ? rr.width * rr.height : 0;
+        if (aa > bestVA) { bestVA = aa; bestV = vs[k]; }
+      }
+      if (bestV) pinEl(bestV);
+      else {
+        var fi = largestIframe();
+        if (fi) {
+          pinEl(fi);
+          // 播放器在跨域 iframe（内容不可达，如芒果TV）：iframe 铺满
+          // 即视为网页起播推前台，不必走 8 秒重载/20 秒兜底链黑屏干等
+          if (!window.__omPlayingFired) {
+            window.__omPlayingFired = true;
+            fire('omDiag', 'playing|via=boot_iframe');
+            fire('omPlaying');
+          }
+        }
+      }
+    }
+    var st = anyPlaying ? 1 : 0;
+    if (st !== window.__omLastReported) {
+      window.__omLastReported = st;
+      fire('omPlay', st);
+    }
+    if (anyPaused && !up) {
+      pausedTicks++;
+      if (clickCooldown > 0) { clickCooldown--; }
+      else if (pausedTicks >= 2) {
+        if (clickBigPlayButton()) return;
+      }
+      if (videoClickCooldown > 0) { videoClickCooldown--; }
+      else if (pausedTicks >= 6) {
+        for (var j=0;j<vs.length;j++){
+          try { if (vs[j].paused) vs[j].click(); } catch(e){}
+        }
+        videoClickCooldown = 5;
+      }
+    } else {
+      pausedTicks = 0;
+    }
+  }
+  setInterval(kick, 700);
+  kick();
+})();
+''';
+
+  /// ===== 站点专用脚本（移植自 NewBox 2.0.7 站点脚本库，零 hook 纯 DOM）=====
+  /// 命中站点时自行接管铺满/点台/起播确认：首行置 __omSkipPin 让 _bootJs
+  /// 的通用铺满让位，起播就绪统一走 omPlaying 桥（与 _bootJs 同一通道，
+  /// __omPlayingFired 哨兵保证只上报一次）。频道名经 __omSiteGo(url, name)
+  /// 传入，同 URL 页内切台无需重载 WebView。
+
+  /// 芒果TV：直播大厅单页，按 cameraId/频道名点台（含"热门/卫视台/地方台/
+  /// 特色频道"标签页轮点展开），切台后按 src 变化/进度回跳确认新流
+  static const String _mgtvJs = r'''
+(function () {
+  window.__omSkipPin = 1;
+  // 通用 _bootJs 可能已抢先铺满：清掉让站点脚本重新接管
+  try {
+    var pinned = document.querySelectorAll('[data-om-pin]');
+    for (var pi = 0; pi < pinned.length; pi++) {
+      pinned[pi].removeAttribute('data-om-pin');
+      pinned[pi].style.cssText = '';
+    }
+  } catch (e) {}
+
+  var needNew = 0;
+  var prevSrc = "";
+  var prevTime = 0;
+  var seenGap = 0;
+  var didSwitch = 0;
+
+  function fireReady() {
+    if (window.__omPlayingFired) return;
+    window.__omPlayingFired = true;
+    try { window.flutter_inappwebview.callHandler('omDiag', 'playing|via=site_mgtv'); } catch (e) {}
+    try { window.flutter_inappwebview.callHandler('omPlaying'); } catch (e) {}
+  }
+
+  function diag(m) {
+    try { window.flutter_inappwebview.callHandler('omDiag', m); } catch (e) {}
+  }
+
+  // 通用 _cssJs 会把页面所有 video 钉成全屏最高层（芒果切台后旧视频不
+  // 销毁，会盖住站点脚本 pin 的真实直播画面，只剩声音）——就地剥除该
+  // 规则：元素保留，_probe 每秒重注检测到元素已存在会跳过，剥除持久生效
+  function cleanOmCss() {
+    function cleanDoc(d) {
+      try {
+        var s = d.getElementById('__om_fullscreen_style');
+        if (s && s.textContent.indexOf('video{position:fixed') >= 0) {
+          s.textContent = s.textContent.replace(/video\{position:fixed[^}]*\}/g, '');
+        }
+      } catch (e) {}
+    }
+    cleanDoc(document);
+    try {
+      var fs = document.querySelectorAll('iframe');
+      for (var i = 0; i < fs.length; i++) {
+        try { if (fs[i].contentDocument) cleanDoc(fs[i].contentDocument); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  function allVids() {
+    var out = [];
+    try {
+      var list = document.querySelectorAll('video');
+      for (var i = 0; i < list.length; i++) out.push(list[i]);
+    } catch (e) {}
+    try {
+      var fs = document.querySelectorAll('iframe');
+      for (var j = 0; j < fs.length; j++) {
+        try {
+          var d = fs[j].contentDocument;
+          if (!d) continue;
+          var l2 = d.querySelectorAll('video');
+          for (var k = 0; k < l2.length; k++) out.push(l2[k]);
+        } catch (e) {}
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  // 优先认真正在播放的视频：切台后旧 video 不销毁，选择器拿到的可能
+  // 是已停播的旧元素
+  function playingVid() {
+    var vs = allVids();
+    var best = null, bestA = 0;
+    for (var i = 0; i < vs.length; i++) {
+      var v = vs[i];
+      try {
+        if (v.paused || v.readyState < 2 || !(v.currentTime > 0)) continue;
+        var a = (v.videoWidth || 0) * (v.videoHeight || 0);
+        if (a < 8160) { var r = v.getBoundingClientRect(); a = r.width * r.height; }
+        if (a > bestA) { bestA = a; best = v; }
+      } catch (e) {}
+    }
+    return best;
+  }
+
+  function cssOnce() {
+    if (document.getElementById("om-mgtv-css")) return;
+    var parent = document.head || document.documentElement;
+    if (!parent) return;
+    var s = document.createElement("style");
+    s.id = "om-mgtv-css";
+    s.textContent =
+      "html,body,#__nuxt,#__layout,#mgtv-default-layout,.content,.channel-page,.channel-page-wrapper{" +
+      "margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;" +
+      "width:100%!important;height:100%!important}" +
+      "#m-topheader,header,footer,.channel-left-nav,.channel-left-list,.channel-left-skeleton," +
+      ".m-topheader-channel,.channel-top-bg-header,.side-float,.side-float-bar," +
+      ".mango-control-bar,.ControlBar,[class*=\"ControlBar\"]," +
+      ".vjs-control-bar,.vjs-big-play-button,.vjs-poster" +
+      "{display:none!important;visibility:hidden!important;pointer-events:none!important}" +
+      "video,.live-player-tv-module video{" +
+      "object-fit:contain!important;object-position:center center!important;" +
+      "transform:none!important;zoom:1!important}" +
+      "video::-webkit-media-controls{display:none!important}";
+    parent.appendChild(s);
+  }
+
+  function vp() {
+    var v = window.visualViewport;
+    if (v && v.width > 0 && v.height > 0) {
+      return { x: v.offsetLeft || 0, y: v.offsetTop || 0, w: v.width, h: v.height };
+    }
+    return { x: 0, y: 0, w: window.innerWidth || 0, h: window.innerHeight || 0 };
+  }
+
+  function playerBox(v) {
+    if (v) {
+      try {
+        var c = v.closest('.live-player-tv-module,.mango-player,.player-container,[class*="live-player"],[class*="LivePlayer"],[class*="player-box"],[class*="PlayerBox"]');
+        if (c) return c;
+      } catch (e) {}
+    }
+    return document.querySelector(".live-player-tv-module")
+      || document.querySelector(".player-container .player")
+      || document.querySelector("[class*='live-player']")
+      || document.querySelector("[class*='LivePlayer']")
+      || document.querySelector(".mango-player")
+      || null;
+  }
+
+  function videoEl() {
+    var pv = playingVid();
+    if (pv) return pv;
+    var box = playerBox(null);
+    if (box && box.tagName === "VIDEO") return box;
+    return (box && box.querySelector("video")) || document.querySelector("video");
+  }
+
+  function hideSiblings(el) {
+    if (!el) return;
+    var n = el;
+    while (n && n !== document.body && n !== document.documentElement) {
+      var p = n.parentElement;
+      if (!p) break;
+      var kids = p.children;
+      for (var i = 0; i < kids.length; i++) {
+        var c = kids[i];
+        if (c === n) continue;
+        var tag = c.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "LINK" || tag === "META") continue;
+        c.style.setProperty("display", "none", "important");
+        c.style.setProperty("visibility", "hidden", "important");
+      }
+      n = p;
+    }
+  }
+
+  function unclip(el) {
+    var n = el;
+    while (n && n !== document.documentElement) {
+      if (n.getAttribute && n.getAttribute("data-om-site-box")) {
+        n = n.parentElement;
+        continue;
+      }
+      if (n.style) {
+        n.style.setProperty("overflow", "visible", "important");
+        n.style.setProperty("transform", "none", "important");
+        n.style.setProperty("filter", "none", "important");
+        n.style.setProperty("clip-path", "none", "important");
+        n.style.setProperty("zoom", "1", "important");
+        n.style.setProperty("background", "#000", "important");
+      }
+      n = n.parentElement;
+    }
+  }
+
+  function pinBox(el, s, z) {
+    if (!el || !el.style || s.w < 8 || s.h < 8) return;
+    var key = s.x + "," + s.y + "," + s.w + "," + s.h + "," + z;
+    if (el.getAttribute("data-om-site-box") === key && (el.offsetWidth || 0) >= s.w - 8) return;
+    el.setAttribute("data-om-site-box", key);
+    el.style.cssText =
+      "display:block!important;position:fixed!important;" +
+      "left:" + s.x + "px!important;top:" + s.y + "px!important;" +
+      "width:" + s.w + "px!important;height:" + s.h + "px!important;" +
+      "max-width:none!important;max-height:none!important;min-width:0!important;min-height:0!important;" +
+      "margin:0!important;padding:0!important;border:none!important;" +
+      "z-index:" + z + "!important;background:#000!important;overflow:hidden!important;" +
+      "transform:none!important;zoom:1!important";
+  }
+
+  function fillMedia(el) {
+    if (!el || !el.style) return;
+    var tf = (el.style.transform || "").replace(/\s/g, "");
+    if (el.getAttribute("data-om-site-m") === "1" && (!tf || tf === "none")) return;
+    el.setAttribute("data-om-site-m", "1");
+    el.style.cssText =
+      "display:block!important;position:absolute!important;" +
+      "left:0!important;top:0!important;right:0!important;bottom:0!important;" +
+      "width:100%!important;height:100%!important;" +
+      "max-width:none!important;max-height:none!important;min-width:0!important;min-height:0!important;" +
+      "margin:0!important;padding:0!important;border:none!important;" +
+      "object-fit:contain!important;object-position:center center!important;" +
+      "transform:none!important;zoom:1!important;background:#000!important";
+  }
+
+  var laying = 0;
+
+  function layout() {
+    if (laying) return !!window.__omMgtvLayoutReady;
+    laying = 1;
+    try {
+      return layoutWork();
+    } finally {
+      laying = 0;
+    }
+  }
+
+  // 隐藏视频附近不含 video 的画面类兄弟层：芒果切台后残留的画面快照
+  // canvas/海报会盖在直播 video 上（有声无图的另一来源）
+  function hideOverlays(v) {
+    var host = v.parentElement;
+    var depth = 0;
+    while (host && host !== document.body && depth < 3) {
+      if (host.getAttribute && host.getAttribute("data-om-site-box")) break;
+      var kids = host.children;
+      for (var i = 0; i < kids.length; i++) {
+        var k = kids[i];
+        if (k === v || (k.contains && k.contains(v))) continue;
+        var tag = k.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "LINK" || tag === "META") continue;
+        if (tag === "CANVAS" || tag === "IMG"
+            || /poster|snapshot|cover|thumb/i.test(String(k.className || ""))
+            || k.querySelector("canvas")) {
+          k.style.setProperty("display", "none", "important");
+          k.style.setProperty("visibility", "hidden", "important");
+        }
+      }
+      host = host.parentElement;
+      depth++;
+    }
+  }
+
+  function layoutWork() {
+    cssOnce();
+    cleanOmCss();
+    var s = vp();
+    if (s.w < 8 || s.h < 8) return false;
+    var v = videoEl();
+    var box = playerBox(v);
+    if (box) {
+      hideSiblings(box);
+      pinBox(box, s, 9998);
+    }
+    if (v) {
+      unclip(v);
+      try {
+        v.controls = false;
+        v.removeAttribute("x5-video-player-fullscreen");
+        v.setAttribute("playsinline", "");
+        v.setAttribute("webkit-playsinline", "true");
+      } catch (e) {}
+      if (box && v !== box && box.contains(v)) fillMedia(v);
+      else pinBox(v, s, 10000);
+      hideOverlays(v);
+    }
+    var ok = !!(v && s.w > 8 && s.h > 8);
+    window.__omMgtvLayoutReady = ok && !needNew;
+    return ok;
+  }
+
+  function unmute() {
+    if (window.__omUserPaused) return;
+    var v = videoEl();
+    if (!v) return;
+    try {
+      v.controls = false;
+      v.muted = false;
+      v.volume = (typeof window.__omVol === "number") ? window.__omVol : 1;
+      if (v.paused) v.play();
+    } catch (e) {}
+  }
+
+  function srcOf(v) {
+    if (!v) return "";
+    try {
+      return v.currentSrc || v.src || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function markSwitch() {
+    var v = videoEl();
+    prevSrc = srcOf(v);
+    prevTime = v ? v.currentTime || 0 : 0;
+    seenGap = 0;
+    needNew = 1;
+    window.__omMgtvLayoutReady = 0;
+  }
+
+  function pictureReady() {
+    var v = videoEl();
+    if (!v || v.videoWidth * v.videoHeight === 0 || v.readyState < 2) {
+      if (needNew) seenGap = 1;
+      return false;
+    }
+    if (!layout()) return false;
+    if (!needNew) return true;
+    var src = srcOf(v);
+    if (prevSrc && src && src !== prevSrc) return true;
+    if (v.currentTime + 0.35 < prevTime) return true;
+    return !!seenGap;
+  }
+
+  function bindVideo(gen) {
+    var v = videoEl();
+    if (!v || v.getAttribute("data-om-site-g") === String(gen)) return;
+    v.setAttribute("data-om-site-g", String(gen));
+    function onEv() {
+      if (gen !== window.__omMgtvPickGen) return;
+      if (v.readyState < 2 || v.videoWidth * v.videoHeight === 0) seenGap = 1;
+      if (pictureReady()) tellReady(gen);
+    }
+    v.addEventListener("emptied", onEv);
+    v.addEventListener("loadstart", onEv);
+    v.addEventListener("loadeddata", onEv);
+    v.addEventListener("playing", onEv);
+    v.addEventListener("canplay", onEv);
+  }
+
+  function tellReady(gen) {
+    if (gen !== window.__omMgtvPickGen) return;
+    if (!pictureReady()) return;
+    needNew = 0;
+    unmute();
+    window.__omMgtvLayoutReady = 1;
+    diag('mgtv_ready');
+    fireReady();
+  }
+
+  function cameraIdFrom(url) {
+    var m = String(url || "").match(/[?&#]cameraId=(\d+)/i);
+    if (m) return m[1];
+    try {
+      return new URL(url || location.href, location.href).searchParams.get("cameraId") || "";
+    } catch (e) {}
+    return "";
+  }
+
+  function compact(s) {
+    return String(s || "").replace(/\s+/g, "");
+  }
+
+  function channelLabel(el) {
+    return el.getAttribute("title")
+      || el.getAttribute("data-title")
+      || el.getAttribute("aria-label")
+      || el.textContent
+      || "";
+  }
+
+  function idOf(el) {
+    return el.getAttribute("data-channel-sid")
+      || el.getAttribute("data-sid")
+      || cameraIdFrom(el.getAttribute("href") || "");
+  }
+
+  function channelNodes() {
+    return document.querySelectorAll(
+      "a.channel,[data-channel-sid],[data-sid],a[href*='cameraId='],.channels a"
+    );
+  }
+
+  function isSelected(el) {
+    var c = " " + (el.className || "") + " ";
+    return c.indexOf(" selected ") >= 0 || c.indexOf(" active ") >= 0
+      || el.getAttribute("aria-current") === "true";
+  }
+
+  function clickEl(el) {
+    if (!el) return false;
+    if (isSelected(el)) return true;
+    didSwitch = 1;
+    diag('mgtv_click|label=' + compact(channelLabel(el)).slice(0, 24));
+    try {
+      el.click();
+    } catch (e) {}
+    return true;
+  }
+
+  function clickById(id) {
+    if (!id) return false;
+    var links = channelNodes();
+    var i;
+    for (i = 0; i < links.length; i++) {
+      if (idOf(links[i]) === id) return clickEl(links[i]);
+    }
+    return false;
+  }
+
+  function clickByName(name) {
+    var want = compact(name);
+    if (!want) return false;
+    var links = channelNodes();
+    var i;
+    var label;
+    for (i = 0; i < links.length; i++) {
+      if (compact(channelLabel(links[i])) === want) return clickEl(links[i]);
+    }
+    links = document.querySelectorAll("a");
+    for (i = 0; i < links.length; i++) {
+      label = compact(channelLabel(links[i]));
+      if (label === want) return clickEl(links[i]);
+    }
+    return false;
+  }
+
+  function clickTab() {
+    var tabs = document.querySelectorAll(".channels .tabs .item");
+    if (!tabs.length) {
+      var names = { "热门": 1, "卫视台": 1, "卫视": 1, "地方台": 1, "特色频道": 1 };
+      var all = document.querySelectorAll("a,button");
+      var found = [];
+      var i;
+      for (i = 0; i < all.length; i++) {
+        if (names[compact(channelLabel(all[i]))]) found.push(all[i]);
+      }
+      tabs = found;
+    }
+    if (!tabs.length) return false;
+    var i = window.__omMgtvTab || 0;
+    if (i >= tabs.length) {
+      window.__omMgtvTab = 0;
+      return false;
+    }
+    var tab = tabs[i];
+    window.__omMgtvTab = i + 1;
+    if (!isSelected(tab)) {
+      try {
+        tab.click();
+      } catch (e) {}
+    }
+    return false;
+  }
+
+  function clickWant(id, liveName) {
+    if (id && clickById(id)) {
+      window.__omMgtvTab = 0;
+      return true;
+    }
+    if (liveName && clickByName(liveName)) {
+      window.__omMgtvTab = 0;
+      return true;
+    }
+    if (!id && !liveName) return !!playerBox();
+    return clickTab();
+  }
+
+  function waitFrame(gen) {
+    var n = 0;
+    function tick() {
+      if (gen !== window.__omMgtvPickGen) return;
+      try {
+        layout();
+        bindVideo(gen);
+        if (pictureReady()) {
+          tellReady(gen);
+          return;
+        }
+      } catch (e) {}
+      if (++n < 72) setTimeout(tick, n < 12 ? 80 : 150);
+    }
+    tick();
+  }
+
+  window.__omSiteGo = function (url, liveName) {
+    var id = cameraIdFrom(url || location.href);
+    var name = compact(liveName);
+    diag('mgtv_go|id=' + (id || '-') + '|name=' + (name || '-'));
+    var want = id ? ("id:" + id) : (name ? ("nm:" + name) : "");
+    if (want && want === window.__omMgtvWant) {
+      if (pictureReady()) {
+        tellReady(window.__omMgtvPickGen);
+        return;
+      }
+      layout();
+      // 页面当前连一个 video 元素都没有（首屏频道列表渲染慢时首次
+      // 点台会找不到节点）：再走一轮点台重试，避免"点过了却没换台"
+      // 造成的永久黑屏。由 Dart 侧 _probe 每 3 秒重复调用本函数驱动
+      if (!videoEl()) {
+        didSwitch = 0;
+        if (clickWant(id, name)) {
+          if (didSwitch) markSwitch();
+          waitFrame(window.__omMgtvPickGen);
+        }
+      }
+      return;
+    }
+    window.__omMgtvWant = want;
+    window.__omMgtvTab = 0;
+    window.__omMgtvPickGen = (window.__omMgtvPickGen || 0) + 1;
+    var gen = window.__omMgtvPickGen;
+    if (window.__omMgtvTimer) {
+      clearTimeout(window.__omMgtvTimer);
+      window.__omMgtvTimer = 0;
+    }
+    var n = 0;
+    function tryClick() {
+      if (gen !== window.__omMgtvPickGen) return;
+      window.__omMgtvTimer = 0;
+      cssOnce();
+      didSwitch = 0;
+      if (clickWant(id, name)) {
+        if (didSwitch) markSwitch();
+        waitFrame(gen);
+        return;
+      }
+      if (++n < 24) window.__omMgtvTimer = setTimeout(tryClick, 150);
+      else waitFrame(gen);
+    }
+    tryClick();
+  };
+
+  window.__omMgtvRelayout = function () {
+    var el = playerBox(videoEl());
+    if (el) el.removeAttribute("data-om-site-box");
+    var v = videoEl();
+    if (v) v.removeAttribute("data-om-site-m");
+    layout();
+  };
+
+  cssOnce();
+  cleanOmCss();
+  if (!window.__omMgtvResize) {
+    window.__omMgtvResize = 1;
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", window.__omMgtvRelayout);
+      window.visualViewport.addEventListener("scroll", window.__omMgtvRelayout);
+    }
+    window.addEventListener("resize", window.__omMgtvRelayout);
+  }
+
+  if (!window.__omMgtvBoot) {
+    window.__omMgtvBoot = 1;
+    setTimeout(function () {
+      if (window.__omMgtvPickGen) return;
+      window.__omMgtvPickGen = 1;
+      waitFrame(1);
+    }, 0);
+    // 常驻兜底：播放器 DOM 重建/新视频出现后自动重新铺满并清理覆盖层
+    setInterval(function () {
+      try {
+        layout();
+        bindVideo(window.__omMgtvPickGen || 1);
+      } catch (e) {}
+    }, 1200);
+  }
+})();
+''';
+
+  /// 央视频：电视墙单页，优先读页面 Vue VM 节目单（pid/频道名模糊匹配
+  /// "综合"后缀变体）调 changeTV 切台，失败退回 DOM 点右侧频道列表
+  static const String _yangshipinJs = r'''
+(function () {
+  window.__omSkipPin = 1;
+  try {
+    var pinned = document.querySelectorAll('[data-om-pin]');
+    for (var pi = 0; pi < pinned.length; pi++) {
+      pinned[pi].removeAttribute('data-om-pin');
+      pinned[pi].style.cssText = '';
+    }
+  } catch (e) {}
+
+  var pickGen = 0;
+  var wantKey = "";
+  var timer = 0;
+  var laying = 0;
+  var boot = 0;
+  var needNew = 0;
+  var prevSrc = "";
+  var prevTime = 0;
+  var seenGap = 0;
+
+  function fireReady() {
+    if (window.__omPlayingFired) return;
+    window.__omPlayingFired = true;
+    try { window.flutter_inappwebview.callHandler('omDiag', 'playing|via=site_ysp'); } catch (e) {}
+    try { window.flutter_inappwebview.callHandler('omPlaying'); } catch (e) {}
+  }
+
+  // 剥除通用 _cssJs 的 video 全屏钉层规则（元素保留，_probe 重注会跳过）
+  function cleanOmCss() {
+    function cleanDoc(d) {
+      try {
+        var s = d.getElementById('__om_fullscreen_style');
+        if (s && s.textContent.indexOf('video{position:fixed') >= 0) {
+          s.textContent = s.textContent.replace(/video\{position:fixed[^}]*\}/g, '');
+        }
+      } catch (e) {}
+    }
+    cleanDoc(document);
+    try {
+      var fs = document.querySelectorAll('iframe');
+      for (var i = 0; i < fs.length; i++) {
+        try { if (fs[i].contentDocument) cleanDoc(fs[i].contentDocument); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  function cssOnce() {
+    var head = document.head || document.documentElement;
+    if (!head || document.getElementById("om-ysp-css")) return;
+    if (!document.getElementById("om-ysp-vp")) {
+      var meta = document.createElement("meta");
+      meta.id = "om-ysp-vp";
+      meta.name = "viewport";
+      meta.content = "width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no";
+      head.insertBefore(meta, head.firstChild);
+    }
+    var s = document.createElement("style");
+    s.id = "om-ysp-css";
+    s.textContent =
+      "html,body{margin:0!important;padding:0!important;overflow:hidden!important;" +
+      "background:#000!important;width:100%!important;height:100%!important}" +
+      ".play-div{height:auto!important;padding:0!important}" +
+      "header,.header,.max-footer,.footer,.tv-zhan,.tv-main-con-r," +
+      ".y-full-control,.y-control-outside,.y-progress-wrapper,.y-full-bg," +
+      ".volume-muted-tip,.volume-muted-tip-container,.voice-control-cont,.video-status-tip," +
+      ".tv-main-con-l-vid .con,.tv-main-con-l-vid .black-bg," +
+      ".tv-main-con-l-vid .trans-black-bg,.tv-main-con-l-vid .loading," +
+      ".tv-main-con-l-vid .loading-main,.tv-main-con-l-vid .loading1," +
+      ".tv-main-con-l-vid .pic-loading,.tv-main-con-l-vid .poster-con," +
+      ".tv-main-con-l-vid .poster-con-cover,.tv-main-con-l-vid .playBtn," +
+      ".tv-main-con-l-vid .play-btn" +
+      "{display:none!important;visibility:hidden!important;pointer-events:none!important}" +
+      "video{object-fit:contain!important;object-position:center center!important;" +
+      "transform:none!important;zoom:1!important}" +
+      "video::-webkit-media-controls{display:none!important}";
+    head.appendChild(s);
+  }
+
+  function vp() {
+    var v = window.visualViewport;
+    if (v && v.width > 0 && v.height > 0) {
+      return { x: v.offsetLeft || 0, y: v.offsetTop || 0, w: v.width, h: v.height };
+    }
+    return { x: 0, y: 0, w: window.innerWidth || 0, h: window.innerHeight || 0 };
+  }
+
+  function playerBox() {
+    return document.querySelector(".tv-main-con-l-vid");
+  }
+
+  function videoEl() {
+    var box = playerBox();
+    return box ? box.querySelector("video") : null;
+  }
+
+  function hideSiblings(el) {
+    var n = el;
+    while (n && n !== document.body && n !== document.documentElement) {
+      var p = n.parentElement;
+      if (!p) break;
+      var kids = p.children;
+      for (var i = 0; i < kids.length; i++) {
+        var c = kids[i];
+        if (c === n) continue;
+        var tag = c.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "LINK" || tag === "META") continue;
+        c.style.setProperty("display", "none", "important");
+        c.style.setProperty("visibility", "hidden", "important");
+      }
+      n = p;
+    }
+  }
+
+  function unclip(el) {
+    var n = el;
+    while (n && n !== document.documentElement) {
+      if (n.getAttribute && n.getAttribute("data-om-site-box")) {
+        n = n.parentElement;
+        continue;
+      }
+      if (n.style) {
+        n.style.setProperty("overflow", "visible", "important");
+        n.style.setProperty("transform", "none", "important");
+        n.style.setProperty("filter", "none", "important");
+        n.style.setProperty("clip-path", "none", "important");
+        n.style.setProperty("zoom", "1", "important");
+        n.style.setProperty("background", "#000", "important");
+      }
+      n = n.parentElement;
+    }
+  }
+
+  function pinBox(el, s) {
+    if (!el || !el.style || s.w < 8 || s.h < 8) return;
+    var key = s.x + "," + s.y + "," + s.w + "," + s.h;
+    if (el.getAttribute("data-om-site-box") === key && (el.offsetWidth || 0) >= s.w - 8) return;
+    el.setAttribute("data-om-site-box", key);
+    el.style.cssText =
+      "display:block!important;position:fixed!important;" +
+      "left:" + s.x + "px!important;top:" + s.y + "px!important;" +
+      "width:" + s.w + "px!important;height:" + s.h + "px!important;" +
+      "max-width:none!important;max-height:none!important;min-width:0!important;min-height:0!important;" +
+      "margin:0!important;padding:0!important;border:none!important;" +
+      "z-index:9998!important;background:#000!important;overflow:hidden!important;" +
+      "transform:none!important;zoom:1!important";
+  }
+
+  function fillInner(el) {
+    if (!el || !el.style || el.getAttribute("data-om-site-box")) return;
+    el.style.cssText =
+      "display:block!important;position:absolute!important;" +
+      "left:0!important;top:0!important;right:0!important;bottom:0!important;" +
+      "width:100%!important;height:100%!important;" +
+      "max-width:none!important;max-height:none!important;min-width:0!important;min-height:0!important;" +
+      "margin:0!important;padding:0!important;border:none!important;" +
+      "background:transparent!important;overflow:hidden!important;" +
+      "transform:none!important;zoom:1!important";
+  }
+
+  function fillVideo(el) {
+    if (!el || !el.style) return;
+    try {
+      el.removeAttribute("width");
+      el.removeAttribute("height");
+      el.controls = false;
+      el.removeAttribute("x5-video-player-fullscreen");
+      el.removeAttribute("x5-video-orientation");
+      el.setAttribute("playsinline", "");
+      el.setAttribute("webkit-playsinline", "true");
+    } catch (e) {}
+    el.style.cssText =
+      "display:block!important;position:absolute!important;" +
+      "left:0!important;top:0!important;right:0!important;bottom:0!important;" +
+      "width:100%!important;height:100%!important;" +
+      "max-width:100%!important;max-height:100%!important;min-width:0!important;min-height:0!important;" +
+      "margin:0!important;padding:0!important;border:none!important;" +
+      "object-fit:contain!important;object-position:center center!important;" +
+      "transform:none!important;zoom:1!important;background:#000!important";
+  }
+
+  function flattenPlayer(box) {
+    var nodes = box.querySelectorAll("live-player,.play-div,.play-div-div,.c-container,.video-con");
+    for (var i = 0; i < nodes.length; i++) fillInner(nodes[i]);
+  }
+
+  function hideSiteChrome(box) {
+    var nodes = box.querySelectorAll(
+      ".con,.bg,.black-bg,.trans-black-bg,.loading,.loading-main,.loading1," +
+      ".pic-loading,.poster-con,.poster-con-cover,.playBtn,.play-btn"
+    );
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!el || el.tagName === "VIDEO" || el.querySelector("video")) continue;
+      el.style.setProperty("display", "none", "important");
+      el.style.setProperty("visibility", "hidden", "important");
+      el.style.setProperty("pointer-events", "none", "important");
+    }
+  }
+
+  function layoutWork() {
+    cssOnce();
+    cleanOmCss();
+    var s = vp();
+    if (s.w < 8 || s.h < 8) return false;
+    var box = playerBox();
+    var v = videoEl();
+    if (!box) return false;
+    hideSiblings(box);
+    unclip(box);
+    pinBox(box, s);
+    flattenPlayer(box);
+    hideSiteChrome(box);
+    if (v) {
+      unclip(v);
+      fillVideo(v);
+    }
+    var ok = !!(v && s.w > 8 && s.h > 8);
+    window.__omYspLayoutReady = ok && !needNew;
+    return ok;
+  }
+
+  function layout() {
+    if (laying) return !!window.__omYspLayoutReady;
+    laying = 1;
+    try {
+      return layoutWork();
+    } finally {
+      laying = 0;
+    }
+  }
+
+  function unmute() {
+    if (window.__omUserPaused) return;
+    var v = videoEl();
+    if (!v) return;
+    try {
+      v.controls = false;
+      v.muted = false;
+      v.volume = (typeof window.__omVol === "number") ? window.__omVol : 1;
+      if (v.paused) v.play();
+    } catch (e) {}
+  }
+
+  function srcOf(v) {
+    if (!v) return "";
+    try {
+      return v.currentSrc || v.src || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function markSwitch() {
+    var v = videoEl();
+    prevSrc = srcOf(v);
+    prevTime = v ? v.currentTime || 0 : 0;
+    seenGap = 0;
+    needNew = 1;
+    window.__omYspLayoutReady = 0;
+  }
+
+  function pictureReady() {
+    var v = videoEl();
+    if (!v || v.videoWidth * v.videoHeight === 0 || v.readyState < 2) {
+      if (needNew) seenGap = 1;
+      return false;
+    }
+    if (!layout()) return false;
+    if (!needNew) return true;
+    var src = srcOf(v);
+    if (prevSrc && src && src !== prevSrc) return true;
+    if (v.currentTime + 0.35 < prevTime) return true;
+    return !!seenGap;
+  }
+
+  function bindVideo(gen) {
+    var v = videoEl();
+    if (!v || v.getAttribute("data-om-site-g") === String(gen)) return;
+    v.setAttribute("data-om-site-g", String(gen));
+    function onEv() {
+      if (gen !== pickGen) return;
+      if (v.readyState < 2 || v.videoWidth * v.videoHeight === 0) seenGap = 1;
+      if (pictureReady()) tellReady(gen);
+    }
+    v.addEventListener("emptied", onEv);
+    v.addEventListener("loadstart", onEv);
+    v.addEventListener("loadeddata", onEv);
+    v.addEventListener("playing", onEv);
+    v.addEventListener("canplay", onEv);
+  }
+
+  function tellReady(gen) {
+    if (gen !== pickGen) return;
+    if (!pictureReady()) return;
+    needNew = 0;
+    unmute();
+    window.__omYspLayoutReady = 1;
+    fireReady();
+  }
+
+  function parsePid(url) {
+    try {
+      return new URL(url || location.href, location.href).searchParams.get("pid") || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function compact(s) {
+    return String(s || "").replace(/\s+/g, "");
+  }
+
+  function sameName(got, want) {
+    var a = compact(got);
+    var b = compact(want);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    return a === b + "综合" || a === b + "综合频道"
+      || b === a + "综合" || b === a + "综合频道";
+  }
+
+  function vmHasChange(vm) {
+    if (!vm) return null;
+    if (typeof vm.changeTV === "function") return vm;
+    var ch = vm.$children || [];
+    for (var i = 0; i < ch.length; i++) {
+      var hit = vmHasChange(ch[i]);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  function hallVm() {
+    var n = document.querySelector(".tv-main-con-l-vid")
+      || document.querySelector(".tv-main-con")
+      || document.querySelector(".tv")
+      || document.getElementById("app")
+      || document.body;
+    while (n) {
+      var hit = vmHasChange(n.__vue__);
+      if (hit) return hit;
+      n = n.parentElement;
+    }
+    return vmHasChange(document.getElementById("app") && document.getElementById("app").__vue__);
+  }
+
+  function items(vm) {
+    var out = [];
+    var tabs = vm.tvTabs;
+    var i;
+    if (tabs) {
+      for (i = 0; i < tabs.length; i++) {
+        if (tabs[i] && tabs[i].length) out = out.concat(tabs[i]);
+      }
+    }
+    if (vm.tabA && vm.tabA.length) out = out.concat(vm.tabA);
+    if (vm.tabB && vm.tabB.length) out = out.concat(vm.tabB);
+    return out;
+  }
+
+  function findItem(vm, pid, name) {
+    var list = items(vm);
+    var i;
+    if (pid) {
+      for (i = 0; i < list.length; i++) {
+        if (list[i] && String(list[i].pid) === String(pid)) return list[i];
+      }
+    }
+    if (name) {
+      for (i = 0; i < list.length; i++) {
+        if (list[i] && sameName(list[i].channelName, name)) return list[i];
+      }
+    }
+    return null;
+  }
+
+  function currentPid(vm) {
+    return String((vm.tvIndex && vm.tvIndex.pid) || "");
+  }
+
+  function clickChannel(name) {
+    if (!name) return -1;
+    var nodes = document.querySelectorAll(".tv-main-con-r-list-left-imga");
+    for (var i = 0; i < nodes.length; i++) {
+      if (!sameName(nodes[i].textContent, name)) continue;
+      if ((" " + (nodes[i].className || "") + " ").indexOf(" tvSelect ") >= 0) return 0;
+      nodes[i].click();
+      return 1;
+    }
+    return -1;
+  }
+
+  function changeTo(pid, name) {
+    var vm = hallVm();
+    if (vm) {
+      if (pid && currentPid(vm) === String(pid)) return 0;
+      var item = findItem(vm, pid, name);
+      if (item) {
+        if (String(item.pid) === currentPid(vm)) return 0;
+        vm.changeTV(item);
+        return 1;
+      }
+    }
+    return clickChannel(name);
+  }
+
+  function waitFrame(gen) {
+    var n = 0;
+    function tick() {
+      if (gen !== pickGen) return;
+      try {
+        layout();
+        bindVideo(gen);
+        if (pictureReady()) {
+          tellReady(gen);
+          return;
+        }
+      } catch (e) {}
+      if (++n < 72) setTimeout(tick, n < 12 ? 80 : 150);
+    }
+    tick();
+  }
+
+  window.__omSiteGo = function (url, liveName) {
+    var pid = parsePid(url || location.href);
+    var name = compact(liveName);
+    try { window.flutter_inappwebview.callHandler('omDiag', 'ysp_go|pid=' + (pid || '-') + '|name=' + (name || '-')); } catch (e) {}
+    var next = pid ? ("pid:" + pid) : (name ? ("nm:" + name) : "");
+    if (next && next === wantKey) {
+      if (pictureReady()) tellReady(pickGen);
+      else layout();
+      return;
+    }
+    wantKey = next;
+    pickGen += 1;
+    var gen = pickGen;
+    if (timer) {
+      clearTimeout(timer);
+      timer = 0;
+    }
+    var n = 0;
+    function tryGo() {
+      if (gen !== pickGen) return;
+      timer = 0;
+      cssOnce();
+      if (!pid && !name) {
+        waitFrame(gen);
+        return;
+      }
+      var hit = changeTo(pid, name);
+      if (hit >= 0) {
+        if (hit) markSwitch();
+        waitFrame(gen);
+        return;
+      }
+      if (++n < 24) timer = setTimeout(tryGo, 150);
+      else waitFrame(gen);
+    }
+    tryGo();
+  };
+
+  window.__omYspRelayout = function () {
+    var el = playerBox();
+    if (el) el.removeAttribute("data-om-site-box");
+    layout();
+  };
+
+  cssOnce();
+  cleanOmCss();
+  if (!window.__omYspResize) {
+    window.__omYspResize = 1;
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", window.__omYspRelayout);
+      window.visualViewport.addEventListener("scroll", window.__omYspRelayout);
+    }
+    window.addEventListener("resize", window.__omYspRelayout);
+  }
+
+  if (!boot) {
+    boot = 1;
+    setTimeout(function () {
+      if (pickGen) return;
+      pickGen = 1;
+      waitFrame(1);
+    }, 0);
+    // 常驻兜底：播放器重建后自动重新铺满
+    setInterval(function () {
+      try { layout(); bindVideo(pickGen || 1); } catch (e) {}
+    }, 1200);
+  }
+
+  // ===== 清晰度切换（OMTV 同款，去掉音频档）=====
+  // 点击页面播放器自带的清晰度菜单项；站点降档后按锁定值自动切回
+  window.__omSetRes = function (level) {
+    var want = String(level);
+    if (want !== '1080' && want !== '720' && want !== '540') return;
+    if (window.__omWantRes !== want) window.__omWantResTries = 0;
+    window.__omWantRes = want;
+    window.__omResLock = want;
+    window.__omResLockAt = Date.now();
+    try { __omTryRes(); } catch (e) {}
+  };
+  function __omQText(el) { return ((el.textContent || '') + '').trim().toUpperCase(); }
+  function __omQHit(want, t) {
+    if (!t || t.length > 12) return false;
+    if (want === '1080') return t.indexOf('1080P') >= 0 || t === '蓝光';
+    if (want === '720') return t.indexOf('720P') >= 0 || t === '超清' || t === '准高清';
+    if (want === '540') return t.indexOf('540P') >= 0 || t.indexOf('480P') >= 0 || t === '高清' || t === '标清';
+    return false;
+  }
+  function __omQItems() {
+    var out = [];
+    var nodes = document.querySelectorAll('[id^="resolution_item_"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var t = __omQText(nodes[i]);
+      if (t && t.length <= 12) out.push(nodes[i]);
+    }
+    if (out.length) return out;
+    var all = document.querySelectorAll('div,span,li,button,a,p');
+    for (var j = 0; j < all.length; j++) {
+      var el = all[j];
+      if (el.children && el.children.length > 3) continue;
+      var tt = __omQText(el);
+      if (!tt || tt.length > 12) continue;
+      if (!/(蓝光|超清|高清|标清|流畅)|(^[1-9]\d{2,3}P$)/.test(tt)) continue;
+      out.push(el);
+    }
+    return out;
+  }
+  function __omQFind(want, list) {
+    for (var i = 0; i < list.length; i++) { if (__omQHit(want, __omQText(list[i]))) return list[i]; }
+    return null;
+  }
+  // 目标档不存在时向下取最好可用档（央视网封顶 480：选 1080 会落到标清）
+  function __omQFindBest(want, list) {
+    var order = want === '1080' ? ['1080', '720', '540'] : (want === '720' ? ['720', '540'] : ['540']);
+    for (var k = 0; k < order.length; k++) {
+      var h = __omQFind(order[k], list);
+      if (h) return h;
+    }
+    return null;
+  }
+  function __omQClick(el) {
+    if (!el) return;
+    var o = { bubbles: true, cancelable: true, view: window };
+    try { el.dispatchEvent(new PointerEvent('pointerdown', o)); } catch (e) {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', o)); } catch (e) {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', o)); } catch (e) {}
+    try { el.click(); } catch (e) {}
+  }
+  function __omWakePlayer() {
+    var pl = document.querySelector('#player') || document.querySelector('video');
+    if (!pl) return;
+    var o = { bubbles: true, cancelable: true, view: window,
+              clientX: (window.innerWidth / 2) | 0, clientY: (window.innerHeight / 2) | 0 };
+    try { pl.dispatchEvent(new MouseEvent('mousemove', o)); } catch (e) {}
+    try { pl.dispatchEvent(new MouseEvent('mousedown', o)); } catch (e) {}
+    try { pl.dispatchEvent(new MouseEvent('mouseup', o)); } catch (e) {}
+    try { pl.dispatchEvent(new MouseEvent('click', o)); } catch (e) {}
+  }
+  function __omVideoH() {
+    var vs = document.querySelectorAll('video'), m = 0;
+    for (var i = 0; i < vs.length; i++) { if ((vs[i].videoHeight || 0) > m) m = vs[i].videoHeight; }
+    return m;
+  }
+  function __omTryRes() {
+    var want = window.__omWantRes;
+    // 保持清晰度：站点自行降档（重载/缩放后）时按锁定值切回
+    if (!want && window.__omResLock && document.querySelector('[id^="resolution_item_"]')) {
+      var lh = __omVideoH();
+      if (lh >= 400) {
+        var lt = lh >= 1000 ? '1080' : (lh >= 700 ? '720' : (lh >= 500 ? '540' : ''));
+        var now = Date.now();
+        if (lt && lt !== window.__omResLock && now - (window.__omResLockAt || 0) > 10000) {
+          window.__omResLockAt = now;
+          window.__omWantResTries = 0;
+          want = window.__omWantRes = window.__omResLock;
+        }
+      }
+    }
+    if (!want) return;
+    window.__omWantResTries = (window.__omWantResTries || 0) + 1;
+    if (window.__omWantResTries > 14) { window.__omWantRes = null; return; }
+    var list = __omQItems();
+    var hit = __omQFindBest(want, list);
+    if (hit) { __omQClick(hit); window.__omWantRes = null; return; }
+    var h = __omVideoH();
+    var cur = h >= 1000 ? '1080' : (h >= 700 ? '720' : (h >= 500 ? '540' : ''));
+    // 菜单未展开：先唤出控制栏，再点「当前档」把清晰度菜单展开
+    if (window.__omWantResTries % 3 === 1) __omWakePlayer();
+    var opener = cur ? __omQFind(cur, list) : null;
+    if (!opener) opener = __omQFind('1080', list) || __omQFind('720', list) || __omQFind('540', list);
+    if (opener) __omQClick(opener);
+  }
+  if (!window.__omResTimer) {
+    window.__omResTimer = 1;
+    setInterval(function () { try { __omTryRes(); } catch (e) {} }, 1000);
+  }
+})();
+''';
+
+  /// 咪咕：单频道页（无页内切台），点"请点击播放/继续观看/免费观看"
+  /// 开播按钮，过滤 iflyad/ggv 广告源，播放器盒 pin 满并解开祖先 transform
+  static const String _miguJs = r'''
+(function () {
+  window.__omSkipPin = 1;
+  try {
+    var pinned = document.querySelectorAll('[data-om-pin]');
+    for (var pi = 0; pi < pinned.length; pi++) {
+      pinned[pi].removeAttribute('data-om-pin');
+      pinned[pi].style.cssText = '';
+    }
+  } catch (e) {}
+
+  var readySent = 0;
+  var clicked = 0;
+  var uncontained = 0;
+  var n = 0;
+
+  function fireReady() {
+    if (window.__omPlayingFired) return;
+    window.__omPlayingFired = true;
+    try { window.flutter_inappwebview.callHandler('omDiag', 'playing|via=site_migu'); } catch (e) {}
+    try { window.flutter_inappwebview.callHandler('omPlaying'); } catch (e) {}
+  }
+
+  // 剥除通用 _cssJs 的 video 全屏钉层规则（元素保留，_probe 重注会跳过）；
+  // 咪咕页面带广告 video，不剥会被钉到最高层盖住真实播放器
+  function cleanOmCss() {
+    function cleanDoc(d) {
+      try {
+        var s = d.getElementById('__om_fullscreen_style');
+        if (s && s.textContent.indexOf('video{position:fixed') >= 0) {
+          s.textContent = s.textContent.replace(/video\{position:fixed[^}]*\}/g, '');
+        }
+      } catch (e) {}
+    }
+    cleanDoc(document);
+    try {
+      var fs = document.querySelectorAll('iframe');
+      for (var i = 0; i < fs.length; i++) {
+        try { if (fs[i].contentDocument) cleanDoc(fs[i].contentDocument); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  function vp() {
+    var v = window.visualViewport;
+    if (v && v.width > 0 && v.height > 0) {
+      return { x: v.offsetLeft || 0, y: v.offsetTop || 0, w: v.width, h: v.height };
+    }
+    return { x: 0, y: 0, w: window.innerWidth || 0, h: window.innerHeight || 0 };
+  }
+
+  function isPage(el) {
+    return !el || el === document.body || el === document.documentElement
+      || el.id === "app" || el.id === "app-shell";
+  }
+
+  function cssOnce() {
+    var parent = document.head || document.documentElement;
+    if (!parent) return;
+    var s = document.getElementById("om-migu-css");
+    if (!s) {
+      s = document.createElement("style");
+      s.id = "om-migu-css";
+    }
+    s.textContent =
+      "html,body,#app,#app-shell{margin:0!important;padding:0!important;overflow:hidden!important;" +
+      "background:#000!important;height:100%!important;width:100%!important}" +
+      ".skeleton-wraper,.skeleton-head,.skeleton-download,.skeleton-detail,.skeleton-adv," +
+      ".skeleton-programe-list,.skeleton-split,.skeleton-gray," +
+      "m-header,.m-header,header,.header,nav,.nav,.group-item,.loadFail," +
+      "go-back-top,.popWindown,.browser-share{display:none!important;pointer-events:none!important}" +
+      "#h5player_player,.h5player,.m-player,.content{margin:0!important;padding:0!important;" +
+      "background:#000!important;overflow:hidden!important}" +
+      "#h5player_player,.h5player,.m-player{" +
+      "position:fixed!important;left:0!important;top:0!important;right:0!important;bottom:0!important;" +
+      "width:100%!important;height:100%!important;z-index:9999!important;" +
+      "border:0!important;border-radius:0!important;max-width:none!important;max-height:none!important;" +
+      "transform:none!important}" +
+      ".start-free,.h5player-control,.h5player-controls,.txp_controls,.txp_top,.txp_bottom," +
+      "video::-webkit-media-controls{display:none!important;pointer-events:none!important}";
+    parent.appendChild(s);
+  }
+
+  function compact(s) {
+    return (s || "").replace(/\s+/g, "");
+  }
+
+  function clickPlay() {
+    if (clicked) return;
+    var el = document.querySelector(".start-free");
+    if (!el) {
+      var nodes = document.querySelectorAll("p,span,div,a,button");
+      var i;
+      var t;
+      for (i = 0; i < nodes.length && i < 120; i++) {
+        t = compact(nodes[i].innerText || nodes[i].textContent);
+        if (t === "请点击播放" || t === "继续观看" || t === "免费观看") {
+          el = nodes[i];
+          break;
+        }
+      }
+    }
+    var v = document.querySelector("video");
+    try {
+      if (el) el.click();
+      if (v) {
+        v.click();
+        if (v.paused) v.play();
+      }
+    } catch (e) {
+      return;
+    }
+    if (el || v) clicked = 1;
+  }
+
+  function srcOf(v) {
+    return ((v.currentSrc || v.src || "") + "").toLowerCase();
+  }
+
+  function isPlayable(v) {
+    if (!v) return false;
+    var s = srcOf(v);
+    if (s.indexOf("iflyad") >= 0 || s.indexOf("ggv.") >= 0) return false;
+    if (v.videoWidth && v.videoHeight) return true;
+    return v.readyState >= 2 || v.currentTime > 0.05;
+  }
+
+  function playVideo() {
+    var list = document.querySelectorAll("video");
+    var i;
+    for (i = 0; i < list.length; i++) {
+      if (isPlayable(list[i])) return list[i];
+    }
+    return null;
+  }
+
+  function playerBox() {
+    return document.getElementById("h5player_player")
+      || document.querySelector(".h5player")
+      || document.querySelector(".m-player")
+      || document.querySelector(".common-player");
+  }
+
+  function uncontain(el) {
+    if (uncontained) return;
+    uncontained = 1;
+    var n = el.parentElement;
+    var i;
+    for (i = 0; n && !isPage(n) && i < 8; i++) {
+      if (n.style) n.style.setProperty("transform", "none", "important");
+      n = n.parentElement;
+    }
+  }
+
+  function fillBox() {
+    var el = playerBox();
+    if (!el || !el.style || isPage(el)) return false;
+    uncontain(el);
+    var s = vp();
+    if (!(s.w > 8 && s.h > 8)) return false;
+    var key = s.x + "," + s.y + "," + s.w + "," + s.h;
+    if (el.getAttribute("data-om-site-box") === key) return true;
+    el.setAttribute("data-om-site-box", key);
+    el.style.cssText =
+      "position:fixed!important;left:" + s.x + "px!important;top:" + s.y + "px!important;" +
+      "width:" + s.w + "px!important;height:" + s.h + "px!important;" +
+      "z-index:9999!important;margin:0!important;padding:0!important;" +
+      "background:#000!important;display:block!important;border:0!important;" +
+      "border-radius:0!important;overflow:hidden!important;transform:none!important";
+    return true;
+  }
+
+  function unmute(v) {
+    if (window.__omUserPaused || !v) return;
+    try {
+      v.controls = false;
+      v.muted = false;
+      v.volume = (typeof window.__omVol === "number") ? window.__omVol : 1;
+      if (v.paused) v.play();
+    } catch (e) {}
+  }
+
+  function bindVideo() {
+    var list = document.querySelectorAll("video");
+    var i;
+    var v;
+    for (i = 0; i < list.length; i++) {
+      v = list[i];
+      if (v.getAttribute("data-om-site-v")) continue;
+      v.setAttribute("data-om-site-v", "1");
+      v.addEventListener("loadeddata", tellReady);
+      v.addEventListener("playing", tellReady);
+    }
+  }
+
+  function tellReady() {
+    if (readySent) return;
+    cssOnce();
+    if (!fillBox()) return;
+    var v = playVideo();
+    if (!v) return;
+    readySent = 1;
+    unmute(v);
+    fireReady();
+  }
+
+  window.__omMiguRelayout = function () {
+    cssOnce();
+    fillBox();
+  };
+
+  cssOnce();
+  if (!window.__omMiguBoot) {
+    window.__omMiguBoot = 1;
+    window.addEventListener("resize", window.__omMiguRelayout);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", window.__omMiguRelayout);
+    }
+  }
+
+  function tick() {
+    cleanOmCss();
+    clickPlay();
+    bindVideo();
+    fillBox();
+    tellReady();
+    if (readySent) return;
+    if (++n < 80) setTimeout(tick, 120);
+  }
+  tick();
+})();
+''';
+
+  /// Dart 侧轮询探测（不依赖 JS bridge 是否可用，双保险）。
+  /// 递归同源 iframe；只认可见面积最大的主视频（隐藏预览/广告播放器
+  /// 会导致"主视频没播却被判定已起播"）；返回数字 1/0，规避字符串编解码差异。
+  static const String _probeJs = r'''
+(function(){
+  // 与 _bootJs 同一套发现逻辑：加载后 60 秒窗口内做 Shadow DOM
+  // 全遍历，之后退回轻量（只递归同源 iframe）
+  if (!window.__omProbeT0) window.__omProbeT0 = Date.now();
+  var deep = (Date.now() - window.__omProbeT0) < 60000;
+  function collect(root, out){
+    var i;
+    try {
+      var list = root.querySelectorAll('video');
+      for (i = 0; i < list.length; i++) out.push(list[i]);
+    } catch(e) { return; }
+    if (deep) {
+      var all;
+      try { all = root.querySelectorAll('*'); } catch(e) { all = []; }
+      for (i = 0; i < all.length; i++) {
+        try { if (all[i].shadowRoot) collect(all[i].shadowRoot, out); } catch(e) {}
+      }
+    }
+    try {
+      var frames = root.querySelectorAll('iframe');
+      for (i = 0; i < frames.length; i++) {
+        try {
+          var d = frames[i].contentDocument;
+          if (d) collect(d, out);
+        } catch(e) {}
+      }
+    } catch(e) {}
+  }
+  var vs = [];
+  collect(document, vs);
+  var best = null, bestA = 0;
+  for (var i=0;i<vs.length;i++){
+    var r;
+    try { r = vs[i].getBoundingClientRect(); } catch(e) { continue; }
+    var a = (r.width >= 80 && r.height >= 60) ? r.width * r.height : 0;
+    if (a > bestA) { bestA = a; best = vs[i]; }
+  }
+  // 诊断状态串：页面视频数 + 主视频的暂停/就绪/进度/画面/布局尺寸，
+  // 定位「黑屏有声」（videoWidth 不达标）与「拉起慢」（页面无 video）
+  var stat = 'n=' + vs.length;
+  if (best) {
+    try {
+      var br = best.getBoundingClientRect();
+      stat += '|paused=' + (best.paused ? 1 : 0)
+        + '|rs=' + best.readyState
+        + '|ct=' + (best.currentTime || 0).toFixed(1)
+        + '|vw=' + (best.videoWidth || 0) + '|vh=' + (best.videoHeight || 0)
+        + '|rw=' + (br.width | 0) + '|rh=' + (br.height | 0);
+    } catch(e) {}
+  }
+  if (!best) return [0, stat];
+  try {
+    if (best.paused && best.play) { var p = best.play(); if (p && p.catch) p.catch(function(){}); }
+    // 必须有视频画面尺寸：音频先行不算起播，避免黑屏推前台
+    if (!best.paused && best.readyState >= 2 && best.currentTime > 0
+        && (best.videoWidth || 0) * (best.videoHeight || 0) >= 8160) return [1, stat];
+  } catch(e) {}
+  return [0, stat];
+})();
+''';
+
+  /// 媒体流轻嗅探：只上报请求地址，不读响应体、不 hook
+  /// JSON.parse/Worker/WebSocket/拼装函数——深度 hook 会拖垮页面
+  /// 自身播放器（咪咕/央视频 MSE 卡顿甚至不可用）。对齐 TVBox 系
+  /// webview:// 纯网页播放策略：页面播放优先，轻量地址嗅探用于
+  /// 自动/手动切内置。捕获 m3u8/mpd/http-flv 走 omStream JSON 协议。
+  /// 包装的是 XMLHttpRequest.prototype.open / window.fetch 原型，8 秒
+  /// 兜底时运行时注入也能捕获后续请求（直播清单持续轮询）；
+  /// __omSniffed 哨兵保证只安装一次，重复 _inject() 不会叠加包装。
+  static const String _sniffJs = r'''
+(function(){
+  if (window.__omSniffed) return;
+  window.__omSniffed = true;
+
+  var MEDIA = /\.(m3u8|m3u|mpd|flv)(?:$|[?#/])/i;
+  // 明显是广告/统计/日志的地址不采用
+  var NOISE = /\/(ad|ads|advert|dsp|stat|stats|track|tracking|log|logs|report|metrics)(?:\/|$)/i;
+
+  // ---- 上报出口：omStream JSON 协议 {u,k,via,ua,r} ----
+  var lastEmit = Object.create(null);
+  var emitCount = 0;
+  function report(u, via, base){
+    try {
+      if (!u || typeof u !== 'string') return;
+      if (/^(blob:|data:|about:|javascript:|chrome-extension:)/i.test(u)) return;
+      base = base || location.href;
+      var abs;
+      try { abs = new URL(u, base).href; } catch(e) { return; }
+      if (!/^https?:\/\//i.test(abs)) return;
+      var p = abs.split('#')[0].split('?')[0];
+      if (!MEDIA.test(p) || NOISE.test(p)) return;
+      var m = p.match(/\.(m3u8|m3u|mpd|flv)$/i);
+      var ext = (m && m[1] || '').toLowerCase();
+      var kind = (ext === 'mpd') ? 'dash' : (ext === 'flv' ? 'flv' : 'hls');
+      var now = Date.now();
+      // 直播清单会被持续轮询：3 秒节流去重（不永久去重，
+      // Dart 侧按"持续轮询的主流"语义计数）
+      if (lastEmit[abs] && now - lastEmit[abs] < 3000) return;
+      lastEmit[abs] = now;
+      if (++emitCount > 256) { lastEmit = Object.create(null); emitCount = 0; }
+      var bridge = window.top && window.top.flutter_inappwebview;
+      if (bridge && bridge.callHandler) {
+        bridge.callHandler('omStream', JSON.stringify({
+          u: abs, k: kind, via: via || 'dom',
+          ua: navigator.userAgent || '', r: base
+        }));
+      }
+    } catch(e) {}
+  }
+
+  // hook 伪装：页面检测函数源码时显示为原生代码
+  function spoof(fn, original){
+    try {
+      fn.toString = function(){
+        return 'function ' + (original.name || '') + '() { [native code] }';
+      };
+    } catch(e) {}
+  }
+
+  // ---- hook: XMLHttpRequest.open（只取地址，不碰响应） ----
+  try {
+    var _open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url){
+      try { report(url, 'xhr'); } catch(e) {}
+      return _open.apply(this, arguments);
+    };
+    spoof(XMLHttpRequest.prototype.open, _open);
+  } catch(e) {}
+
+  // ---- hook: fetch（只取地址，不克隆响应） ----
+  try {
+    var _fetch = window.fetch;
+    if (typeof _fetch === 'function') {
+      window.fetch = function(input){
+        try {
+          var u = (typeof input === 'string') ? input : (input && input.url);
+          if (u) report(u, 'fetch');
+        } catch(e) {}
+        return _fetch.apply(this, arguments);
+      };
+      spoof(window.fetch, _fetch);
+    }
+  } catch(e) {}
+
+  // ---- <video>/<source> 的 src：DOM 扫描 + src setter 钩子 ----
+  function collectMediaEl(v){
+    try {
+      var s = v.currentSrc || v.src;
+      if (s) {
+        report(s, 'videoel',
+            v.ownerDocument ? v.ownerDocument.location.href : location.href);
+      }
+    } catch(e) {}
+  }
+  try {
+    var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
+    var desc = proto && Object.getOwnPropertyDescriptor(proto, 'src');
+    if (desc && desc.set && desc.configurable) {
+      Object.defineProperty(proto, 'src', {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: desc.get,
+        set: function(v){
+          try { report(v, 'srcset'); } catch(e) {}
+          return desc.set.call(this, v);
+        }
+      });
+    }
+  } catch(e) {}
+  try {
+    var _setAttr = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value){
+      try {
+        var n = (name || '').toLowerCase();
+        if (n === 'src' && this && this.tagName === 'VIDEO') {
+          report(value, 'setattr');
+        }
+      } catch(e) {}
+      return _setAttr.apply(this, arguments);
+    };
+    spoof(Element.prototype.setAttribute, _setAttr);
+  } catch(e) {}
+
+  // ---- performance 资源表补扫（hook 之前已发出的请求） ----
+  var perfSeen = Object.create(null);
+  function scanPerf(){
+    try {
+      if (!window.performance || !performance.getEntriesByType) return;
+      var list = performance.getEntriesByType('resource');
+      for (var i = 0; i < list.length; i++) {
+        var n = list[i] && list[i].name;
+        if (!n || perfSeen[n]) continue;
+        perfSeen[n] = 1;
+        report(n, 'perf');
+      }
+    } catch(e) {}
+  }
+
+  // ---- DOM 扫描：Shadow 全遍历（querySelectorAll('*')）开销大，
+  // 只在加载后 60 秒窗口内做；之后退回轻量 video-only 扫描，
+  // 避免弹幕/动态页长期全量遍历导致掉帧 ----
+  function collectFrom(root, deep){
+    if (!root || !root.querySelectorAll) return;
+    var i, list;
+    try {
+      list = root.querySelectorAll('video,source');
+      for (i = 0; i < list.length; i++) collectMediaEl(list[i]);
+    } catch(e) {}
+    if (deep) {
+      try {
+        var all = root.querySelectorAll('*');
+        for (i = 0; i < all.length; i++) {
+          try { if (all[i].shadowRoot) collectFrom(all[i].shadowRoot, true); } catch(e) {}
+        }
+      } catch(e) {}
+    }
+    try {
+      var fs = root.querySelectorAll('iframe');
+      for (i = 0; i < fs.length; i++) {
+        try {
+          var d = fs[i].contentDocument;
+          if (d) collectFrom(d, deep);
+        } catch(e) {}
+      }
+    } catch(e) {}
+  }
+
+  scanPerf();
+  setInterval(scanPerf, 1500);
+  var domScans = 0;
+  var mo = null;
+  var domTimer = setInterval(function(){
+    domScans++;
+    if (domScans >= 60) {
+      try { clearInterval(domTimer); } catch(e) {}
+      try { if (mo) mo.disconnect(); } catch(e) {}
+      // 窗口期结束：切换为轻量扫描，长期运行
+      setInterval(function(){ collectFrom(document, false); }, 2000);
+      return;
+    }
+    collectFrom(document, true);
+  }, 1000);
+  try {
+    if (typeof MutationObserver === 'function' && document.documentElement) {
+      var moPending = false;
+      mo = new MutationObserver(function(){
+        if (moPending) return;
+        moPending = true;
+        setTimeout(function(){ moPending = false; collectFrom(document, true); }, 300);
+      });
+      mo.observe(document.documentElement,
+          {childList: true, subtree: true, attributes: true, attributeFilter: ['src']});
+    }
+  } catch(e) {}
+})();
+''';
+
+  @override
+  void initState() {
+    super.initState();
+    // 开台打点：后续所有事件都以此为时间线（诊断缓冲仅在网页
+    // 频道激活期间记录，平时零开销不落盘）
+    WebDiag.begin(widget.url, widget.title);
+    // 注意：切频道不做任何缓存清理——删除缓存目录会与上一个频道
+    // WebView 的销毁赛跑（文件仍被占用），导致新频道创建卡死在等待
+    // 层。InPrivate 模式下数据本就不持久，整目录清理只在启动/退出做
+    // 后台缓冲期间持续探测；正常页起播后不立即推前台，等嗅探决策
+    _probeTimer = Timer.periodic(const Duration(seconds: 1), (_) => _probe());
+    // 卡死看门狗：网页已起播后每 3 秒采样一次播放位置，连续 24 秒
+    // 不推进即自动重载（可在设置里关闭）
+    _stallWatchTimer =
+        Timer.periodic(const Duration(seconds: 3), (_) => _checkStall());
+    // 站点页提前注入：站点脚本（芒果/央视频）原来只在 onLoadStop 注入，
+    // 而慢站首屏 load_stop 迟迟不来（8 秒时进度仍 66%）导致脚本永不注入、
+    // 永不点台、页面永不挂 video。2.5 秒先注入一次，脚本自带点台重试轮询；
+    // onLoadStop 仍会再注入一次作保底（各脚本内部有幂等守卫）
+    if (_siteJsFor(widget.url) != null) {
+      _siteInjectTimer = Timer(const Duration(milliseconds: 2500), () {
+        if (!mounted || widget.foreground) return;
+        WebDiag.log('siteinject_early');
+        _inject();
+      });
+    }
+    // 8 秒兜底：已知放弃页直接推网页；页面已挂出 video 元素（只在缓冲/
+    // 取流）时不做任何干预，交给 15 秒决策窗口收尾；页面连 video 都没有
+    // 才运行时注入轻嗅探（不重建 WebView、不打断正在进行的加载）找可
+    // 直连主流。
+    // 不做整页重建重载：日志实测重载会把已就绪的播放器摧毁并让整页
+    // 重新下载（更慢更黑），芒果 reload() 还会把页面打成永久空白
+    _forceForegroundTimer = Timer(const Duration(seconds: 8), () async {
+      if (!mounted || widget.foreground) return;
+      WebDiag.log('force8',
+          'abandoned=${_sniffAbandoned ? 1 : 0}|ready=${_webPlayReady ? 1 : 0}|retried=${_sniffRetried ? 1 : 0}|v=$_pageVideoCount');
+      if (_sniffAbandoned) {
+        WebDiag.log('push_fg', 'via=force8_abandoned');
+        widget.onForeground();
+        return;
+      }
+      if (_webPlayReady) return;
+      if (_pageVideoCount > 0 || _sniffRetried) return;
+      // 站点页（芒果/央视频/咪咕）有可见播放器、且自带站内脚本点台：
+      // 轻嗅探对其没有收益（候选实测均不可接管），hook XHR 反而可能
+      // 干扰站点播放器的完整性检测，因此不做嗅探注入，交给站点脚本
+      // 点台 + 15 秒决策窗口推前台
+      if (_siteJsFor(widget.url) != null) return;
+      WebDiag.log('sniff_inject_runtime');
+      _sniffRetried = true;
+      _sniffEnabled = true;
+      _decisionTimer?.cancel();
+      _decisionTimer = Timer(const Duration(seconds: 12),
+          () => _finishWithWeb(via: 'decision12'));
+      await _inject();
+    });
+    // 最终决策窗口：15 秒仍无可直连主流 → 加密/无流，直接网页全屏
+    _decisionTimer = Timer(const Duration(seconds: 15),
+        () => _finishWithWeb(via: 'decision15'));
+    // 运行时缺失判定（乐观策略）：注册表/版本查询在不同系统上都不可靠
+    // （实测已装 WebView2 的家庭版也会误报）。只要 WebView 能报告任何
+    // 加载进度，就证明运行时正常；25 秒内毫无进展才提示安装。
+    // 放宽到 25 秒：慢站点 + 弱网下 15 秒易误判"未安装"，导致程序
+    // 状态不一致、退出时 WebView 未正确释放进而崩溃。
+    _runtimeTimer = Timer(const Duration(seconds: 25), () {
+      if (mounted && !_sawProgress && _error == null) {
+        WebDiag.log('runtime_missing');
+        setState(() => _runtimeMissing = true);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    // 显式释放原生 WebView2 控制器，旧频道立即停播并让出环境；
+    // 打点须在 WebDiag.end() 之前（end 后日志会话关闭不再记录）
+    final c = _webController;
+    _webController = null;
+    if (c != null) {
+      WebDiag.log('wv_dispose');
+      try {
+        c.dispose(); // 同步方法（返回 void），关闭原生 WebView2 实例
+      } catch (_) {}
+    }
+    WebDiag.end();
+    widget.onBridgeDetached();
+    _probeTimer?.cancel();
+    _stallWatchTimer?.cancel();
+    _siteInjectTimer?.cancel();
+    _forceForegroundTimer?.cancel();
+    _decisionTimer?.cancel();
+    _webReadyGraceTimer?.cancel();
+    _runtimeTimer?.cancel();
+    _sniffAggTimer?.cancel();
+    _sniffDeadline?.cancel();
+    super.dispose();
+  }
+
+  /// 站点专用脚本（移植自 NewBox 站点脚本库）：命中域名时接管网页的
+  /// 铺满/点台/起播确认，通用 _bootJs 检测到 __omSkipPin 自动让位
+  static String? _siteJsFor(String url) {
+    if (url.contains('mgtv.com')) return _mgtvJs;
+    if (url.contains('yangshipin.cn')) return _yangshipinJs;
+    if (url.contains('cctv.com') || url.contains('cctv.cn')) return _cctvJs;
+    if (url.contains('miguvideo.com') || url.contains('migu.cn')) {
+      return _miguJs;
+    }
+    return null;
+  }
+
+  /// 站点页是否允许安装轻嗅探：央视直播真实流为 m3u8（经 CDN 别名域名
+  /// 分发），装嗅探才有机会接管为内置播放；芒果/咪咕/央视频带完整性
+  /// 检测保持零 hook 纯净环境，仍只在 8 秒兜底时才装
+  static bool _siteSniffAllowed(String url) =>
+      url.contains('cctv.com') || url.contains('cctv.cn');
+
+  /// 央视网（tv.cctv.com/live/* 等）：整体架构照搬央视频同款——
+  /// 钉播放器容器（#player，px 矩形+幂等键）、沿祖先链隐藏兄弟节点、
+  /// 清祖先裁剪、强制 viewport 元信息对齐移动端布局视口、视频充满
+  /// 容器；另保留央视特有的登录弹层隐藏、起播按钮连点、暂停恢复、
+  /// 跨域 iframe 兜底钉满与诊断上报。每 800ms 重排防播放器重建。
+  /// 实测要点：video（#h5player_player）在主文档 #player.video_flash；
+  /// 两条导航实测选择器 .nav_wrapper/.slide_con（hideSiblings 已能
+  /// 结构性隐藏，选择器清单作双保险）。页面真实 m3u8 流由嗅探系统
+  /// （央视白名单）自动接管为内置播放
+  static const String _cctvJs = r'''
+(function () {
+  // 安装守卫：document-start 预装与运行时注入并存，防止重复挂轮询
+  if (window.__omCctvInstalled) return;
+  window.__omCctvInstalled = 1;
+  window.__omSkipPin = 1;
+  try {
+    var pinned = document.querySelectorAll('[data-om-pin]');
+    for (var pi = 0; pi < pinned.length; pi++) {
+      pinned[pi].removeAttribute('data-om-pin');
+      pinned[pi].style.cssText = '';
+    }
+  } catch (e) {}
+
+  function fireReady() {
+    if (window.__omPlayingFired) return;
+    window.__omPlayingFired = true;
+    try { window.flutter_inappwebview.callHandler('omDiag', 'playing|via=site_cctv'); } catch (e) {}
+    try { window.flutter_inappwebview.callHandler('omPlaying'); } catch (e) {}
+  }
+
+  // 主文档 + 所有同源 iframe 文档逐个执行（跨域 iframe 访问抛异常跳过）
+  function eachDoc(cb) {
+    try { cb(document, null); } catch (e) {}
+    var fs = [];
+    try { fs = document.querySelectorAll('iframe'); } catch (e) {}
+    for (var i = 0; i < fs.length; i++) {
+      try {
+        var d = fs[i].contentDocument;
+        if (d) cb(d, fs[i]);
+      } catch (e) {}
+    }
+  }
+
+  var clutterCss =
+    'html,body{margin:0!important;padding:0!important;overflow:hidden!important;' +
+    'background:#000!important;width:100%!important;height:100%!important}' +
+    // 央视两条顶部导航（实测选择器）：首页/时政… 与 地方/乡村振兴…
+    '.nav_wrapper,.nav_list,.nav_left,.nav_right,.slide_con,' +
+    '#page_header,.page_header,.new_header,.top_bar,.header,.footer,.foot,' +
+    '.page_footer,.aside,.right_wrap,.side,.share,.bshare,.bshare-custom,' +
+    '.danmu,.danmaku,.barrage,.copyright-mask,.mask_layer,.login_pop,' +
+    '.pop_layer,.modal,.advert,' +
+    // 央视登录弹层（实测选择器）：挡播放挡钉满，必须隐藏
+    '[id*="outlogin"],[class*="outlogin"],#mask,.mask,' +
+    '[id*="loginFloat"],[class*="loginFloat"],#loginMain,.loginMain,' +
+    '#loginBox,.loginBox,[id*="login_layer"],[class*="login_layer"]' +
+    '{display:none!important;visibility:hidden!important;pointer-events:none!important}' +
+    // #player 容器 relative+overflow:hidden 会裁剪内部，放开兜底
+    '#player{overflow:visible!important}' +
+    'video{object-fit:contain!important;object-position:center center!important}';
+
+  function cssOnce() {
+    var head = document.head || document.documentElement;
+    if (!head) return;
+    // 强制 viewport 元信息（央视频同款）：移动端 WebView 默认按 980px
+    // 布局视口缩放渲染，钉满会量错尺寸——这很可能就是内嵌网页里
+    // 「钉了却没满」的根因
+    if (!document.getElementById('om-cctv-vp')) {
+      var meta = document.createElement('meta');
+      meta.id = 'om-cctv-vp';
+      meta.name = 'viewport';
+      meta.content = 'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no';
+      head.insertBefore(meta, head.firstChild);
+    }
+    if (document.getElementById('om-cctv-css')) return;
+    var s = document.createElement('style');
+    s.id = 'om-cctv-css';
+    s.textContent = clutterCss;
+    head.appendChild(s);
+  }
+
+  // 视口矩形（px）：与央视频同款，visualViewport 优先
+  function vp() {
+    var v = window.visualViewport;
+    if (v && v.width > 0 && v.height > 0) {
+      return { x: v.offsetLeft || 0, y: v.offsetTop || 0, w: v.width, h: v.height };
+    }
+    return { x: 0, y: 0, w: window.innerWidth || 0, h: window.innerHeight || 0 };
+  }
+
+  // 播放器容器（实测：DIV#player.video_flash）
+  function playerBox() {
+    return document.querySelector('#player') ||
+           document.querySelector('.video_flash') ||
+           document.querySelector('.video_left .player') ||
+           document.querySelector('.video_left');
+  }
+
+  function videoEl() {
+    var box = playerBox();
+    var v = box ? box.querySelector('video') : null;
+    if (v) return v;
+    var best = null, bestA = 0;
+    var vs = document.querySelectorAll('video');
+    for (var i = 0; i < vs.length; i++) {
+      var r = vs[i].getBoundingClientRect(), a = r.width * r.height;
+      if (a > bestA) { bestA = a; best = vs[i]; }
+    }
+    return best;
+  }
+
+  // 跨域 iframe 版页面兜底：钉最大的 iframe，iframe 内同款脚本接力
+  function mainIframe() {
+    var best = null, bestA = 0;
+    try {
+      var fs = document.querySelectorAll('iframe');
+      for (var i = 0; i < fs.length; i++) {
+        var r = fs[i].getBoundingClientRect(), a = r.width * r.height;
+        if (a > bestA) { bestA = a; best = fs[i]; }
+      }
+    } catch (e) {}
+    return bestA > 60000 ? best : null;
+  }
+
+  // 沿祖先链隐藏兄弟节点（央视频同款）：导航/侧栏不靠选择器清单，
+  // 结构上天然全部消失
+  function hideSiblings(el) {
+    var n = el;
+    while (n && n !== document.body && n !== document.documentElement) {
+      var p = n.parentElement;
+      if (!p) break;
+      var kids = p.children;
+      for (var i = 0; i < kids.length; i++) {
+        var c = kids[i];
+        if (c === n) continue;
+        var tag = c.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META') continue;
+        c.style.setProperty('display', 'none', 'important');
+        c.style.setProperty('visibility', 'hidden', 'important');
+      }
+      n = p;
+    }
+  }
+
+  // 清祖先裁剪（央视频同款）：overflow/transform/filter/clip-path
+  // 都会让 fixed/absolute 失效或裁掉画面
+  function unclip(el) {
+    var n = el;
+    while (n && n !== document.documentElement) {
+      if (n.getAttribute && n.getAttribute('data-om-site-box')) {
+        n = n.parentElement;
+        continue;
+      }
+      if (n.style) {
+        n.style.setProperty('overflow', 'visible', 'important');
+        n.style.setProperty('transform', 'none', 'important');
+        n.style.setProperty('filter', 'none', 'important');
+        n.style.setProperty('clip-path', 'none', 'important');
+        n.style.setProperty('zoom', '1', 'important');
+        n.style.setProperty('background', '#000', 'important');
+      }
+      n = n.parentElement;
+    }
+  }
+
+  // 钉满容器（央视频同款）：px 矩形 + 幂等键，不与页面 resize 打架
+  function pinBox(el, s) {
+    if (!el || !el.style || s.w < 8 || s.h < 8) return;
+    var key = s.x + ',' + s.y + ',' + s.w + ',' + s.h;
+    if (el.getAttribute('data-om-site-box') === key && (el.offsetWidth || 0) >= s.w - 8) return;
+    el.setAttribute('data-om-site-box', key);
+    el.style.cssText =
+      'display:block!important;position:fixed!important;' +
+      'left:' + s.x + 'px!important;top:' + s.y + 'px!important;' +
+      'width:' + s.w + 'px!important;height:' + s.h + 'px!important;' +
+      'max-width:none!important;max-height:none!important;min-width:0!important;min-height:0!important;' +
+      'margin:0!important;padding:0!important;border:none!important;' +
+      'z-index:9998!important;background:#000!important;overflow:hidden!important;' +
+      'transform:none!important;zoom:1!important';
+  }
+
+  // 视频充满容器（央视频同款）
+  function fillVideo(el) {
+    if (!el || !el.style) return;
+    try {
+      el.removeAttribute('width');
+      el.removeAttribute('height');
+      el.controls = false;
+      el.setAttribute('playsinline', '');
+      el.setAttribute('webkit-playsinline', 'true');
+    } catch (e) {}
+    el.style.cssText =
+      'display:block!important;position:absolute!important;' +
+      'left:0!important;top:0!important;right:0!important;bottom:0!important;' +
+      'width:100%!important;height:100%!important;' +
+      'max-width:100%!important;max-height:100%!important;min-width:0!important;min-height:0!important;' +
+      'margin:0!important;padding:0!important;border:none!important;' +
+      'object-fit:contain!important;object-position:center center!important;' +
+      'transform:none!important;zoom:1!important;background:#000!important';
+  }
+
+  // 隐藏播放器内部的封面/起播遮罩（含视频的容器除外）
+  function hideSiteChrome(box) {
+    var nodes = box.querySelectorAll(
+      '.player_cover,.video_poster,.player_start,.cover_mask,' +
+      '[class*="playbtn"],.loading,.poster'
+    );
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!el || el.tagName === 'VIDEO' || el.querySelector('video')) continue;
+      el.style.setProperty('display', 'none', 'important');
+      el.style.setProperty('visibility', 'hidden', 'important');
+      el.style.setProperty('pointer-events', 'none', 'important');
+    }
+  }
+
+  // 剥除通用 _cssJs 的 video 全屏钉层规则（央视频同款，避免两套打架）
+  function cleanOmCss() {
+    try {
+      var s = document.getElementById('__om_fullscreen_style');
+      if (s && s.textContent.indexOf('video{position:fixed') >= 0) {
+        s.textContent = s.textContent.replace(/video\{position:fixed[^}]*\}/g, '');
+      }
+    } catch (e) {}
+  }
+
+  var laying = 0;
+  function layoutWork() {
+    cssOnce();
+    cleanOmCss();
+    var s = vp();
+    if (s.w < 8 || s.h < 8) return false;
+    var box = playerBox();
+    var v = videoEl();
+    if (!box && v && v.parentElement) box = v.parentElement;
+    if (box) {
+      hideSiblings(box);
+      unclip(box);
+      pinBox(box, s);
+      hideSiteChrome(box);
+    } else {
+      var f = mainIframe();
+      if (f) pinBox(f, s);
+    }
+    if (v) { unclip(v); fillVideo(v); }
+    return !!(v && s.w > 8 && s.h > 8);
+  }
+  function layout() {
+    if (laying) return;
+    laying = 1;
+    try { layoutWork(); } finally { laying = 0; }
+  }
+
+  function tryPlay(v) {
+    if (!v) return;
+    try { v.muted = false; } catch (e) {}
+    try { if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function(){}); } } catch (e) {}
+  }
+
+  // 央视 tgide 播放器常见起播按钮/封面遮罩（自动播放被浏览器拦截时兜底）
+  function clickPlayButtons() {
+    var sels = ['.player_start', '.play_btn', '.play-btn', '.playBtn',
+      '.v-play', '.video-play', '.tgide_play', '.player-play',
+      '.player_cover', '.video_poster', '[class*="playbtn"]'];
+    eachDoc(function (d) {
+      for (var i = 0; i < sels.length; i++) {
+        var bs = d.querySelectorAll(sels[i]);
+        for (var j = 0; j < bs.length; j++) {
+          try { var r = bs[j].getBoundingClientRect();
+            if (r.width > 0) bs[j].click(); } catch (e) {}
+        }
+      }
+    });
+    try { var v0 = videoEl(); if (v0) v0.click(); } catch (e) {}
+  }
+
+  var fired = false, ticks = 0;
+  setInterval(function () {
+    ticks++;
+    layout();
+    var v = videoEl();
+    if (v) {
+      tryPlay(v);
+      if (!fired && !v.paused && v.currentTime > 0) { fired = true; fireReady(); }
+    }
+    // 每约 12 秒上报一次现场数据（钉没钉到目标一眼定位）
+    if (ticks % 15 === 1) {
+      try {
+        var b = playerBox();
+        var r = b ? b.getBoundingClientRect() : (v ? v.getBoundingClientRect() : null);
+        window.flutter_inappwebview.callHandler('omDiag',
+          'cctv tick=' + ticks + ' box=' + (b ? 1 : 0) + ' v=' + (v ? 1 : 0) +
+          ' rect=' + (r ? ((r.width | 0) + 'x' + (r.height | 0) + '@' + (r.left | 0) + ',' + (r.top | 0)) : '-') +
+          ' vw=' + window.innerWidth + 'x' + window.innerHeight +
+          ' top=' + (window === window.top ? 1 : 0));
+      } catch (e) {}
+    }
+    // 起播前约 24 秒持续尝试点起播按钮
+    if (!fired && ticks < 30) clickPlayButtons();
+  }, 800);
+
+  // ===== 清晰度切换（央视网 H5 播放器，5 档）=====
+  // 档位名映射：蓝光=1080 / 超清=720 / 高清=576 / 标清=480 / 流畅=360
+  // （央视网的「高清」是 576P、「超清」才是 720P，与央视频不同级）
+  // 菜单项多为 li、可能 hover 展开、可能在同源 iframe 内；
+  // 点击页面播放器自带的清晰度菜单项，站点降档后按锁定值自动切回
+  window.__omSetRes = function (level) {
+    var want = String(level);
+    if (['1080', '720', '576', '480', '360'].indexOf(want) < 0) return;
+    if (window.__omWantRes !== want) window.__omWantResTries = 0;
+    window.__omWantRes = want;
+    window.__omResLock = want;
+    window.__omResLockAt = Date.now();
+    try { __omTryRes(); } catch (e) {}
+  };
+  function __omQText(el) { return ((el.textContent || '') + '').trim().toUpperCase(); }
+  // 先匹配数字 xxxP；没有数字再精确匹配中文名（防止「超清」误配「高清」）
+  function __omQHit(want, t) {
+    if (!t || t.length > 12) return false;
+    var m = t.match(/(^|[^\d])(1080|720|576|480|360)P/);
+    if (m) return m[2] === want;
+    if (want === '1080') return t === '蓝光';
+    if (want === '720') return t === '超清';
+    if (want === '576') return t === '高清';
+    if (want === '480') return t === '标清';
+    if (want === '360') return t === '流畅';
+    return false;
+  }
+  function __omQItems() {
+    var out = [];
+    // 主文档 + 所有同源 iframe（播放器控件可能在 iframe 内）
+    eachDoc(function (d) {
+      var all = d.querySelectorAll('li,div,span,button,a,p');
+      for (var j = 0; j < all.length; j++) {
+        var el = all[j];
+        if (el.children && el.children.length > 3) continue;
+        var tt = __omQText(el);
+        if (!tt || tt.length > 12) continue;
+        if (!/(蓝光|超清|高清|标清|流畅)|((1080|720|576|480|360)P)/.test(tt)) continue;
+        out.push(el);
+      }
+    });
+    return out;
+  }
+  function __omQFind(want, list) {
+    for (var i = 0; i < list.length; i++) { if (__omQHit(want, __omQText(list[i]))) return list[i]; }
+    return null;
+  }
+  // 目标档不存在时向下取最好可用档
+  function __omQFindBest(want, list) {
+    var order = ['1080', '720', '576', '480', '360'];
+    var start = order.indexOf(want);
+    for (var k = start; k >= 0 && k < order.length; k++) {
+      var h = __omQFind(order[k], list);
+      if (h) return h;
+    }
+    return null;
+  }
+  function __omQClick(el) {
+    if (!el) return;
+    var o = { bubbles: true, cancelable: true, view: window };
+    // 央视网菜单项可能监听 hover 展开/高亮，先补 mouseover/mouseenter
+    try { el.dispatchEvent(new MouseEvent('mouseover', o)); } catch (e) {}
+    try { el.dispatchEvent(new MouseEvent('mouseenter', o)); } catch (e) {}
+    try { el.dispatchEvent(new PointerEvent('pointerdown', o)); } catch (e) {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', o)); } catch (e) {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', o)); } catch (e) {}
+    try { el.click(); } catch (e) {}
+  }
+  function __omWakePlayer() {
+    var o = { bubbles: true, cancelable: true, view: window,
+              clientX: (window.innerWidth / 2) | 0, clientY: (window.innerHeight / 2) | 0 };
+    eachDoc(function (d) {
+      var pl = d.querySelector('#player') || d.querySelector('video');
+      if (!pl) return;
+      // 只发 mousemove 唤出控制栏：点击视频面会触发播放/暂停切换
+      try { pl.dispatchEvent(new MouseEvent('mousemove', o)); } catch (e) {}
+    });
+  }
+  function __omVideoH() {
+    var m = 0;
+    eachDoc(function (d) {
+      var vs = d.querySelectorAll('video');
+      for (var i = 0; i < vs.length; i++) { if ((vs[i].videoHeight || 0) > m) m = vs[i].videoHeight; }
+    });
+    return m;
+  }
+  // 视频实际高度回推档位
+  function __omLevelOfH(h) {
+    return h >= 1000 ? '1080' : (h >= 700 ? '720' : (h >= 560 ? '576' : (h >= 460 ? '480' : (h > 0 ? '360' : ''))));
+  }
+  function __omTryRes() {
+    var want = window.__omWantRes;
+    // 保持清晰度：站点自行降档（重载/缩放后）时按锁定值切回
+    if (!want && window.__omResLock) {
+      var lh = __omVideoH();
+      if (lh >= 300) {
+        var lt = __omLevelOfH(lh);
+        var now = Date.now();
+        if (lt && lt !== window.__omResLock && now - (window.__omResLockAt || 0) > 10000) {
+          window.__omResLockAt = now;
+          window.__omWantResTries = 0;
+          want = window.__omWantRes = window.__omResLock;
+        }
+      }
+    }
+    if (!want) return;
+    window.__omWantResTries = (window.__omWantResTries || 0) + 1;
+    if (window.__omWantResTries > 14) { window.__omWantRes = null; return; }
+    var list = __omQItems();
+    var hit = __omQFindBest(want, list);
+    if (hit) { __omQClick(hit); window.__omWantRes = null; return; }
+    var cur = __omLevelOfH(__omVideoH());
+    // 菜单未展开：先唤出控制栏，再点「当前档」把清晰度菜单展开
+    if (window.__omWantResTries % 3 === 1) __omWakePlayer();
+    var opener = cur ? __omQFind(cur, list) : null;
+    if (!opener) {
+      var order = ['1080', '720', '576', '480', '360'];
+      for (var k = 0; k < order.length && !opener; k++) opener = __omQFind(order[k], list);
+    }
+    if (opener) __omQClick(opener);
+  }
+  if (!window.__omResTimer) {
+    window.__omResTimer = 1;
+    setInterval(function () { try { __omTryRes(); } catch (e) {} }, 1000);
+  }
+})();
+''';
+
+  /// 调页面内 __omSiteGo(url, 频道名)：芒果TV/央视频同 URL 页内切台，
+  /// 未注入站点脚本的页面 __omSiteGo 不存在，短路与直接跳过
+  String _siteGoCall() =>
+      'window.__omSiteGo && window.__omSiteGo('
+      '${jsonEncode(widget.url)}, ${jsonEncode(widget.title)})';
+
+  Future<void> _inject() async {
+    final c = _webController;
+    if (c == null) return;
+    // 每个脚本独立注入：任何一个抛错（页面未就绪/引擎差异）只记日志，
+    // 绝不连累后续脚本——站点脚本丢一次就再没有重试机会（探测只补
+    // CSS/探针），整个全屏方案随之失效
+    Future<void> one(String tag, String src) async {
+      try {
+        await c.evaluateJavascript(source: src);
+      } catch (e) {
+        WebDiag.log('inject_fail', 'js=$tag|err=$e');
+      }
+    }
+
+    await one('menu', _noContextMenuJs);
+    await one('css', _cssJs);
+    await one('boot', _bootJs);
+    // 站点脚本在 _bootJs 之后注入：置 __omSkipPin 让通用铺满让位，
+    // 并清掉 _bootJs 可能已抢先铺满的元素；随后立刻按当前频道点台
+    final siteJs = _siteJsFor(widget.url);
+    if (siteJs != null) {
+      await one('site', siteJs);
+      await one('sitego', _siteGoCall());
+      WebDiag.log('sitego', 'via=inject|title=${widget.title}');
+    }
+    // 嗅探脚本默认只在兜底重载后注入（页面保持零 hook 纯净环境）；
+    // 央视等白名单站点为拿到接管机会立即安装
+    if (_sniffEnabled || _siteSniffAllowed(widget.url)) {
+      await one('sniff', _sniffJs);
+    }
+    WebDiag.log('inject_done',
+        'site=${siteJs != null ? 1 : 0}|sniff=$_sniffEnabled');
+  }
+
+  Future<void> _probe() async {
+    if (!mounted || widget.foreground) return;
+    final c = _webController;
+    if (c == null) return;
+    // 每次探测顺带确保全屏样式/静音状态（SPA 页面可能被站点脚本改写）
+    try {
+      await c.evaluateJavascript(source: _cssJs);
+      final r = await c.evaluateJavascript(source: _probeJs);
+      // _probeJs 返回 [起播0/1, 页面视频状态串]；兼容旧版裸 0/1 返回
+      bool playing;
+      if (r is List) {
+        playing =
+            r.isNotEmpty && (r[0] == 1 || r[0]?.toString() == '1');
+        if (r.length > 1) {
+          // 状态串首字段即页面 video 元素数（_probeJs 自产，格式固定）
+          final m = RegExp(r'n=(\d+)').firstMatch(r[1].toString());
+          if (m != null) _pageVideoCount = int.parse(m.group(1)!);
+        }
+        WebDiag.log('probe',
+            'p=${playing ? 1 : 0}${r.length > 1 ? '|${r[1]}' : ''}');
+      } else {
+        playing = r == 1 || r?.toString() == '1';
+        WebDiag.log('probe', 'p=${playing ? 1 : 0}');
+      }
+      // 站点页仍无 video：每 3 秒重新点台。慢站首屏频道列表渲染晚，
+      // 首次点台常找不到频道节点，只点一次就永久黑屏（日志实锤：
+      // load_stop 正常、mgtv_click 也执行，页面 25 秒仍 n=0）
+      if (!playing &&
+          _pageVideoCount == 0 &&
+          !_webPlayReady &&
+          _siteJsFor(widget.url) != null) {
+        if (++_siteRetryTick % 3 == 0) _retrySiteGo();
+      }
+      if (playing && mounted && !widget.foreground) {
+        if (_sniffAbandoned) {
+          // 已知放弃页：起播即推网页
+          widget.onForeground();
+        } else {
+          // 正常页：记录起播。默认无嗅探直接推前台；兜底重载带
+          // 嗅探时由决策逻辑决定内置接管还是网页全屏
+          _markWebPlayReady();
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// 站点页（芒果/央视频）仍无 video 元素时重新点台。
+  /// 页内点台不重载页面、不打断正在进行的加载；站点脚本 __omSiteGo
+  /// 对相同频道会走"无 video 就再点一次"分支，因此可安全重复调用
+  void _retrySiteGo() {
+    if (_siteRetryCount >= 8) return;
+    _siteRetryCount++;
+    WebDiag.log('sitego_retry', 'n=$_siteRetryCount');
+    _webController
+        ?.evaluateJavascript(source: _siteGoCall())
+        .catchError((_) => null);
+  }
+
+  @override
+  void didUpdateWidget(covariant _WebChannelOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 已推到前台（探测成功或超时兜底）后不再需要超时定时器
+    if (widget.foreground && !oldWidget.foreground) {
+      _forceForegroundTimer?.cancel();
+    }
+    // 同 URL 页内切台：频道名变化时让站点脚本按新频道名重新点台。
+    // 不整页重载——重载会把央视频已起播的播放器一并摧毁（日志实测
+    // 央视频 7 秒已起播，被 8 秒兜底重载拖到 29 秒），且芒果重载后
+    // 偶发永久空白。页内点台失败由 _probe 的每 3 秒重试兜底
+    if (widget.title != oldWidget.title && _siteJsFor(widget.url) != null) {
+      WebDiag.log('sitego', 'via=title|title=${widget.title}');
+      _siteRetryCount = 0;
+      _webController
+          ?.evaluateJavascript(source: _siteGoCall())
+          .catchError((_) => null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        InAppWebView(
+          key: ValueKey('web_${widget.url}'),
+          webViewEnvironment: webViewEnvironment,
+          initialUrlRequest: URLRequest(url: WebUri(widget.url)),
+          // 默认零 hook 纯净环境（对齐 NewBox webview:// 纯网页播放
+          // 策略）；轻嗅探不再随 WebView 创建注入，改为 8 秒兜底时运行时
+          // 由 _inject() 注入（换 key 重建 WebView 会摧毁已就绪的播放器）
+          initialUserScripts: UnmodifiableListView<UserScript>([
+            // 右键菜单屏蔽提前到 document-start：页面加载失败/
+            // 未完成时 onLoadStop 不触发，运行时注入会漏掉，
+            // WebView2 默认菜单（返回/刷新/另存为/打印）就会冒出来
+            UserScript(
+              source: _noContextMenuJs,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+              forMainFrameOnly: false,
+            ),
+            // 站点脚本（央视等）同步提前到 document-start：不依赖
+            // onLoadStop/计时器的运行时注入，彻底免疫加载竞态与单次
+            // 注入失败导致的全屏失效；脚本内部有安装守卫，与运行时
+            // 注入并存不会重复执行
+            if (_siteJsFor(widget.url) != null)
+              UserScript(
+                source: _siteJsFor(widget.url)!,
+                injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                forMainFrameOnly: false,
+              ),
+          ]),
+          initialSettings: InAppWebViewSettings(
+            // 网页播放器（如央视频）自动开播，无需用户先点击网页
+            mediaPlaybackRequiresUserGesture: false,
+            supportZoom: false,
+            transparentBackground: false,
+            cacheMode: CacheMode.LOAD_DEFAULT,
+            // 允许 iframe 内的视频自动播放（央视频播放器在 iframe 内）
+            iframeAllow: "autoplay; fullscreen; encrypted-media",
+            iframeAllowFullscreen: true,
+            // 伪装桌面 Chrome，避免安卓 WebView 被网站检测到移动端
+            // 而重定向到“下载 App”页
+            userAgent:
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          ),
+          onWebViewCreated: (controller) async {
+            _webController = controller;
+            // 内置播放失败回退过、或用户手动选择网页观看的页面，
+            // 本次运行不再尝试自动接管（起播即推网页前台）
+            _sniffAbandoned = context
+                .read<PlayerController>()
+                .shouldSkipAutoSniff(widget.url);
+            WebDiag.log('wv_created',
+                'skip=${_sniffAbandoned ? 1 : 0}|sniff=$_sniffEnabled');
+            // 把 controller 存到 PlayerController，供 Dart 侧调用网页 JS
+            context.read<PlayerController>().webController = controller;
+            // JS bridge 通道
+            controller.addJavaScriptHandler(
+              handlerName: 'omPlaying',
+              callback: (_) {
+                WebDiag.log('om_playing',
+                    'abandoned=${_sniffAbandoned ? 1 : 0}|fg=${widget.foreground ? 1 : 0}');
+                if (!mounted || widget.foreground) return;
+                if (_sniffAbandoned) {
+                  widget.onForeground();
+                } else {
+                  _markWebPlayReady();
+                }
+              },
+            );
+            controller.addJavaScriptHandler(
+              handlerName: 'omKey',
+              callback: (args) {
+                if (args.isNotEmpty) {
+                  widget.onWebKey(args.first.toString());
+                }
+              },
+            );
+            controller.addJavaScriptHandler(
+              handlerName: 'omMouse',
+              callback: (_) => widget.onWebMouseMove(),
+            );
+            controller.addJavaScriptHandler(
+              handlerName: 'omPlay',
+              callback: (args) {
+                if (args.isNotEmpty) {
+                  widget.onPlayStateChanged(
+                      args.first.toString() == '1' ||
+                          args.first.toString() == '1.0');
+                }
+              },
+            );
+            // 网页录制：MediaRecorder 分块（base64）与结束通知
+            controller.addJavaScriptHandler(
+              handlerName: 'omRecChunk',
+              callback: (args) {
+                if (args.isNotEmpty) {
+                  context
+                      .read<PlayerController>()
+                      .appendWebRecordingChunk(args.first.toString());
+                }
+                return null;
+              },
+            );
+            controller.addJavaScriptHandler(
+              handlerName: 'omRecEnd',
+              callback: (args) {
+                context.read<PlayerController>().finishWebRecording();
+                return null;
+              },
+            );
+            // 网页 XHR/fetch 嗅探到的真实媒体流（芒果TV 等）
+            controller.addJavaScriptHandler(
+              handlerName: 'omStream',
+              callback: (args) {
+                if (args.isNotEmpty) _onSniffedStream(args.first);
+                return null;
+              },
+            );
+            // 页面侧诊断回报：起播来源（bootJs/站点脚本）、站点脚本
+            // 点台动作与结果（串台定位），统一进 WebDiag 时间线
+            controller.addJavaScriptHandler(
+              handlerName: 'omDiag',
+              callback: (args) {
+                if (args.isNotEmpty) WebDiag.log('js', args.first.toString());
+                return null;
+              },
+            );
+            // 注册控制桥：执行 JS（播放/暂停）与网页截图
+            widget.onBridgeAttached(
+              eval: (js) => controller.evaluateJavascript(source: js),
+              screenshot: () async => await controller.takeScreenshot(),
+            );
+          },
+          onLoadStart: (controller, _) {
+            WebDiag.log('load_start', 'sniff=$_sniffEnabled');
+          },
+          onLoadStop: (controller, _) async {
+            _sawProgress = true;
+            WebDiag.log('load_stop');
+            if (mounted) setState(() => _loaded = true);
+            await _inject();
+          },
+          // 页面开始渲染时立即注入 CSS，避免白屏闪现
+          onPageCommitVisible: (controller, _) async {
+            WebDiag.log('commit_visible');
+            try {
+              await controller.evaluateJavascript(source: _cssJs);
+            } catch (_) {}
+          },
+          onProgressChanged: (controller, progress) {
+            // 能收到任何进度都说明 WebView2 运行时工作正常
+            if (progress > 0 && !_sawProgress) {
+              WebDiag.log('progress_first', 'v=$progress');
+            }
+            if (progress > 0) _sawProgress = true;
+            // 分桶记录加载进度（25/50/75/100），慢站定位卡在哪个阶段
+            final bucket = progress ~/ 25;
+            if (bucket > _progBucket) {
+              _progBucket = bucket;
+              WebDiag.log('progress', 'v=$progress');
+            }
+            // 部分页面 onLoadStop 触发较晚，加载完成即收起等待层
+            if (progress >= 100 && mounted && !_loaded) {
+              setState(() => _loaded = true);
+            }
+          },
+          onReceivedError: (controller, request, error) {
+            // 主文档加载失败才提示（子资源失败不影响播放）
+            if (request.isForMainFrame ?? false) {
+              WebDiag.log('load_error', 'desc=${error.description}');
+              if (mounted) {
+                setState(() => _error = error.description);
+              }
+            }
+          },
+        ),
+        // 等待层：仅后台缓冲期间显示（推到前台后即使页面慢也露出来，
+        // 避免「正在打开网页频道」永久转圈把用户锁死）；嗅探接管内置后
+        // 本层必须消失，否则半透明提示会浮在内置播放器画面上
+        if (!_loaded &&
+            _error == null &&
+            !_runtimeMissing &&
+            !widget.foreground &&
+            !_sniffDone)
+          const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 12),
+                Text('正在打开网页频道...',
+                    style: TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+        if (_error != null && !_runtimeMissing && !_sniffDone)
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.link_off, color: Colors.white54, size: 40),
+                const SizedBox(height: 8),
+                Text('网页打开失败：$_error',
+                    style: const TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+        // 未安装/版本过旧的 WebView2 运行时（部分 Win10 家庭版）
+        if (_runtimeMissing)
+          Center(
+            child: Container(
+              margin: const EdgeInsets.all(24),
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.web_asset,
+                      color: Colors.amber, size: 40),
+                  const SizedBox(height: 12),
+                  Text(
+                    webEnvOfficialVersion != null
+                        ? '已检测到 WebView2 $webEnvOfficialVersion，但环境创建失败\n可尝试重装 WebView2 Runtime 或重启程序'
+                        : '未检测到 WebView2 运行环境\n网页频道需要 Microsoft Edge WebView2 Runtime',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                  if (webEnvLastError.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    SelectableText(
+                      webEnvLastError,
+                      maxLines: 4,
+                      style: const TextStyle(
+                          color: Colors.white38, fontSize: 10),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.download, size: 18),
+                    label: const Text('下载并安装 WebView2'),
+                    onPressed: () => launchExternal(
+                        'https://developer.microsoft.com/microsoft-edge/webview2/'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// 右上角系统时钟。
+///
+/// 完全独立自治：
+/// - 显隐由 [PlayerController.clockVisible] 驱动（ValueListenableBuilder），
+///   只重建时钟自身；
+/// - 走时由内部定时器每秒刷新。
+///
+/// 因此切换「显示时间」不会触发 PlayerController.notifyListeners，整棵
+/// 播放 Stack 不重建。旧实现复用 updateSettings，反复切换会反复整树重建，
+/// 导致画面出现灰屏。
+class ClockOverlay extends StatefulWidget {
+  const ClockOverlay({super.key});
+
+  @override
+  State<ClockOverlay> createState() => _ClockOverlayState();
+}
+
+class _ClockOverlayState extends State<ClockOverlay> {
+  Timer? _timer;
+  String _text = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _tick();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  void _tick() {
+    final t = DateFormat('HH:mm').format(DateTime.now());
+    if (t != _text && mounted) setState(() => _text = t);
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = context.read<PlayerController>();
+    return Positioned(
+      top: 0,
+      right: 0,
+      child: ValueListenableBuilder<bool>(
+        valueListenable: controller.clockVisible,
+        builder: (context, visible, child) =>
+            visible ? child! : const SizedBox.shrink(),
+        child: SafeArea(
+          child: Padding(
+            // 与屏幕上边、右边保持约一行距离（桌面无 SafeArea 边距，
+            // 显式留白）
+            padding: const EdgeInsets.only(top: 20, right: 28, bottom: 8),
+            child: Text(
+              _text,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w500,
+                shadows: [Shadow(color: Colors.black87, blurRadius: 6)],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 退出确认面板的一个操作项（方块图标按钮）
+class _ExitOption {
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  /// 点击/确认后的动作标识：back / lock / mini / remoteAdmin / settings / exit / shutdown
+  final String action;
+  const _ExitOption(this.icon, this.label, this.color, this.action);
+}
+
+/// 网页嗅探到的媒体流候选（XHR/fetch 命中聚合）
+class _SniffCandidate {
+  final String url;
+  String kind; // hls / dash / flv
+  final String? referer;
+  final String? ua;
+  int count = 0;
+  DateTime last;
+  _SniffCandidate({
+    required this.url,
+    required this.kind,
+    required this.referer,
+    required this.ua,
+  }) : last = DateTime.now();
+}
+
+/// 启动画面：初始化配置、节目列表、EPG 期间覆盖全屏显示启动 logo，
+/// 全部读入后（[PlayerController.bootReady]）自动消失
+class _BootSplash extends StatelessWidget {
+  final String status;
+  const _BootSplash({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    // logo 宽度按屏宽缩放并限幅；标题用 Flutter Text 渲染（矢量、任意
+    // 分辨率都清晰），不依赖位图里的文字
+    final logoW = (MediaQuery.sizeOf(context).width * 0.15).clamp(110.0, 300.0);
+    final titleSize = (logoW * 0.26).clamp(22.0, 72.0);
+    // 整体上移一点，图像再额外上移一点，和文字拉开距离
+    final lift = MediaQuery.sizeOf(context).height * 0.045;
+    final imgLift = logoW * 0.12;
+    return Positioned.fill(
+      child: ColoredBox(
+        color: Colors.black,
+        child: Stack(
+          children: [
+            Center(
+              child: Transform.translate(
+                offset: Offset(0, -(lift + imgLift)),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: logoW,
+                      child: Image.asset(
+                        'branding/splash.png',
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                      ),
+                    ),
+                    SizedBox(height: logoW * 0.10 + imgLift),
+                    Padding(
+                      // 抵消末字字距造成的视觉左偏
+                      padding: EdgeInsets.only(left: titleSize * 0.14),
+                      child: Text(
+                        '欧米直播',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: titleSize,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: titleSize * 0.14,
+                          height: 1.12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 44,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.4,
+                      color: Colors.blueAccent,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    status.isEmpty ? '正在启动…' : status,
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,877 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../models/channel.dart';
+import '../services/channel_logo.dart';
+import '../services/osd_bus.dart';
+import '../services/player_controller.dart';
+import 'scaled_panel.dart';
+
+/// 左侧两级抽屉式频道面板
+/// 第一级：频道分类列表
+/// 第二级：选中分类下的频道列表
+class LeftChannelDrawer extends StatefulWidget {
+  final bool isOpen;
+  final VoidCallback onClose;
+
+  /// 鼠标悬停在面板上/移出面板（悬停期间不自动隐藏）
+  final VoidCallback? onHoverEnter;
+  final VoidCallback? onHoverExit;
+  final VoidCallback? onHoverMove;
+
+  /// 点击频道后回调（用于重置光标隐藏定时器等）
+  final VoidCallback? onChannelTap;
+
+  /// 空列表时「去设置添加」按钮回调
+  final VoidCallback? onOpenSettings;
+
+  const LeftChannelDrawer({
+    super.key,
+    required this.isOpen,
+    required this.onClose,
+    this.onHoverEnter,
+    this.onHoverExit,
+    this.onHoverMove,
+    this.onChannelTap,
+    this.onOpenSettings,
+  });
+
+  @override
+  State<LeftChannelDrawer> createState() => LeftChannelDrawerState();
+}
+
+class LeftChannelDrawerState extends State<LeftChannelDrawer> {
+  /// 「我的收藏」虚拟分类 ID（不与真实源分类冲突）
+  static const String _favCategoryId = '::favorites::';
+
+  /// 收藏分类对象（按需重建，buildFavoriteChannels 内容随收藏变化）
+  ChannelCategory? _favCategoryCache;
+
+  /// 启动后首次打开抽屉的定位是否已完成。仅这一次允许「当前频道在
+  /// 收藏夹就定位到收藏夹」（启动恢复场景）；此后用户在普通分类里
+  /// 点击恰好被收藏的频道，列表不得自动跳到收藏夹
+  bool _startupFavLocated = false;
+
+  ChannelCategory? _selectedCategory;
+  final ScrollController _categoryScroll = ScrollController();
+  final ScrollController _channelScroll = ScrollController();
+
+  /// 遥控器/键盘导航的当前选中索引（与鼠标点击的 isCurrent 播放中区分）
+  int _kbCategoryIndex = 0;
+  int _kbChannelIndex = 0;
+
+  /// OK 长按收藏：按下边沿启动计时，800ms 内抬起=播放，超时=收藏/取消收藏
+  Timer? _okLongTimer;
+  bool _okLongFired = false;
+
+  /// 上次触发播放的时间，用于播放内核重建期间的防抖
+  DateTime? _lastPlayAt;
+
+  /// 频道条目的 GlobalKey，用于 ensureVisible 精准定位
+  /// （替代固定 itemHeight 的手算，避免长频道名换行导致高度不一致）
+  final Map<int, GlobalKey> _channelKeys = <int, GlobalKey>{};
+  final Map<int, GlobalKey> _categoryKeys = <int, GlobalKey>{};
+
+  /// 各频道「正在播」节目名缓存。EPG 匹配要遍历整张频道表，
+  /// 列表滚动会反复构建条目，缓存 60 秒复用一次结果即可
+  final Map<String, String> _nowTitleCache = <String, String>{};
+  DateTime _nowTitleCacheAt = DateTime.now();
+
+  /// 设计稿宽度（面板内容按此尺寸设计，缩放交给 ScaledPanel）
+  static const double _designWidth = 320;
+
+  @override
+  void dispose() {
+    _categoryScroll.dispose();
+    _channelScroll.dispose();
+    _okLongTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 第一级列表：收藏夹（非空时）排在最前，其后为真实分类
+  List<ChannelCategory> _l1Categories(PlayerController controller) {
+    final favs = controller.buildFavoriteChannels();
+    if (favs.isEmpty) return controller.categories;
+    final fav = _favCategoryCache;
+    if (fav == null || fav.channels.length != favs.length) {
+      _favCategoryCache = ChannelCategory(
+        id: _favCategoryId,
+        name: '我的收藏',
+        channels: favs,
+      );
+    } else {
+      _favCategoryCache =
+          ChannelCategory(id: _favCategoryId, name: '我的收藏', channels: favs);
+    }
+    return [_favCategoryCache!, ...controller.categories];
+  }
+
+  /// 分类下实际展示的频道列表（收藏分类动态聚合）
+  List<Channel> _channelsOf(PlayerController controller, ChannelCategory cat) =>
+      cat.id == _favCategoryId
+          ? controller.buildFavoriteChannels()
+          : cat.channels;
+
+  /// 收藏/取消收藏并提示（鼠标点星标或遥控器长按 OK）
+  Future<void> _toggleFavorite(Channel ch) async {
+    final c = context.read<PlayerController>();
+    final nowFav = await c.toggleFavoriteChannel(ch.id);
+    OsdBus.show(
+      nowFav ? '已收藏：${ch.name}' : '已取消收藏：${ch.name}',
+      icon: Icons.star,
+    );
+  }
+
+  /// 频道正在播出的节目名。命中缓存直接返回；空结果不缓存，
+  /// 便于 EPG 异步加载完成后下一次构建即可显示
+  String _nowTitleFor(PlayerController controller, Channel channel) {
+    final now = DateTime.now();
+    if (now.difference(_nowTitleCacheAt) > const Duration(seconds: 60)) {
+      _nowTitleCache.clear();
+      _nowTitleCacheAt = now;
+    }
+    final cached = _nowTitleCache[channel.id];
+    if (cached != null) return cached;
+    final title = controller.currentProgramTitleFor(channel);
+    if (title.isNotEmpty) _nowTitleCache[channel.id] = title;
+    return title;
+  }
+
+  @override
+  void didUpdateWidget(covariant LeftChannelDrawer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 打开时直接定位到当前播放频道所在分类，并滚动到当前频道
+    if (!oldWidget.isOpen && widget.isOpen) {
+      // 节目可能已切换，重新取「正在播」节目名
+      _nowTitleCache.clear();
+      _nowTitleCacheAt = DateTime.now();
+      // 清空 GlobalKey 映射：切换分类/频道列表刷新后，
+      // 旧索引的 key 可能已失效，需重建
+      _channelKeys.clear();
+      _categoryKeys.clear();
+      final controller = context.read<PlayerController>();
+      final cur = controller.currentChannel;
+      final favs = controller.buildFavoriteChannels();
+
+      // 上次停留在「我的收藏」：收藏夹仍非空时保持收藏夹层级，
+      // 框选对齐刚播放的收藏频道；收藏已清空才退回普通分类定位
+      if (_selectedCategory?.id == _favCategoryId && favs.isNotEmpty) {
+        _kbCategoryIndex = 0;
+        final favIdx = cur == null
+            ? -1
+            : favs.indexWhere((ch) => ch.id == cur.id);
+        _kbChannelIndex =
+            favIdx >= 0 ? favIdx.clamp(0, favs.length - 1) : 0;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scrollToCurrentChannel();
+        });
+        return;
+      }
+      if (_selectedCategory?.id == _favCategoryId) {
+        // 收藏夹已空：退回第一级
+        _selectedCategory = null;
+      }
+
+      if (cur != null) {
+        // 收藏夹非空时在 L1 占第 0 项，真实分类索引整体 +1
+        final favOffset = favs.isEmpty ? 0 : 1;
+        // 仅启动后首次打开抽屉：当前播放频道在收藏夹中则定位到
+        // 「我的收藏」（下次启动恢复收藏频道的场景）。
+        // 之后的打开不再做此跳转，避免在普通分类点击收藏频道时
+        // 列表被强制拉到收藏夹
+        if (!_startupFavLocated) {
+          _startupFavLocated = true;
+          final favIdx = favs.indexWhere((ch) => ch.id == cur.id);
+          if (favIdx >= 0) {
+            _favCategoryCache = ChannelCategory(
+                id: _favCategoryId, name: '我的收藏', channels: favs);
+            setState(() => _selectedCategory = _favCategoryCache);
+            _kbCategoryIndex = 0;
+            _kbChannelIndex = favIdx.clamp(0, favs.length - 1);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _scrollToCurrentChannel();
+            });
+            return;
+          }
+        }
+        var catIndex = 0;
+        for (final cat in controller.categories) {
+          if (cat.channels.any((ch) => ch.id == cur.id)) {
+            if (_selectedCategory != cat) {
+              setState(() => _selectedCategory = cat);
+            }
+            _kbCategoryIndex = catIndex + favOffset;
+            _kbChannelIndex = cat.channels
+                .indexWhere((ch) => ch.id == cur.id)
+                .clamp(0, cat.channels.length - 1);
+            break;
+          }
+          catIndex++;
+        }
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollToCurrentChannel();
+      });
+    }
+  }
+
+  /// 遥控器/键盘按键入口（由 PlayerScreen 统一分发，Windows 低级钩子
+  /// 与 HardwareKeyboard 走同一入口）。
+  /// action: up/down/left/right/ok/back；back 与 ok 在按下边沿触发。
+  void handleRemoteKey(String action, {required bool isDown}) {
+    if (!widget.isOpen || !mounted) return;
+    if (action == 'back') {
+      if (isDown) widget.onClose();
+      return;
+    }
+    final controller = context.read<PlayerController>();
+    final cats = _l1Categories(controller);
+    final cat = _selectedCategory;
+    if (cat == null) {
+      // ===== 第一级：分类列表（长按收藏只作用于第二级频道行） =====
+      if (cats.isEmpty) return;
+      if (!isDown) return;
+      switch (action) {
+        case 'up':
+          setState(() => _kbCategoryIndex =
+              (_kbCategoryIndex - 1).clamp(0, cats.length - 1));
+          _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+        case 'down':
+          setState(() => _kbCategoryIndex =
+              (_kbCategoryIndex + 1).clamp(0, cats.length - 1));
+          _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+        case 'ok':
+        case 'right':
+          final next = cats[_kbCategoryIndex.clamp(0, cats.length - 1)];
+          final nextChannels = _channelsOf(controller, next);
+          setState(() {
+            _selectedCategory = next;
+            final curId = controller.currentChannel?.id;
+            final idx = nextChannels.indexWhere((ch) => ch.id == curId);
+            // 进入分类时默认选中当前播放频道，没有则选第一条
+            _kbChannelIndex =
+                idx >= 0 ? idx.clamp(0, nextChannels.length - 1) : 0;
+          });
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _scrollToCurrentChannel();
+            _scrollKeyboardTo(_channelKeys, _kbChannelIndex);
+          });
+      }
+    } else {
+      // ===== 第二级：频道列表 =====
+      final channels = _channelsOf(controller, cat);
+      switch (action) {
+        case 'up':
+          if (!isDown || channels.isEmpty) break;
+          setState(() => _kbChannelIndex =
+              (_kbChannelIndex - 1).clamp(0, channels.length - 1));
+          _scrollKeyboardTo(_channelKeys, _kbChannelIndex);
+        case 'down':
+          if (!isDown || channels.isEmpty) break;
+          setState(() => _kbChannelIndex =
+              (_kbChannelIndex + 1).clamp(0, channels.length - 1));
+          _scrollKeyboardTo(_channelKeys, _kbChannelIndex);
+        case 'left':
+          if (!isDown) break;
+          setState(() => _selectedCategory = null);
+        case 'ok':
+          if (channels.isEmpty) break;
+          if (isDown) {
+            // 长按 OK（800ms）= 收藏/取消收藏；抬起前未超时则按短按播放
+            _okLongFired = false;
+            _okLongTimer?.cancel();
+            _okLongTimer = Timer(const Duration(milliseconds: 800), () {
+              _okLongFired = true;
+              final idx = _kbChannelIndex.clamp(0, channels.length - 1);
+              _toggleFavorite(channels[idx]);
+            });
+            break;
+          }
+          // 抬起边沿：长按已触发收藏，不再播放
+          if (_okLongFired) {
+            _okLongFired = false;
+            break;
+          }
+          _okLongTimer?.cancel();
+          // 播放内核重建期间防抖：连按 OK 只执行一次，避免频道乱跳
+          if (_lastPlayAt != null &&
+              DateTime.now().difference(_lastPlayAt!) <
+                  const Duration(milliseconds: 800)) {
+            break;
+          }
+          // 索引边界检查：EPG/频道列表刷新可能导致数组长度变化
+          final idx = _kbChannelIndex.clamp(0, channels.length - 1);
+          _lastPlayAt = DateTime.now();
+          final channel = channels[idx];
+          controller.playChannel(channel);
+          widget.onChannelTap?.call();
+          widget.onClose();
+      }
+    }
+  }
+
+  /// 滚动列表让键盘选中项可见。
+  /// ListView 懒加载：目标条目在视口外很远时 GlobalKey 还没有
+  /// currentContext，ensureVisible 会静默失败；此时先用估算高度粗跳
+  /// 到目标附近让条目构建，下一帧再精准居中。
+  void _ensureVisibleIndex(ScrollController sc, Map<int, GlobalKey> keys,
+      int index, Duration duration) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !sc.hasClients) return;
+      final ctx = keys[index]?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          duration: duration,
+          curve: Curves.easeOut,
+          alignment: 0.5,
+        );
+        return;
+      }
+      // 目标尚未构建：粗跳到目标附近（频道条目约 76px，含"正在播"小字）
+      final pos = sc.position;
+      const estItemHeight = 76.0;
+      final rough = (index * estItemHeight - pos.viewportDimension / 2)
+          .clamp(0.0, pos.maxScrollExtent);
+      pos.jumpTo(rough);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !sc.hasClients) return;
+        final c2 = keys[index]?.currentContext;
+        if (c2 != null) {
+          Scrollable.ensureVisible(
+            c2,
+            duration: duration,
+            curve: Curves.easeOut,
+            alignment: 0.5,
+          );
+        }
+      });
+    });
+  }
+
+  /// 滚动列表让键盘选中项保持在可视区
+  void _scrollKeyboardTo(Map<int, GlobalKey> keys, int index) {
+    _ensureVisibleIndex(
+        _scrollOf(keys), keys, index, const Duration(milliseconds: 200));
+  }
+
+  ScrollController _scrollOf(Map<int, GlobalKey> keys) =>
+      identical(keys, _categoryKeys) ? _categoryScroll : _channelScroll;
+
+  /// 滚动频道列表到当前播放频道
+  void _scrollToCurrentChannel() {
+    if (!mounted) return;
+    final controller = context.read<PlayerController>();
+    final cat = _selectedCategory;
+    if (cat == null) return;
+    final idx = cat.channels
+        .indexWhere((ch) => ch.id == controller.currentChannel?.id);
+    if (idx < 0) return;
+    // 注意：打开瞬间 _channelScroll 还没有 clients，
+    // 不能在这里同步判断 hasClients，交给 postFrame
+    _ensureVisibleIndex(_channelScroll, _channelKeys, idx,
+        const Duration(milliseconds: 300));
+  }
+
+  /// 频道全局序号（跨分类累加，1 起），与数字选台/OSD 序号一致
+  int _globalIndexOf(PlayerController controller, ChannelCategory cat,
+      int indexInCat) {
+    var offset = 0;
+    for (final c in controller.categories) {
+      if (c == cat) return offset + indexInCat + 1;
+      offset += c.channels.length;
+    }
+    // 虚拟分类（我的收藏）：按频道 id 反查其在源分类中的全局序号
+    if (indexInCat < cat.channels.length) {
+      final id = cat.channels[indexInCat].id;
+      var off = 0;
+      for (final c in controller.categories) {
+        final i = c.channels.indexWhere((ch) => ch.id == id);
+        if (i >= 0) return off + i + 1;
+        off += c.channels.length;
+      }
+    }
+    return indexInCat + 1;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 面板宽度：左中右三等分策略统一覆盖所有场景。
+    // - 桌面/大平板（shortest >= 700）：设计宽度 320，保证面板内部呼吸；
+    // - 其它所有场景（手机横屏、手机竖屏、安卓电视盒子、小平板）：
+    //   左中右三等分（各占屏宽 1/3），保证中间画面至少 1/3。
+    //   节目名看不全时靠字号再缩一档解决，不能再靠面板变宽。
+    final size = MediaQuery.of(context).size;
+    final shortest = size.shortestSide;
+    final double designW;
+    if (shortest >= 700) {
+      designW = _designWidth;
+    } else if (shortest >= 600) {
+      designW = _designWidth * 0.95;
+    } else {
+      // 手机竖屏/横屏/电视盒子统一三等分
+      designW = size.width / 3;
+    }
+    // 手机（含横屏）与电视盒子：面板只有 1/3 屏宽，字号再缩一档，
+    // 保证频道名/正在播节目名能完整显示（"看不全就靠小字"）
+    final compact = shortest < 600;
+    // 任何情况下不超过屏幕宽度的 92%：逻辑分辨率很小的电视盒子上
+    // 面板不能宽于屏幕，否则内容会被裁掉
+    final drawerW =
+        designW.clamp(0.0, size.width * 0.92).toDouble();
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOutCubic,
+      left: widget.isOpen ? 0 : -drawerW,
+      top: 0,
+      bottom: 0,
+      width: drawerW,
+      child: MouseRegion(
+        onEnter: (_) => widget.onHoverEnter?.call(),
+        onExit: (_) => widget.onHoverExit?.call(),
+        onHover: (_) => widget.onHoverMove?.call(),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 200),
+          opacity: widget.isOpen ? 1.0 : 0.0,
+          child: ScaledPanel(
+            alignment: Alignment.centerLeft,
+            scale: 1.0,
+            child: MediaQuery(
+              // 只在面板内缩小文字，不影响主界面其它区域
+              data: MediaQuery.of(context).copyWith(
+                textScaler: TextScaler.linear(
+                  MediaQuery.textScalerOf(context).scale(1.0) *
+                      (compact ? 0.78 : 1.0),
+                ),
+              ),
+              child: Material(
+                color: Colors.black87,
+                elevation: 16,
+                child: SafeArea(
+                  child: Column(
+                    children: [
+                      _buildHeader(),
+                      Expanded(child: _buildBody()),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Colors.white12)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.live_tv, color: Colors.white, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              _selectedCategory == null ? '频道列表' : _selectedCategory!.name,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          if (_selectedCategory != null)
+            IconButton(
+              icon: const Icon(Icons.arrow_back, color: Colors.white70),
+              onPressed: () => setState(() => _selectedCategory = null),
+            ),
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.white70),
+            onPressed: widget.onClose,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    // 顶层监听控制器：切换节目源（分类列表整体替换）后立即刷新
+    return Consumer<PlayerController>(
+      builder: (context, controller, _) {
+        final cats = controller.categories;
+        // 当前选中的分类对象已不在新列表中（说明刚切换了节目源），
+        // 自动回到第一级分类列表；收藏虚拟分类不受源切换影响
+        if (_selectedCategory != null &&
+            _selectedCategory!.id != _favCategoryId &&
+            !cats.contains(_selectedCategory)) {
+          _selectedCategory = null;
+          // 本帧先按第一级渲染，下一帧刷新标题栏（标题栏在 Consumer 外）
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() {});
+          });
+        }
+        if (_selectedCategory == null) {
+          return _buildCategoryList(controller);
+        }
+        return _buildChannelList(_selectedCategory!, controller);
+      },
+    );
+  }
+
+  /// 第一级：分类列表（收藏夹非空时排在最前）
+  Widget _buildCategoryList(PlayerController controller) {
+    final cats = controller.categories;
+    final favs = controller.buildFavoriteChannels();
+    if (cats.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.playlist_add, size: 56, color: Colors.white38),
+              const SizedBox(height: 16),
+              const Text(
+                '暂无频道列表',
+                style: TextStyle(color: Colors.white54, fontSize: 18),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '请在设置中添加 M3U/TXT 播放列表',
+                style: TextStyle(color: Colors.white38, fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              OutlinedButton.icon(
+                onPressed: widget.onOpenSettings,
+                icon: const Icon(Icons.settings, size: 18),
+                label: const Text('去设置添加'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.white70,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    // 收藏夹（非空时）占第 0 项，其后为真实分类
+    final hasFav = favs.isNotEmpty;
+    final favCat = hasFav
+        ? ChannelCategory(id: _favCategoryId, name: '我的收藏', channels: favs)
+        : null;
+    return ListView.builder(
+      controller: _categoryScroll,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: cats.length + (hasFav ? 1 : 0),
+      itemBuilder: (context, index) {
+        final isFav = hasFav && index == 0;
+        final cat = isFav ? favCat! : cats[index - (hasFav ? 1 : 0)];
+        final key = _categoryKeys.putIfAbsent(index, GlobalKey.new);
+        return _CategoryTile(
+          key: key,
+          category: cat,
+          icon: isFav ? Icons.star : Icons.category,
+          iconColor: isFav ? Colors.amber : Colors.blueAccent,
+          keyboardSelected: index == _kbCategoryIndex,
+          onTap: () => setState(() {
+            _selectedCategory = cat;
+            _kbCategoryIndex = index;
+            _kbChannelIndex = 0;
+          }),
+        );
+      },
+    );
+  }
+
+  /// 第二级：频道列表
+  Widget _buildChannelList(
+      ChannelCategory category, PlayerController controller) {
+    final channels = _channelsOf(controller, category);
+    return ListView.builder(
+      controller: _channelScroll,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: channels.length,
+      itemBuilder: (context, index) {
+        final channel = channels[index];
+        final isCurrent = controller.currentChannel?.id == channel.id;
+        final number = _globalIndexOf(controller, category, index);
+        final key = _channelKeys.putIfAbsent(index, GlobalKey.new);
+        return _ChannelTile(
+          key: key,
+          channel: channel,
+          number: number,
+          isSelected: isCurrent,
+          keyboardSelected: index == _kbChannelIndex,
+          isFav: controller.isFavoriteChannel(channel.id),
+          nowTitle: _nowTitleFor(controller, channel),
+          onToggleFavorite: () => _toggleFavorite(channel),
+          onTap: () {
+            _kbChannelIndex = index;
+            controller.playChannel(channel);
+            widget.onChannelTap?.call();
+            widget.onClose();
+          },
+        );
+      },
+    );
+  }
+}
+
+class _CategoryTile extends StatelessWidget {
+  final ChannelCategory category;
+  final VoidCallback onTap;
+
+  /// 分类图标与颜色（收藏夹用星标）
+  final IconData icon;
+  final Color iconColor;
+
+  /// 遥控器/键盘焦点高亮（区别于鼠标）
+  final bool keyboardSelected;
+
+  const _CategoryTile({
+    super.key,
+    required this.category,
+    required this.onTap,
+    this.icon = Icons.category,
+    this.iconColor = Colors.blueAccent,
+    this.keyboardSelected = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        decoration: BoxDecoration(
+          color: keyboardSelected
+              ? Colors.white.withOpacity(0.10)
+              : Colors.transparent,
+          border: keyboardSelected
+              ? Border.all(color: Colors.white70, width: 1.2)
+              : null,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: iconColor.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(icon, color: iconColor, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    category.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  Text(
+                    '${category.channels.length} 个频道',
+                    style:
+                        const TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.chevron_right,
+              color: keyboardSelected ? Colors.white : Colors.white38,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ChannelTile extends StatelessWidget {
+  final Channel channel;
+  final int number;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  /// 正在播出的节目名（无 EPG 时为空，不占位）
+  final String nowTitle;
+
+  /// 是否已收藏 + 切换回调（null=不显示收藏按钮）
+  final bool isFav;
+  final VoidCallback? onToggleFavorite;
+
+  /// 遥控器/键盘焦点高亮
+  final bool keyboardSelected;
+
+  const _ChannelTile({
+    super.key,
+    required this.channel,
+    required this.number,
+    required this.isSelected,
+    required this.onTap,
+    this.nowTitle = '',
+    this.isFav = false,
+    this.onToggleFavorite,
+    this.keyboardSelected = false,
+  });
+
+  /// 列表台标：本地 asset 优先（匹配更强，且离线可用）；
+  /// 本地没有才用在线 EPG icon / M3U tvg-logo；都没有显示默认图标
+  Widget _buildLogo() {
+    Widget fallback() => const Icon(Icons.tv, color: Colors.white70, size: 18);
+    // 1. 内置 asset（最稳，匹配逻辑含完整名、英数核心、tvg-name 三路）
+    final asset = ChannelLogo.assetFor(channel);
+    if (asset.isNotEmpty) {
+      return Image.asset(
+        asset,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => fallback(),
+      );
+    }
+    // 2. 在线图标：EPG icon 优先（与节目单用同一 matchChannelId 匹配），
+    //    其次播放源 M3U tvg-logo
+    final url = channel.logoUrl;
+    if (url.isNotEmpty) {
+      return Image.network(
+        url,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => fallback(),
+      );
+    }
+    return fallback();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? Colors.blueAccent.withOpacity(0.2)
+              : (keyboardSelected
+                  ? Colors.white.withOpacity(0.08)
+                  : Colors.transparent),
+          border: Border.all(
+            color: keyboardSelected
+                ? Colors.white70
+                : (isSelected ? Colors.blueAccent : Colors.transparent),
+            width: keyboardSelected ? 1.2 : 1,
+          ),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            // 频道序号（与数字选台）。窄抽屉下压缩列宽，名称单行省略，
+            // 避免被挤成一字一行的竖排
+            SizedBox(
+              width: 30,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  number.toString().padLeft(2, '0'),
+                  maxLines: 1,
+                  softWrap: false,
+                  style: TextStyle(
+                    color: isSelected ? Colors.blueAccent : Colors.white38,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.blueAccent : Colors.white10,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: _buildLogo(),
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    channel.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isSelected ? Colors.blueAccent : Colors.white,
+                      fontSize: 16,
+                      height: 1.2,
+                      fontWeight:
+                          isSelected ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  // 正在播出的节目名（无 EPG 数据时整行不显示）
+                  if (nowTitle.isNotEmpty)
+                    Text(
+                      nowTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isSelected
+                            ? Colors.blueAccent.withOpacity(0.85)
+                            : Colors.white38,
+                        fontSize: 12.5,
+                        height: 1.2,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            // 收藏星标：鼠标点按切换收藏（阻断冒泡，不触发播放）
+            if (onToggleFavorite != null)
+              GestureDetector(
+                onTap: onToggleFavorite,
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: Icon(
+                    isFav ? Icons.star : Icons.star_border,
+                    color: isFav ? Colors.amber : Colors.white38,
+                    size: 18,
+                  ),
+                ),
+              )
+            else if (channel.isFavorite)
+              const Icon(Icons.star, color: Colors.amber, size: 16),
+            if (isSelected)
+              const Padding(
+                padding: EdgeInsets.only(left: 3),
+                child:
+                    Icon(Icons.play_arrow, color: Colors.blueAccent, size: 18),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
