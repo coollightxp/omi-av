@@ -161,6 +161,10 @@ class PlayerController extends ChangeNotifier {
   /// 启动初始化是否完成（配置、节目列表、EPG 全部读入后才置 true）。
   /// 播放页据此显示启动画面，避免先闪一下空白/空频道列表
   bool _bootReady = false;
+
+  /// 启动画面开始时刻与最少停留计时（见 _init 末尾）
+  final DateTime _bootStartAt = DateTime.now();
+  Timer? _bootMinTimer;
   /// 启动画面上的状态文案（"正在读取节目列表…"等）
   String _bootStatus = '正在启动…';
 
@@ -194,6 +198,17 @@ class PlayerController extends ChangeNotifier {
   final List<String> _radioTracks = <String>[];
   List<String> get radioTracks => List.unmodifiable(_radioTracks);
   String _lastMediaTitle = '';
+
+  /// 很多电台的 ICY 元数据就是流文件名（index.m3u8 / 64k.mp3），
+  /// 拿它当"曲目"显示非常难看。带协议头或以媒体扩展名结尾的一律视为
+  /// 非曲目，界面不显示、记录也不收
+  static final RegExp _junkTrackRe = RegExp(
+    r'(://|\.(m3u8?|mp3|aac|flv|ts|mp4|ogg|opus)(\?.*)?$)',
+    caseSensitive: false,
+  );
+
+  static bool isJunkTrack(String t) =>
+      t.isEmpty || _junkTrackRe.hasMatch(t);
 
   // ---------- 待机态：投屏等待 / 待选台（方案 3.7、第九节） ----------
 
@@ -400,6 +415,12 @@ class PlayerController extends ChangeNotifier {
     final remain = minBootShow - bootClock.elapsed;
     if (remain > Duration.zero) {
       await Future.delayed(remain);
+    }
+    // 闪屏最少停留 3 秒：启动动画是产品门面，机器太快一闪而过等于白做
+    final bootElapsed = DateTime.now().difference(_bootStartAt);
+    const bootMin = Duration(milliseconds: 3000);
+    if (bootElapsed < bootMin) {
+      _bootMinTimer = Timer(bootMin - bootElapsed, notifyListeners);
     }
     _bootReady = true;
     notifyListeners();
@@ -973,6 +994,7 @@ class PlayerController extends ChangeNotifier {
   void _enterCastWait(int seconds) {
     _castWaitTimer?.cancel();
     _sleepTimer?.cancel();
+    _sleepTickTimer?.cancel();
     _castWaiting = true;
     _castWaitRemain = seconds;
     if (seconds > 0) {
@@ -1248,7 +1270,9 @@ class PlayerController extends ChangeNotifier {
   Future<void> _waitWebViewRebuildGap() async {
     final closedAt = _webViewClosedAt;
     if (closedAt == null) return;
-    const minGap = Duration(milliseconds: 1200);
+    // 1200ms 在部分机器上仍会踩 WebView2 COM 释放竞争
+    // （0xc0000005 崩溃框），放宽到 2500ms
+    const minGap = Duration(milliseconds: 2500);
     final gap = DateTime.now().difference(closedAt);
     if (gap < minGap) {
       await Future<void>.delayed(minGap - gap);
@@ -1546,6 +1570,10 @@ class PlayerController extends ChangeNotifier {
         // 盖到新频道上
         if (_currentChannel?.id != channel.id) return;
       }
+      // 上一个频道（电台/直播流）刚拆完解码器就创建 WebView2，
+      // 部分机器会撞出 0xc0000005，先让系统喘口气
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      if (_currentChannel?.id != channel.id) return;
       // 网页先在后台全屏缓冲（视频位保持黑屏），起播后再推到前台
       _webPageActive = true;
       _webPageForeground = false;
@@ -2157,7 +2185,8 @@ class PlayerController extends ChangeNotifier {
     final track = v.mediaTitle.trim();
     if (track.isNotEmpty && track != _lastMediaTitle) {
       _lastMediaTitle = track;
-      if (_currentChannel?.isRadio ?? false) {
+      // URL 文件名（index.m3u8 / 64k.mp3）不进曲目栈
+      if ((_currentChannel?.isRadio ?? false) && !isJunkTrack(track)) {
         _radioTracks.remove(track);
         _radioTracks.insert(0, track);
         if (_radioTracks.length > 20) _radioTracks.removeLast();
@@ -2229,8 +2258,9 @@ class PlayerController extends ChangeNotifier {
       }
       return;
     }
-    final program = _lastMediaTitle.isNotEmpty
-        ? _lastMediaTitle
+    final icy = _lastMediaTitle;
+    final program = (icy.isNotEmpty && !isJunkTrack(icy))
+        ? icy
         : (currentProgram?.title ?? '');
     final sig = '${ch.id}|$program|${isPlaying ? 1 : 0}';
     if (sig == _lastAudioSig) return;
@@ -2271,6 +2301,21 @@ class PlayerController extends ChangeNotifier {
   Timer? _sleepTimer;
   DateTime? _sleepAt;
 
+  /// 每秒刷新的剩余时间（界面倒计时徽标用；不走 notifyListeners，
+  /// 免得整棵播放树每秒重建）
+  final ValueNotifier<Duration?> sleepCountdown =
+      ValueNotifier<Duration?>(null);
+  Timer? _sleepTickTimer;
+
+  void _startSleepTick() {
+    _sleepTickTimer?.cancel();
+    _sleepTickTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      final r = sleepRemain;
+      sleepCountdown.value = (r == null || r <= Duration.zero) ? null : r;
+      if (r == null) t.cancel();
+    });
+  }
+
   /// 剩余时间；null 表示未设定时
   Duration? get sleepRemain {
     final at = _sleepAt;
@@ -2284,16 +2329,21 @@ class PlayerController extends ChangeNotifier {
   void setSleepTimer(Duration? d) {
     _sleepTimer?.cancel();
     _sleepTimer = null;
+    _sleepTickTimer?.cancel();
     if (d == null) {
       _sleepAt = null;
+      sleepCountdown.value = null;
       OsdBus.show('已取消定时关闭', icon: Icons.bedtime_outlined);
       notifyListeners();
       return;
     }
     _sleepAt = DateTime.now().add(d);
+    _startSleepTick();
     _sleepTimer = Timer(d, () async {
       _sleepTimer = null;
+      _sleepTickTimer?.cancel();
       _sleepAt = null;
+      sleepCountdown.value = null;
       if (isPlaying) {
         await togglePlayPause();
       }
@@ -2486,27 +2536,48 @@ class PlayerController extends ChangeNotifier {
   bool get miniWindow => _miniWindow;
   Size _sizeBeforeMini = const Size(1280, 720);
 
+  /// 进小窗前的窗口状态：退出时原样恢复——
+  /// 原来全屏就回全屏，原来最大化就回最大化，原来是普通窗口就回原尺寸
+  bool _wasFullscreenBeforeMini = false;
+  bool _wasMaximizedBeforeMini = false;
+
   Future<void> toggleMiniWindow() async {
     if (!isDesktop) return;
     _miniWindow = !_miniWindow;
     try {
       if (_miniWindow) {
+        // 记住进小窗前的状态，退出时原样恢复（全屏↔最大化↔普通窗口）
+        _wasFullscreenBeforeMini = await windowManager.isFullScreen();
+        _wasMaximizedBeforeMini = await windowManager.isMaximized();
         // 全屏时任务栏被盖住、无法操作小窗，先退出全屏；
         // 最大化状态下 Windows 会忽略 setSize（窗口仍铺满），也先还原
-        if (await windowManager.isFullScreen()) {
+        if (_wasFullscreenBeforeMini) {
           _isFullscreen = false;
           await windowManager.setFullScreen(false);
           await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
         }
-        if (await windowManager.isMaximized()) {
+        if (_wasMaximizedBeforeMini) {
           await windowManager.unmaximize();
         }
         _sizeBeforeMini = await windowManager.getSize();
         await windowManager.setAlwaysOnTop(true);
         await windowManager.setSize(const Size(420, 236));
       } else {
-        await windowManager.setSize(_sizeBeforeMini);
-        await _applyAlwaysOnTop();
+        if (_wasFullscreenBeforeMini) {
+          // 原来就是全屏：直接回全屏（无需再 setSize）
+          _wasFullscreenBeforeMini = false;
+          _wasMaximizedBeforeMini = false;
+          _isFullscreen = true;
+          await windowManager.setAlwaysOnTop(false);
+          await windowManager.setFullScreen(true);
+        } else {
+          await windowManager.setSize(_sizeBeforeMini);
+          if (_wasMaximizedBeforeMini) {
+            _wasMaximizedBeforeMini = false;
+            await windowManager.maximize();
+          }
+          await _applyAlwaysOnTop();
+        }
       }
     } catch (_) {}
     notifyListeners();
@@ -3747,6 +3818,7 @@ class PlayerController extends ChangeNotifier {
   @override
   void dispose() {
     _tickTimer?.cancel();
+    _bootMinTimer?.cancel();
     _castRestoreTimer?.cancel();
     _castEndedTimer?.cancel();
     _castWaitTimer?.cancel();
@@ -3766,6 +3838,7 @@ class PlayerController extends ChangeNotifier {
     _settingsSaveTimer?.cancel();
     clockVisible.dispose();
     settingsNotifier.dispose();
+    sleepCountdown.dispose();
     tvModeNotifier.dispose();
     super.dispose();
   }

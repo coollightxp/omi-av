@@ -170,7 +170,7 @@ class _SettingsPanelState extends State<SettingsPanel>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: 6, vsync: this);
     // 只构建当前页签内容，切页时需要重建
     _tabController.addListener(_onTabIndexChanged);
     // 上下方向键统一由面板自己接管（见 _onVerticalKey）
@@ -202,12 +202,14 @@ class _SettingsPanelState extends State<SettingsPanel>
   Widget _tabPage(int index) {
     switch (index) {
       case 1:
-        return _EpgTab();
+        return _RadioSourcesTab();
       case 2:
-        return _PlayerSettingsTab();
+        return _EpgTab();
       case 3:
-        return _SystemSettingsTab();
+        return _PlayerSettingsTab();
       case 4:
+        return _SystemSettingsTab();
+      case 5:
         return _HelpTab();
       default:
         return _PlaylistTab();
@@ -462,7 +464,8 @@ class _SettingsNav extends StatelessWidget {
   final VoidCallback onEnterContent;
 
   static const List<(IconData, String)> _items = [
-    (Icons.playlist_play, '节目源'),
+    (Icons.playlist_play, '直播源'),
+    (Icons.podcasts, '在线电台'),
     (Icons.calendar_view_week, 'EPG'),
     (Icons.tune, '播放器'),
     (Icons.settings_suggest, '系统'),
@@ -757,39 +760,16 @@ class _PlaylistTabState extends State<_PlaylistTab> {
   Widget build(BuildContext context) {
     return Consumer<PlayerController>(
       builder: (context, controller, _) {
+        // 电台源（内置精选 / 我的电台）整页迁到「在线电台」页签，
+        // 这里只管电视直播源——加源、选源、编辑、刷新、删除
         final playlists = controller.sourceManager.playlists;
+        final tvPlaylists = playlists
+            .where((p) => !_PlaylistTabState.isRadioPlaylist(p))
+            .toList();
         // 整页 ListView：表单+列表一起滚动，横屏矮屏也不会溢出
         return ListView(
           padding: const EdgeInsets.only(bottom: 12),
           children: [
-            // 在线电台目录：不新增「添加电台源」，给一个搜索入口，
-            // 搜到哪台就加到「我的电台」（方案 12.2 第 3 条）
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-              child: Row(
-                children: [
-                  const Icon(Icons.podcasts, size: 18, color: Colors.white54),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      '内置精选不可删（可整源移除）· 搜到的台进「我的电台」可随时删',
-                      style: TextStyle(color: Colors.white54, fontSize: 12.5),
-                    ),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: () => RadioSearchDialog.show(context),
-                    icon: const Icon(Icons.travel_explore, size: 18),
-                    label: const Text('在线电台'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: const BorderSide(color: AppColors.stroke),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 10),
-                    ),
-                  ),
-                ],
-              ),
-            ),
             // 添加表单
             Padding(
               padding: const EdgeInsets.all(12),
@@ -856,38 +836,28 @@ class _PlaylistTabState extends State<_PlaylistTab> {
               ),
             ),
             const Divider(color: Colors.white12),
-            // 播放列表
-            if (playlists.isEmpty)
+            // 播放列表（仅电视直播源；电台源在「在线电台」页签）
+            if (tvPlaylists.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 40),
                 child: Center(
-                  child: Text('暂无播放列表，请添加',
+                  child: Text('暂无直播源，请添加',
                       style: TextStyle(color: Colors.white54)),
                 ),
               )
             else
-              ...List.generate(playlists.length, (index) {
-                final p = playlists[index];
+              ...List.generate(tvPlaylists.length, (index) {
+                final p = tvPlaylists[index];
                 final isCurrent =
                     controller.sourceManager.currentPlaylistId == p.id;
                 return _SourceRow(
                   // 内置源在标题上带「内置」后缀，副标题说明内容范围，
                   // 让用户一眼看出这不是自己加的、删了还能恢复
                   title: p.isBuiltin ? '${p.name} · 内置' : p.name,
-                  subtitle: p.isBuiltin
-                      ? '出厂自带 · 电视伴音 / 央广 / 省市台 / 音乐 / 故事 · '
-                          '单台不可删，只能整源移除（之后可恢复）'
-                      : (p.type == PlaylistSourceType.radioLibrary
-                          ? '在线目录加入的电台 · 共 ${RadioLibrary.count} 个 · '
-                              '单个移除/清空都在「在线电台」里'
-                          : p.url),
-                  icon: p.isBuiltin
-                      ? Icons.radio
-                      : (p.type == PlaylistSourceType.radioLibrary
-                          ? Icons.podcasts
-                          : (p.type == PlaylistSourceType.url
-                              ? Icons.cloud
-                              : Icons.folder)),
+                  subtitle: p.url,
+                  icon: p.type == PlaylistSourceType.url
+                      ? Icons.cloud
+                      : Icons.folder,
                   isCurrent: isCurrent,
                   // 行上按 OK = 选定该播放列表；左右键进入行尾按钮
                   onSelect: isCurrent
@@ -906,6 +876,95 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
                         () => controller.refreshChannels()),
                     _RowAction(Icons.delete, Colors.redAccent, '删除',
+                        () => controller.removePlaylist(p.id)),
+                  ],
+                );
+              }),
+          ],
+        );
+      },
+    );
+  }
+
+  /// 电台类播放列表：内置精选 + 我的电台（RadioLibrary）
+  static bool isRadioPlaylist(PlaylistSource p) =>
+      p.id == PlaylistSource.builtinRadioId ||
+      p.id == PlaylistSource.radioLibraryId;
+}
+
+/// 在线电台页签：内置精选 / 我的电台 管理 + Radio Browser 搜索入口。
+/// 从「节目源」里拆出来——直播源与电台是两套心智，混在一页互相干扰
+class _RadioSourcesTab extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<PlayerController>(
+      builder: (context, controller, _) {
+        final playlists = controller.sourceManager.playlists;
+        final radioPlaylists = playlists
+            .where(_PlaylistTabState.isRadioPlaylist)
+            .toList();
+        return ListView(
+          padding: const EdgeInsets.only(bottom: 12),
+          children: [
+            // 搜索入口：搜到哪台就加到「我的电台」（方案 12.2 第 3 条）
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+              child: Row(
+                children: [
+                  const Icon(Icons.podcasts, size: 18, color: Colors.white54),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      '内置精选不可删（可整源移除）· 搜到的台进「我的电台」可随时删',
+                      style: TextStyle(color: Colors.white54, fontSize: 12.5),
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => RadioSearchDialog.show(context),
+                    icon: const Icon(Icons.travel_explore, size: 18),
+                    label: const Text('在线电台'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: AppColors.stroke),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(color: Colors.white12),
+            if (radioPlaylists.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 40),
+                child: Center(
+                  child: Text('暂无电台源，可用右上角「在线电台」搜索添加',
+                      style: TextStyle(color: Colors.white54)),
+                ),
+              )
+            else
+              ...List.generate(radioPlaylists.length, (index) {
+                final p = radioPlaylists[index];
+                final isCurrent =
+                    controller.sourceManager.currentPlaylistId == p.id;
+                final isLibrary =
+                    p.id == PlaylistSource.radioLibraryId;
+                return _SourceRow(
+                  title: p.isBuiltin ? '${p.name} · 内置' : p.name,
+                  subtitle: p.isBuiltin
+                      ? '出厂自带 · 电视伴音 / 央广 / 省市台 / 音乐 / 故事 · '
+                          '单台不可删，只能整源移除（之后可恢复）'
+                      : '在线目录加入的电台 · 共 ${RadioLibrary.count} 个 · '
+                          '单个移除/清空都在「在线电台」搜索页里',
+                  icon: p.isBuiltin ? Icons.radio : Icons.podcasts,
+                  isCurrent: isCurrent,
+                  onSelect:
+                      isCurrent ? null : () => controller.selectPlaylist(p.id),
+                  actions: [
+                    _RowAction(Icons.refresh, Colors.amber, '刷新',
+                        () => controller.refreshChannels()),
+                    _RowAction(Icons.delete, Colors.redAccent,
+                        isLibrary ? '清空我的电台' : '整源移除',
                         () => controller.removePlaylist(p.id)),
                   ],
                 );

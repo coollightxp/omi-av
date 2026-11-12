@@ -410,7 +410,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   /// ② 没有 → 台标 + 台名 + 「该电台暂无节目表」+ 正在收听状态
   Widget _buildRadioView(
       BuildContext context, PlayerController c, Channel ch) {
-    final tracks = c.radioTracks;
+    // URL 文件名（index.m3u8 / 64k.mp3）不算曲目
+    final tracks = c.radioTracks.where((t) => !PlayerController.isJunkTrack(t)).toList();
     final now = tracks.isNotEmpty ? tracks.first : '';
     final group = ch.groupTitle.isEmpty ? '音频直播' : ch.groupTitle;
     return ListView(
@@ -482,15 +483,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
             ),
           )
         else ...[
-          const Text(
-            '正在播',
-            style: TextStyle(
-              color: AppColors.textTertiary,
-              fontSize: 11,
-              letterSpacing: 1.5,
-            ),
-          ),
-          const SizedBox(height: 6),
+          // 只给节目内容本身：不带「正在播」字样，也不再显示
+          // index.m3u8 之类的流地址（已过滤）
           Text(
             now,
             style: const TextStyle(

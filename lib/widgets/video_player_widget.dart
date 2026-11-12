@@ -179,16 +179,12 @@ class _RadioStage extends StatelessWidget {
         child: FittedBox(
           fit: BoxFit.scaleDown,
           child: SizedBox(
-            width: 440,
+            width: 560,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 _logo(ch),
-                const SizedBox(height: 20),
-                // 声音的可视化：优先用 mpv showwaves 输出的真实波形纹理，
-                // 拿不到帧（滤镜不可用/流不支持）就退回缓动波形
-                _wave(),
-                const SizedBox(height: 14),
+                const SizedBox(height: 26),
                 Text(
                   name,
                   maxLines: 1,
@@ -217,6 +213,42 @@ class _RadioStage extends StatelessWidget {
                     // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
                     const SizedBox(width: 10),
                     _AudioTag(playing: controller.isPlaying),
+                    // 定时关闭实时倒计时（每秒走字，到点自动暂停）
+                    ValueListenableBuilder<Duration?>(
+                      valueListenable: controller.sleepCountdown,
+                      builder: (context, remain, _) {
+                        if (remain == null) return const SizedBox.shrink();
+                        final m = remain.inMinutes;
+                        final sec = remain.inSeconds % 60;
+                        return Padding(
+                          padding: const EdgeInsets.only(left: 10),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.08),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                  color:
+                                      Colors.white.withValues(alpha: 0.22)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.bedtime_outlined,
+                                    size: 12, color: Color(0xB3FFFFFF)),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '$m:${sec.toString().padLeft(2, '0')}',
+                                  style: const TextStyle(
+                                      color: Color(0xCCFFFFFF), fontSize: 12),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                   ],
                 ),
                 // 正在播的曲目/节目：优先 ICY 实时元数据（歌名会在
@@ -231,31 +263,24 @@ class _RadioStage extends StatelessWidget {
                     }
                     return Padding(
                       padding: const EdgeInsets.only(top: 12),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          // ICY 曲目是"歌名 - 歌手"的即时状态，给个微型现场标
-                          if (_isIcy) ...[
-                            const _IcyNowLabel(),
-                            const SizedBox(height: 4),
-                          ],
-                          Text(
-                            now,
-                            maxLines: 2,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Color(0xCCFFFFFF),
-                              fontSize: 15,
-                              height: 1.4,
-                            ),
-                          ),
-                        ],
+                      child: Text(
+                        now,
+                        maxLines: 2,
+                        textAlign: TextAlign.center,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xCCFFFFFF),
+                          fontSize: 15,
+                          height: 1.4,
+                        ),
                       ),
                     );
                   },
                 ),
-                const SizedBox(height: 6),
+                // 波形压轴：离上面的信息远一点、横贯整个版面，像舞台前
+                // 的一道声浪，而不是挤在台标底下的小装饰
+                const SizedBox(height: 44),
+                _wave(),
               ],
             ),
           ),
@@ -276,8 +301,8 @@ class _RadioStage extends StatelessWidget {
         return ClipRRect(
           borderRadius: BorderRadius.circular(10),
           child: Container(
-            width: 320,
-            height: 58,
+            width: 470,
+            height: 64,
             color: const Color(0xFF0B0805),
             child: vc.build(fit: BoxFit.cover),
           ),
@@ -288,22 +313,22 @@ class _RadioStage extends StatelessWidget {
 
   Widget _fallbackWave() => AudioWave(
         active: controller.isPlaying,
-        height: 44,
-        bars: 25,
-        barWidth: 3.0,
-        gap: 5.0,
+        height: 56,
+        bars: 45,
+        barWidth: 3.2,
+        gap: 6.4,
       );
 
-  bool get _isIcy =>
-      (controller.videoController?.value.mediaTitle ?? '').isNotEmpty;
-
-  /// 当前曲目/节目的取值顺序：ICY 实时曲目 → EPG 当前节目 → 空
+  /// 当前曲目/节目的取值顺序：ICY 实时曲目 → EPG 当前节目 → 空。
+  /// 流文件名（index.m3u8 / 64k.mp3）不是曲目，过滤掉不显示
   String _nowText() {
     final icy =
         (controller.videoController?.value.mediaTitle ?? '').trim();
-    if (icy.isNotEmpty) return icy;
-    return controller.currentProgram?.title ??
+    if (icy.isNotEmpty && !PlayerController.isJunkTrack(icy)) return icy;
+    final epg = controller.currentProgram?.title ??
         controller.getNowPlayingInfo().programTitle;
+    if (epg.isNotEmpty && !PlayerController.isJunkTrack(epg)) return epg;
+    return '';
   }
 
   /// 台标：内置库 → 源内 tvg-logo → Radio Browser → 字母台标
@@ -324,37 +349,6 @@ class _RadioStage extends StatelessWidget {
         circular: true,
         background: Colors.white.withValues(alpha: 0.06),
       ),
-    );
-  }
-}
-
-/// 「正在播」小标：给 ICY 曲目用，红点 + 字样，和"这是台名"区分开
-class _IcyNowLabel extends StatelessWidget {
-  const _IcyNowLabel();
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 5,
-          height: 5,
-          decoration: const BoxDecoration(
-            color: AppColors.live,
-            shape: BoxShape.circle,
-          ),
-        ),
-        const SizedBox(width: 5),
-        Text(
-          '正在播',
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.50),
-            fontSize: 11,
-            letterSpacing: 1.5,
-          ),
-        ),
-      ],
     );
   }
 }

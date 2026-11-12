@@ -468,7 +468,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     // 电台变体（方案 13.3）：音频没有画面，截图/旋转/小窗都不出现；
     // 睡前听广播高频，专给一个「定时关闭」
     final isRadio = c.currentChannel?.isRadio ?? false;
-    final sleepRemain = c.sleepRemain;
+    final sleepRemain = c.sleepCountdown.value;
     // 可用动作：禁用按钮不进列表，遥控器只会高亮能点的按钮
     final actions = <_KbAction>[
       // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
@@ -494,7 +494,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           Icons.bedtime_outlined,
           sleepRemain == null
               ? '定时关闭'
-              : '定时关闭（剩 ${sleepRemain.inMinutes + 1} 分）',
+              : '定时关闭（剩 ${_fmtRemain(sleepRemain)}）',
           () => _showSleepMenu(context),
         ),
       if (c.isDesktop && !isRadio) ...[
@@ -584,7 +584,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       ),
       _groupDivider(d),
       _btn(byId('playpause'), big: true),
-      if (isRadio) _btn(byId('sleep')),
       _groupDivider(d),
     ];
     if (c.isDesktop && !isRadio) {
@@ -614,7 +613,25 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       children.addAll(tail);
     }
 
+    // 定时关闭独占最末位（电台专属）：跟换台/播放这些高频操作隔开，
+    // 睡前设一次就不容易被误碰
+    if (isRadio) {
+      children.add(_groupDivider(d));
+      children.add(_btn(byId('sleep')));
+    }
+
     return Row(mainAxisSize: MainAxisSize.min, children: children);
+  }
+
+  /// 剩余时间文案：1:05:00 / 32:10
+  static String _fmtRemain(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes % 60;
+    final sec = d.inSeconds % 60;
+    if (h > 0) {
+      return '$h:${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+    }
+    return '$m:${sec.toString().padLeft(2, '0')}';
   }
 
   /// 定时关闭菜单：30/60/90 分钟、取消定时。
@@ -637,7 +654,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              remain == null ? '到点自动暂停播放' : '剩余 ${remain.inMinutes + 1} 分钟',
+              remain == null ? '到点自动暂停播放' : '剩余 ${_fmtRemain(remain)}',
               style:
                   const TextStyle(color: AppColors.textSecondary, fontSize: 12.5),
             ),
