@@ -29,6 +29,9 @@ enum FocusRegion {
   /// 设置中心（模态）
   settings,
 
+  /// 源管理对话框（showDialog 模态，含删除二段确认）
+  sourceDialog,
+
   /// 声音实验室（均衡器等，模态浮层）
   soundLab,
 

@@ -82,16 +82,16 @@ class FocusCoordinator extends ChangeNotifier {
 
   /// 全 App 唯一按键入口：挂在最外层 FocusScope 的 onKeyEvent。
   ///
-  /// 只处理按下事件（抬起忽略）；分发结果由区域处理器决定，
-  /// 处理过的事件返回 handled 终止冒泡。
+  /// 按下与抬起都转发给栈顶区域——现有 OK/左右键的短按/长按逻辑
+  /// 依赖按下/抬起沿配对（侦察报告 A3-3），抬起沿必须可达；
+  /// 长按重复事件（KeyRepeatEvent）忽略。处理过的事件返回 handled
+  /// 终止冒泡，杜绝穿透。
   KeyEventResult onKey(FocusNode node, KeyEvent event) {
-    if (event is KeyUpEvent || event is KeyRepeatEvent) {
-      return KeyEventResult.ignored;
-    }
+    if (event is KeyRepeatEvent) return KeyEventResult.ignored;
     final handler = _handlers[current];
     if (handler == null) return KeyEventResult.ignored;
     final result = handler(event);
-    // 未挂载处理器的区域（窗口期）：短暂忽略，不冒泡给下层
+    // 未挂载处理器的区域（窗口期）：忽略且不冒泡给下层
     // ——下层此刻不应收到按键，这正是协调器存在的意义。
     return result;
   }
