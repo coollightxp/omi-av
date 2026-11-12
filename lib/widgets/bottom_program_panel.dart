@@ -4,7 +4,9 @@ import 'package:provider/provider.dart';
 
 import '../models/epg_program.dart';
 import '../services/channel_logo.dart';
+import '../core/theme/app_density.dart';
 import '../core/theme/app_typography.dart';
+import '../player/widgets/source_stepper.dart';
 import '../services/player_controller.dart';
 import 'scaled_panel.dart';
 
@@ -190,7 +192,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             _buildLogo(c, scale),
-                            SizedBox(width: scale < 1 ? 12 : 28),
+                            SizedBox(width: AppDensity.of(context).logoGap),
                             Expanded(child: _buildInfo(c, scale)),
                             Flexible(
                               flex: 0,
@@ -217,7 +219,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   // ==================== 台标 ====================
 
   Widget _buildLogo(PlayerController c, double scale) {
-    final size = scale < 1 ? 92.0 : 128.0;
+    final d = AppDensity.of(context);
+    final size = d.logoSize;
     Widget placeholder() => Container(
           width: size,
           height: size,
@@ -428,28 +431,38 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     // 当前高亮的动作若已消失（如断开投屏），清除高亮，等下次方向键重选
     if (_kbId != null && !actions.any((a) => a.id == _kbId)) _kbId = null;
 
+    final d = AppDensity.of(context);
+
+    void addByIdTo(List<Widget> out, String id) {
+      final i = actions.indexWhere((a) => a.id == id);
+      if (i >= 0) out.add(_btn(actions[i]));
+    }
+
+    // 分组：换源 | 播放 | 截录旋转 | 静音全屏 | 重载/切换/投屏
+    // 组间用竖线分隔（电视/桌面档），组内紧凑
     final children = <Widget>[
-      // 源切换文字夹在两个按钮中间，不占遥控器动作位
-      _btn(actions[0], big: true),
-      Text(
-          c.webPageActive
-              ? c.webQualityLabel
-              : '源${c.sourceIndex + 1}/${c.sourceCount}',
-          style: TextStyle(
-              color: Colors.white54,
-              fontSize: AppTypography.of(context).caption)),
-      _btn(actions[1], big: true),
+      SourceStepper(
+        index: c.sourceIndex,
+        count: c.sourceCount,
+        onPrev: actions[0].onPressed,
+        onNext: actions[1].onPressed,
+        onSelect: (i) => c.switchSource(i),
+        qualityLabel: c.webPageActive ? c.webQualityLabel : null,
+        prevSelected: _kbId == 'prevSource',
+        nextSelected: _kbId == 'nextSource',
+      ),
+      _groupDivider(d),
       _btn(actions[2], big: true),
+      _groupDivider(d),
     ];
     if (c.isDesktop) {
       children.addAll([
-        const SizedBox(width: 4),
         _btn(actions.firstWhere((a) => a.id == 'screenshot')),
         _btn(actions.firstWhere((a) => a.id == 'record'), big: true),
-        const SizedBox(width: 4),
       ]);
     }
     children.add(_btn(actions.firstWhere((a) => a.id == 'rotate')));
+    children.add(_groupDivider(d));
 
     void addById(String id) {
       final i = actions.indexWhere((a) => a.id == id);
@@ -458,9 +471,16 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
 
     addById('mute');
     addById('fullscreen');
-    addById('reload');
-    addById('webnative');
-    addById('cast');
+
+    // 尾部功能组：重载 / 网页切换 / 断开投屏（有则加竖线）
+    final tail = <Widget>[];
+    addByIdTo(tail, 'reload');
+    addByIdTo(tail, 'webnative');
+    addByIdTo(tail, 'cast');
+    if (tail.isNotEmpty) {
+      children.add(_groupDivider(d));
+      children.addAll(tail);
+    }
 
     return Row(mainAxisSize: MainAxisSize.min, children: children);
   }
@@ -507,6 +527,17 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         onPressed: a.onPressed,
         tooltip: a.tooltip,
       ),
+    );
+  }
+
+  /// 分组竖线：电视/桌面显示，手机档不画（5 钮连线显碎）
+  Widget _groupDivider(AppDensity d) {
+    if (!d.useDividers) return SizedBox(width: d.interGroupGap * 0.5);
+    return Container(
+      width: 1,
+      height: 26,
+      margin: EdgeInsets.symmetric(horizontal: d.interGroupGap * 0.5),
+      color: Colors.white.withOpacity(0.10),
     );
   }
 

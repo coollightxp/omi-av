@@ -1554,6 +1554,13 @@ class PlayerController extends ChangeNotifier {
     await _playCurrentSource();
   }
 
+  /// 直接跳选第 i 个源（换源步进器的线路菜单用）
+  Future<void> switchSource(int i) async {
+    if (i < 0 || i >= sourceCount || i == _sourceIndex) return;
+    _sourceIndex = i;
+    await _playCurrentSource();
+  }
+
   /// 上一个频道
   Future<void> previousChannel() => playAdjacentChannel(-1);
 

@@ -52,33 +52,35 @@ class AppDensity {
   /// 模态弹层圆角
   final double modalRadius;
 
+  // 数值按 1.0.201 实测观感校准（台标 128/92、按钮直径 48/44），
+  // 先贴合现状再优化，避免"改完不如原来"
   static const AppDensity _tv = AppDensity(
-    panelHeight: 78, panelPaddingH: 20,
-    logoSize: 44, logoGap: 14,
-    buttonSize: 44, intraGroupGap: 10, interGroupGap: 28,
+    panelHeight: 96, panelPaddingH: 18,
+    logoSize: 104, logoGap: 20,
+    buttonSize: 46, intraGroupGap: 6, interGroupGap: 16,
     useDividers: true,
-    listRowHeight: 62,
-    infoActionMinGap: 40,
+    listRowHeight: 58,
+    infoActionMinGap: 24,
     modalRadius: 16,
   );
 
   static const AppDensity _desktop = AppDensity(
-    panelHeight: 66, panelPaddingH: 16,
-    logoSize: 38, logoGap: 12,
-    buttonSize: 38, intraGroupGap: 8, interGroupGap: 28,
+    panelHeight: 96, panelPaddingH: 22,
+    logoSize: 128, logoGap: 28,
+    buttonSize: 48, intraGroupGap: 6, interGroupGap: 18,
     useDividers: true,
     listRowHeight: 50,
-    infoActionMinGap: 32,
+    infoActionMinGap: 24,
     modalRadius: 14,
   );
 
   static const AppDensity _mobile = AppDensity(
-    panelHeight: 54, panelPaddingH: 12,
-    logoSize: 32, logoGap: 10,
-    buttonSize: 35, intraGroupGap: 8, interGroupGap: 24,
+    panelHeight: 74, panelPaddingH: 6,
+    logoSize: 92, logoGap: 12,
+    buttonSize: 44, intraGroupGap: 2, interGroupGap: 10,
     useDividers: false,
     listRowHeight: 41,
-    infoActionMinGap: 24,
+    infoActionMinGap: 8,
     modalRadius: 12,
   );
 
