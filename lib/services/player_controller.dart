@@ -2088,6 +2088,8 @@ class PlayerController extends ChangeNotifier {
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
     c.addListener(closure);
+    // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
+    unawaited(c.applyAudioFilter(kAudioPresets[_settings.audioPreset]));
     // 关键：initialize 完成前绝不能把 c 挂到 _videoController。
     // 4K 等高码率台 initialize 很慢，用户此时切台会进入
     // _disposeVideoController，对仍在初始化的实例调 pause/dispose，
@@ -2714,6 +2716,7 @@ class PlayerController extends ChangeNotifier {
   static const _kRetryTimes = 'settings_retry_times';
   static const _kCastEndWait = 'settings_cast_end_wait_seconds';
   static const _kResumeLastChannel = 'settings_resume_last_channel';
+  static const _kAudioPreset = 'settings_audio_preset';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -2752,6 +2755,7 @@ class PlayerController extends ChangeNotifier {
         retryTimes: p.getInt(_kRetryTimes) ?? 3,
         castEndWaitSeconds: _normalizeCastWait(p.getInt(_kCastEndWait) ?? 0),
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
+        audioPreset: p.getString(_kAudioPreset) ?? '',
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -2794,6 +2798,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> _saveSettings() async {
     try {
       final p = await SharedPreferences.getInstance();
+      await p.setString(_kAudioPreset, _settings.audioPreset);
       await p.setBool(_kAutoPlayNext, _settings.autoPlayNext);
       await p.setDouble(_kSensitivity, _settings.gestureSensitivity);
       await p.setInt(_kAutoHide, _settings.autoHideDelay);
@@ -2988,6 +2993,34 @@ class PlayerController extends ChangeNotifier {
       await windowManager.focus();
     } catch (_) {}
     notifyListeners();
+  }
+
+  // ==================== 声音实验室（方案 12.3 第二档） ====================
+
+  String get audioPreset => _settings.audioPreset;
+
+  /// 切换声音实验室预设（'' = 标准）：mpv lavfi 音频滤镜。
+  /// 只影响内置播放器；换台重建控制器后自动重挂（见播放控制器创建处）
+  Future<void> setAudioPreset(String preset) async {
+    if (_settings.audioPreset == preset) return;
+    updateSettings(_settings.copyWith(audioPreset: preset));
+    final c = _videoController;
+    if (c != null) await c.applyAudioFilter(kAudioPresets[preset]);
+    final label = preset.isEmpty ? '标准' : _audioPresetLabel(preset);
+    OsdBus.show('声音：$label', icon: Icons.equalizer);
+  }
+
+  static String _audioPresetLabel(String key) {
+    switch (key) {
+      case 'voice':
+        return '人声增强';
+      case 'bass':
+        return '低音增强';
+      case 'night':
+        return '夜间模式';
+      default:
+        return '标准';
+    }
   }
 
   // ==================== EPG & 节目信息 ====================

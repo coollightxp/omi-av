@@ -1783,6 +1783,20 @@ class _PlayerSettingsTab extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
             _buildQualitySelector(controller),
+            // 声音实验室（方案 12.3 第二档）：mpv lavfi 音频滤镜，
+            // 内置播放器全局生效（电视伴音/电台都可用；网页频道不支持）
+            ListTile(
+              leading: const Icon(Icons.equalizer, color: Colors.white70),
+              title: const Text('声音实验室',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: Text(
+                '当前：${controller.audioPreset.isEmpty ? '标准' : _audioPresetLabelOf(controller.audioPreset)}'
+                ' · 人声更清楚 / 低音更带感 / 夜间音量平稳，仅内置播放器',
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              trailing: const Icon(Icons.chevron_right, color: Colors.white38),
+              onTap: () => _showAudioPresetDialog(context, controller),
+            ),
             SwitchListTile(
               secondary: const Icon(Icons.skip_next, color: Colors.white70),
               title: const Text('自动播放下一频道',
@@ -1915,6 +1929,59 @@ class _PlayerSettingsTab extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  static String _audioPresetLabelOf(String key) {
+    switch (key) {
+      case 'voice':
+        return '人声增强';
+      case 'bass':
+        return '低音增强';
+      case 'night':
+        return '夜间模式';
+      default:
+        return '标准';
+    }
+  }
+
+  Future<void> _showAudioPresetDialog(
+      BuildContext context, PlayerController controller) async {
+    final current = controller.audioPreset;
+    final options = <(String, String, String)>[
+      ('', '标准', '不加处理，原声直出'),
+      ('voice', '人声增强', '新闻/口播更清楚，压轰鸣提人声'),
+      ('bass', '低音增强', '音乐台更带感'),
+      ('night', '夜间模式', '音量忽大忽小被抹平，睡前听不打醒'),
+    ];
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('声音实验室'),
+        children: [
+          for (final o in options)
+            RadioGroup<String>(
+              groupValue: current,
+              onChanged: (v) => Navigator.pop(ctx, v),
+              child: RadioListTile<String>(
+                value: o.$1,
+                title: Text(o.$2,
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 15)),
+                subtitle: Text(o.$3,
+                    style:
+                        const TextStyle(color: Colors.white38, fontSize: 12)),
+              ),
+            ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Text('仅内置播放器生效；网页频道用站点自己的播放器，不参与',
+                style: TextStyle(color: Colors.white24, fontSize: 11.5)),
+          ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+    await controller.setAudioPreset(picked);
   }
 
   Widget _buildQualitySelector(PlayerController controller) {

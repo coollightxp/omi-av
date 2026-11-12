@@ -255,6 +255,22 @@ class OmiVideoController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// 应用音频滤镜（声音实验室，方案 12.3 第二档）。
+  /// [lavfi] 为 lavfi 滤镜串（不含外层 lavfi=[] 包装）；null/空清除。
+  /// 换台会重建控制器，调用方需在新建控制器后重新应用。
+  Future<void> applyAudioFilter(String? lavfi) async {
+    try {
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        if (lavfi == null || lavfi.trim().isEmpty) {
+          await platform.command(['af', 'clear']);
+        } else {
+          await platform.command(['af', 'set', 'lavfi=[${lavfi.trim()}]']);
+        }
+      }
+    } catch (_) {}
+  }
+
   /// 异步释放 native 资源（可 await / 可加超时）。
   /// 不覆盖 ChangeNotifier.dispose（其返回 void），由上层显式调用。
   Future<void> release() async {

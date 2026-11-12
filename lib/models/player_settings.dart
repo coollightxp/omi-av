@@ -80,6 +80,10 @@ class PlayerSettings {
   /// 「后台播放」随时可用：底部面板「后台」按钮把窗口缩到托盘只听声。
   final bool closeToTray;
 
+  /// 声音实验室预设（方案 12.3 第二档）：'' = 标准；key 见 kAudioPresets。
+  /// 走 mpv lavfi 音频滤镜，仅内置播放器生效（网页播放器不支持）
+  final String audioPreset;
+
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -103,6 +107,7 @@ class PlayerSettings {
     this.castEndWaitSeconds = 0,
     this.resumeLastChannel = true,
     this.closeToTray = false,
+    this.audioPreset = '',
   });
 
   PlayerSettings copyWith({
@@ -128,6 +133,7 @@ class PlayerSettings {
     int? castEndWaitSeconds,
     bool? resumeLastChannel,
     bool? closeToTray,
+    String? audioPreset,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -153,9 +159,21 @@ class PlayerSettings {
       castEndWaitSeconds: castEndWaitSeconds ?? this.castEndWaitSeconds,
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
       closeToTray: closeToTray ?? this.closeToTray,
+      audioPreset: audioPreset ?? this.audioPreset,
     );
   }
 }
+
+/// 声音实验室预设（方案 12.3 第二档）：mpv lavfi 音频滤镜串。
+/// 「标准」为空（清除滤镜），不进表。
+const Map<String, String> kAudioPresets = {
+  // 人声增强：压 250Hz 鼻音/轰鸣，提 3kHz 人声主区
+  'voice': 'equalizer=f=250:t=q:w=1.4:g=-3,equalizer=f=3000:t=q:w=1.2:g=4',
+  // 低音增强：80/160Hz 双点提升
+  'bass': 'equalizer=f=80:t=q:w=1.2:g=6,equalizer=f=160:t=q:w=1.2:g=3',
+  // 夜间模式：动态响度归一，音量忽大忽小被抹平，睡觉听不打醒
+  'night': 'dynaudnorm=f=250:g=15:p=0.9',
+};
 
 enum VideoQuality {
   auto('自动'),
