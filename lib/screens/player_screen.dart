@@ -557,9 +557,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                   if (webUrl.isNotEmpty)
                     Positioned.fill(
                       child: _WebChannelOverlay(
-                        // 重载序号参与 key：手动重载/卡死自动重载时
-                        // 整个网页控件重建（页面重新加载）
-                        key: ValueKey('$webUrl#${controller.webReloadSerial}'),
+                        // key 只带重载序号，**不带 URL**：
+                        // 切台不再销毁重建 WebView（WebView2 销毁+创建
+                        // 相邻会在部分 Windows 机器上弹 0xc0000005 系统
+                        // 错误框），URL 变化走控件内 loadUrl 页内导航；
+                        // 手动/自动重载改序号，仍按"彻底重来"重建
+                        key: ValueKey('web_${controller.webReloadSerial}'),
                         url: webUrl,
                         title: controller.currentChannel?.name ?? '',
                         foreground: controller.webPageForeground,
@@ -5332,6 +5335,12 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
   @override
   void initState() {
     super.initState();
+    _beginLoad();
+  }
+
+  /// 一次频道加载的完整启动流程：开台打点 + 各探测/兜底定时器。
+  /// initState 与页内切台（[didUpdateWidget] 里 URL 变化）都走这里。
+  void _beginLoad() {
     // 开台打点：后续所有事件都以此为时间线（诊断缓冲仅在网页
     // 频道激活期间记录，平时零开销不落盘）
     WebDiag.begin(widget.url, widget.title);
@@ -5401,6 +5410,78 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     });
   }
 
+  /// 页内切台：URL 变化时在同一 WebView 控件内导航，不销毁重建。
+  ///
+  /// 背景：WebView2「销毁 + 创建」相邻发生时，部分 Windows 机器上
+  /// 会弹「Omi.exe - 系统错误：Exception Processing Message 0xc0000005」
+  /// （native 层访问违规，WER 弹窗，Dart 侧无法捕获）。用户实测两个
+  /// 触发点——网页频道之间切台、投屏断开回到网页——共同点都是
+  /// WebView 重建。页内导航把销毁从高频路径上彻底拿掉。
+  Future<void> _navigateTo(String url, String title) async {
+    _teardownLoad();
+    // 会话计数保持平衡：先关旧会话再开新会话（同层存活，计回 1）
+    WebDiag.end();
+    _beginLoad();
+    // 新地址重新判定"是否放弃自动接管"（同一站点内一般不变，但
+    // 网页频道可能换站点，不重判会沿用旧站点的结论）
+    _sniffAbandoned =
+        context.read<PlayerController>().shouldSkipAutoSniff(url);
+    final c = _webController;
+    if (c == null) return;
+    try {
+      // 先停掉旧页面的加载与媒体，再导航，减少销毁/切换瞬间
+      // WebView2 内部的活动线程竞争
+      await c.stopLoading();
+      await c.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    } catch (e) {
+      WebDiag.log('nav_fail', 'err=$e');
+    }
+  }
+
+  /// 取消本次加载启动的所有定时器并复位判定状态（页内切台专用；
+  /// dispose 直接整体销毁不需要这套）
+  void _teardownLoad() {
+    _probeTimer?.cancel();
+    _probeTimer = null;
+    _stallWatchTimer?.cancel();
+    _stallWatchTimer = null;
+    _siteInjectTimer?.cancel();
+    _siteInjectTimer = null;
+    _forceForegroundTimer?.cancel();
+    _forceForegroundTimer = null;
+    _decisionTimer?.cancel();
+    _decisionTimer = null;
+    _webReadyGraceTimer?.cancel();
+    _webReadyGraceTimer = null;
+    _runtimeTimer?.cancel();
+    _runtimeTimer = null;
+    _sniffAggTimer?.cancel();
+    _sniffAggTimer = null;
+    _sniffDeadline?.cancel();
+    _sniffDeadline = null;
+
+    _loaded = false;
+    _error = null;
+    _runtimeMissing = false;
+    _sawProgress = false;
+    _progBucket = 0;
+    _webPlayReady = false;
+    _pageVideoCount = 0;
+    _siteRetryCount = 0;
+    _siteRetryTick = 0;
+    _sniffCandidates.clear();
+    _sniffChecking = false;
+    _sniffDone = false;
+    _sniffEnabled = false;
+    _sniffRetried = false;
+    _stallTicks = 0;
+    _lastVideoCt = -1;
+    _stallBusy = false;
+    _stallCooldownUntil = DateTime.fromMillisecondsSinceEpoch(0);
+    // 注意：这里不能 setState——本方法由 didUpdateWidget 调用，
+    // 正处于 rebuild 过程中；字段变更会随本次 build 自然生效
+  }
+
   @override
   void dispose() {
     // 显式释放原生 WebView2 控制器，旧频道立即停播并让出环境；
@@ -5409,6 +5490,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     _webController = null;
     if (c != null) {
       WebDiag.log('wv_dispose');
+      // 先停掉页面加载与媒体，再销毁：页面还在解码/请求时直接释放
+      // WebView2，原生侧在销毁瞬间更容易抛访问违规
+      try {
+        c.stopLoading();
+      } catch (_) {}
       try {
         c.dispose(); // 同步方法（返回 void），关闭原生 WebView2 实例
       } catch (_) {}
@@ -5978,6 +6064,12 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 已推到前台（探测成功或超时兜底）后不再需要超时定时器
     if (widget.foreground && !oldWidget.foreground) {
       _forceForegroundTimer?.cancel();
+    }
+    // 页内切台：URL 变化不重建 WebView（见 _navigateTo 注释），
+    // 同一控件内导航到新频道页，整套探测/决策流程重来
+    if (widget.url != oldWidget.url) {
+      _navigateTo(widget.url, widget.title);
+      return;
     }
     // 同 URL 页内切台：频道名变化时让站点脚本按新频道名重新点台。
     // 不整页重载——重载会把央视频已起播的播放器一并摧毁（日志实测

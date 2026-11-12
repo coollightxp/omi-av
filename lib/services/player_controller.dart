@@ -1008,11 +1008,32 @@ class PlayerController extends ChangeNotifier {
       await _openWebPageChannel(channel);
       return;
     }
+    if (_webPageActive) _webViewClosedAt = DateTime.now();
     _webPageActive = false;
     _webPageForeground = false;
     _currentChannel = channel;
     _sourceIndex = 0;
     await _playCurrentSource();
+  }
+
+  /// 网页频道内嵌控件最近一次被销毁的时刻。
+  ///
+  /// WebView2 的「销毁 + 新建」相邻发生（投屏断开立刻回网页、网页→流→
+  /// 网页快速连切）时，部分 Windows 机器会弹「Omi.exe - 系统错误：
+  /// Exception Processing Message 0xc0000005」系统错误框（native 层
+  /// 访问违规，Dart 侧捕获不到）。据此在重建前留一个最短间隔。
+  DateTime? _webViewClosedAt;
+
+  /// 等够 WebView 重建间隔：距上一次销毁不足 [minGap] 时补足等待。
+  /// 期间界面保持黑屏缓冲（网页本来就要缓冲几秒），用户无感。
+  Future<void> _waitWebViewRebuildGap() async {
+    final closedAt = _webViewClosedAt;
+    if (closedAt == null) return;
+    const minGap = Duration(milliseconds: 1200);
+    final gap = DateTime.now().difference(closedAt);
+    if (gap < minGap) {
+      await Future<void>.delayed(minGap - gap);
+    }
   }
 
   /// 是否处于网页频道内嵌模式（PlayerScreen 据此显示内嵌网页控件）
@@ -1283,6 +1304,14 @@ class PlayerController extends ChangeNotifier {
     // Windows/Android/macOS/Web：使用窗体内嵌网页控件（信息/节目单/EPG
     // 浮层叠加其上，原视频控件隐藏）；Linux 无内嵌实现，回退系统浏览器
     if (await supportsEmbeddedWeb()) {
+      // 上一次 WebView 刚销毁就新建，WebView2 内部会踩 COM 释放竞争
+      // （部分机器弹 0xc0000005 系统错误框），先补足最小间隔
+      if (!_webPageActive) {
+        await _waitWebViewRebuildGap();
+        // 等待期间用户可能已经又切走了：本次进入作废，别把网页态
+        // 盖到新频道上
+        if (_currentChannel?.id != channel.id) return;
+      }
       // 网页先在后台全屏缓冲（视频位保持黑屏），起播后再推到前台
       _webPageActive = true;
       _webPageForeground = false;
@@ -1296,6 +1325,7 @@ class PlayerController extends ChangeNotifier {
   void exitWebPage() {
     if (!_webPageActive) return;
     _resetWebRecording();
+    _webViewClosedAt = DateTime.now();
     _webPageActive = false;
     _webPageForeground = false;
     WinHotkeys().setCursorHide(false);
