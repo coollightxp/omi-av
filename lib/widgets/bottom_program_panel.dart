@@ -160,20 +160,13 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             scale: 1.0,
             child: Container(
               decoration: BoxDecoration(
-                // 悬浮卡片：深色半透明 + 圆角 + 细边框 + 上方渐隐衔接视频
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withOpacity(0.55),
-                    Colors.black.withOpacity(0.85),
-                  ],
-                ),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white.withOpacity(0.08)),
+                // 与设置面板 / 左右抽屉同一套表面色：深蓝灰 + 细描边
+                color: AppColors.overlay,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: AppColors.stroke),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.45),
+                    color: Colors.black.withValues(alpha: 0.45),
                     blurRadius: 24,
                     offset: const Offset(0, 8),
                   ),

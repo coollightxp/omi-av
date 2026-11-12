@@ -29,6 +29,7 @@ import 'format_hint.dart';
 import 'media/omi_video.dart';
 import 'media_capture_service.dart';
 import 'radio_library.dart';
+import 'radio_catalog.dart';
 import 'radio_logo.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
@@ -254,6 +255,9 @@ class PlayerController extends ChangeNotifier {
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
     // 不 await：台标只是锦上添花，绝不能拖慢启动
     unawaited(RadioLogo.ensure());
+    // 电台目录（内置 + 我的电台）也给左侧「电台」标签备好，
+    // 同样不 await：它只影响抽屉里那一列，不影响起播
+    unawaited(ensureRadioCatalog());
     await reservationManager.init(_onReservationTriggered);
 
     // 启动网络监控：开机启动时可能网络未就绪，需要检测并重试
@@ -3150,6 +3154,35 @@ class PlayerController extends ChangeNotifier {
 
   // ==================== 我的电台（在线目录） ====================
 
+  // ---------- 左侧「电台」标签用的目录（跨源，不影响当前源） ----------
+
+  List<ChannelCategory> _radioCategories = const [];
+  bool _radioCatalogLoaded = false;
+
+  /// 内置精选 + 我的电台；未加载完时为空，抽屉会显示加载态
+  List<ChannelCategory> get radioCategories => _radioCategories;
+
+  bool get radioCatalogLoaded => _radioCatalogLoaded;
+
+  Future<void> ensureRadioCatalog() async {
+    if (_radioCatalogLoaded) return;
+    try {
+      _radioCategories = await RadioCatalog.all();
+      _radioCatalogLoaded = true;
+    } catch (e) {
+      debugPrint('[RadioCatalog] load failed: $e');
+      _radioCatalogLoaded = true;
+    }
+    notifyListeners();
+  }
+
+  /// 「我的电台」增删后只重建自己那一段，不重读安装包
+  void _refreshRadioCatalog() {
+    final rebuilt = RadioCatalog.rebuildIfLoaded();
+    if (rebuilt == null) return;
+    _radioCategories = rebuilt;
+  }
+
   bool isStationSaved(String stationId) => RadioLibrary.contains(stationId);
 
   /// 把在线目录里的电台加进「我的电台」
@@ -3180,11 +3213,13 @@ class PlayerController extends ChangeNotifier {
         }
         await refreshChannels();
       } else {
+        _refreshRadioCatalog();
         notifyListeners();
       }
       return;
     }
     await sourceManager.ensureRadioLibrarySource();
+    _refreshRadioCatalog();
     if (sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId) {
       await refreshChannels();
     } else {

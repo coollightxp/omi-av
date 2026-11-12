@@ -10,6 +10,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../core/theme/app_colors.dart';
 import '../models/channel.dart';
 import '../services/osd_bus.dart';
 import '../services/pip.dart';
@@ -1005,10 +1006,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                 (options.length > 5 ? 500 : (options.length > 4 ? 430 : 340)) *
                     panelScale;
             return Dialog(
-              backgroundColor: const Color(0xFF12151A),
+              // 与设置面板/左右抽屉同一套表面色与描边
+              backgroundColor: AppColors.overlay,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-                side: const BorderSide(color: Colors.white24),
+                borderRadius: BorderRadius.circular(14),
+                side: const BorderSide(color: AppColors.stroke),
               ),
               child: SizedBox(
                 width: cardW,

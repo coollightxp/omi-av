@@ -4,10 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/channel.dart';
+import '../models/playlist_source.dart';
+import '../core/theme/app_colors.dart';
 import '../core/widgets/channel_badge.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
 import '../core/theme/app_typography.dart';
+import 'radio_search_dialog.dart';
 import 'scaled_panel.dart';
 
 /// 左侧两级抽屉式频道面板
@@ -55,6 +58,12 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   /// 点击恰好被收藏的频道，列表不得自动跳到收藏夹
   bool _startupFavLocated = false;
 
+  /// 0=电视 1=电台（电台标签的内容跨源：内置精选 + 我的电台）
+  int _mediaTab = 0;
+
+  /// 上次打开抽屉时正在播的频道 id：用于判断"要不要跟着当前播放切标签"
+  String? _lastOpenChannelId;
+
   ChannelCategory? _selectedCategory;
   final ScrollController _categoryScroll = ScrollController();
   final ScrollController _channelScroll = ScrollController();
@@ -91,10 +100,22 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     super.dispose();
   }
 
+  /// 当前标签下的分类源：电视=当前节目源，电台=内置精选+我的电台
+  List<ChannelCategory> _catsOf(PlayerController controller) =>
+      _mediaTab == 0 ? controller.categories : controller.radioCategories;
+
+  /// 当前标签下该显示的收藏（电视/电台分开看，避免一列混两样）
+  List<Channel> _favsOf(PlayerController controller) {
+    final all = controller.buildFavoriteChannels();
+    if (_mediaTab == 0) return all.where((e) => !e.isRadio).toList();
+    return all.where((e) => e.isRadio).toList();
+  }
+
   /// 第一级列表：收藏夹（非空时）排在最前，其后为真实分类
   List<ChannelCategory> _l1Categories(PlayerController controller) {
-    final favs = controller.buildFavoriteChannels();
-    if (favs.isEmpty) return controller.categories;
+    final cats = _catsOf(controller);
+    final favs = _favsOf(controller);
+    if (favs.isEmpty) return cats;
     final fav = _favCategoryCache;
     if (fav == null || fav.channels.length != favs.length) {
       _favCategoryCache = ChannelCategory(
@@ -106,14 +127,12 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       _favCategoryCache =
           ChannelCategory(id: _favCategoryId, name: '我的收藏', channels: favs);
     }
-    return [_favCategoryCache!, ...controller.categories];
+    return [_favCategoryCache!, ...cats];
   }
 
   /// 分类下实际展示的频道列表（收藏分类动态聚合）
   List<Channel> _channelsOf(PlayerController controller, ChannelCategory cat) =>
-      cat.id == _favCategoryId
-          ? controller.buildFavoriteChannels()
-          : cat.channels;
+      cat.id == _favCategoryId ? _favsOf(controller) : cat.channels;
 
   /// 收藏/取消收藏并提示（鼠标点星标或遥控器长按 OK）
   Future<void> _toggleFavorite(Channel ch) async {
@@ -154,7 +173,19 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       _categoryKeys.clear();
       final controller = context.read<PlayerController>();
       final cur = controller.currentChannel;
-      final favs = controller.buildFavoriteChannels();
+      // 跟着"正在播的那类"切标签；只在频道变了时切，
+      // 否则用户手动翻到电台、关掉再开会又被拽回电视
+      if (cur != null && cur.id != _lastOpenChannelId) {
+        final wantTab = cur.isRadio ? 1 : 0;
+        if (wantTab != _mediaTab) {
+          _mediaTab = wantTab;
+          _selectedCategory = null;
+          _kbCategoryIndex = 0;
+          _kbChannelIndex = 0;
+        }
+      }
+      _lastOpenChannelId = cur?.id;
+      final favs = _favsOf(controller);
 
       // 上次停留在「我的收藏」：收藏夹仍非空时保持收藏夹层级，
       // 框选对齐刚播放的收藏频道；收藏已清空才退回普通分类定位
@@ -198,7 +229,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           }
         }
         var catIndex = 0;
-        for (final cat in controller.categories) {
+        for (final cat in _catsOf(controller)) {
           if (cat.channels.any((ch) => ch.id == cur.id)) {
             if (_selectedCategory != cat) {
               setState(() => _selectedCategory = cat);
@@ -235,6 +266,10 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       if (cats.isEmpty) return;
       if (!isDown) return;
       switch (action) {
+        case 'left':
+          // 第一级按左键 = 切换 电视/电台（右键留给"进入分类"）
+          if (!isDown) break;
+          _switchTab(1 - _mediaTab);
         case 'up':
           setState(() => _kbCategoryIndex =
               (_kbCategoryIndex - 1).clamp(0, cats.length - 1));
@@ -379,6 +414,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   /// 频道全局序号（跨分类累加，1 起），与数字选台/OSD 序号一致
   int _globalIndexOf(PlayerController controller, ChannelCategory cat,
       int indexInCat) {
+    // 电台标签是跨源聚合，"全局序号"没有意义（数字跳台只认当前源）
+    if (_mediaTab == 1) return indexInCat + 1;
     var offset = 0;
     for (final c in controller.categories) {
       if (c == cat) return offset + indexInCat + 1;
@@ -448,8 +485,11 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                 ),
               ),
               child: Material(
-                color: Colors.black87,
-                elevation: 16,
+                // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
+                color: AppColors.overlay,
+                elevation: 28,
+                shape: const Border(
+                    right: BorderSide(color: AppColors.stroke)),
                 child: SafeArea(
                   child: Column(
                     children: [
@@ -471,7 +511,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Colors.white12)),
+        border: Border(bottom: BorderSide(color: AppColors.divider)),
       ),
       child: Row(
         children: [
@@ -495,6 +535,13 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               icon: const Icon(Icons.arrow_back, color: Colors.white70),
               onPressed: () => setState(() => _selectedCategory = null),
             ),
+          // 电台标签：搜台入口就该在列表边上，不该让用户跑设置里加
+          if (_mediaTab == 1 && _selectedCategory == null)
+            IconButton(
+              icon: const Icon(Icons.travel_explore, color: Colors.white70),
+              tooltip: '搜索在线电台',
+              onPressed: () => RadioSearchDialog.show(context),
+            ),
           IconButton(
             icon: const Icon(Icons.close, color: Colors.white70),
             onPressed: widget.onClose,
@@ -508,7 +555,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     // 顶层监听控制器：切换节目源（分类列表整体替换）后立即刷新
     return Consumer<PlayerController>(
       builder: (context, controller, _) {
-        final cats = controller.categories;
+        final cats = _catsOf(controller);
         // 当前选中的分类对象已不在新列表中（说明刚切换了节目源），
         // 自动回到第一级分类列表；收藏虚拟分类不受源切换影响
         if (_selectedCategory != null &&
@@ -521,42 +568,109 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           });
         }
         if (_selectedCategory == null) {
-          return _buildCategoryList(controller);
+          return Column(
+            children: [
+              _buildTabBar(controller),
+              Expanded(child: _buildCategoryList(controller)),
+            ],
+          );
         }
         return _buildChannelList(_selectedCategory!, controller);
       },
     );
   }
 
+  /// 电视 / 电台 两个标签。电台是跨源聚合（内置精选 + 我的电台），
+  /// 切换标签不动当前节目源，点哪个台播哪个台。
+  Widget _buildTabBar(PlayerController controller) {
+    final tvCount = controller.categories
+        .fold<int>(0, (a, e) => a + e.channels.length);
+    final radioCount = controller.radioCategories
+        .fold<int>(0, (a, e) => a + e.channels.length);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: _TabBtn(
+              label: '电视',
+              icon: Icons.live_tv,
+              count: tvCount,
+              selected: _mediaTab == 0,
+              onTap: () => _switchTab(0),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _TabBtn(
+              label: '电台',
+              icon: Icons.radio,
+              count: radioCount,
+              loading: !controller.radioCatalogLoaded,
+              selected: _mediaTab == 1,
+              onTap: () => _switchTab(1),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _switchTab(int tab) {
+    if (_mediaTab == tab) return;
+    setState(() {
+      _mediaTab = tab;
+      _selectedCategory = null;
+      _kbCategoryIndex = 0;
+      _kbChannelIndex = 0;
+      _channelKeys.clear();
+      _categoryKeys.clear();
+    });
+  }
+
   /// 第一级：分类列表（收藏夹非空时排在最前）
   Widget _buildCategoryList(PlayerController controller) {
     final t = AppTypography.of(context);
-    final cats = controller.categories;
-    final favs = controller.buildFavoriteChannels();
+    final cats = _l1Categories(controller);
+    final favs = _favsOf(controller);
     if (cats.isEmpty) {
+      if (_mediaTab == 1 && !controller.radioCatalogLoaded) {
+        return const Center(
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2.2),
+          ),
+        );
+      }
+      final isRadioTab = _mediaTab == 1;
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.playlist_add, size: 56, color: Colors.white38),
+              Icon(isRadioTab ? Icons.radio : Icons.playlist_add,
+                  size: 56, color: Colors.white38),
               const SizedBox(height: 16),
               Text(
-                '暂无频道列表',
+                isRadioTab ? '还没有电台' : '暂无频道列表',
                 style: TextStyle(color: Colors.white54, fontSize: t.listHeader),
               ),
               const SizedBox(height: 8),
               Text(
-                '请在设置中添加 M3U/TXT 播放列表',
+                isRadioTab ? '点这里搜全国/地方台，加进来就在这一列' : '请在设置中添加 M3U/TXT 播放列表',
                 style: TextStyle(color: Colors.white38, fontSize: t.listSub),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 20),
               OutlinedButton.icon(
-                onPressed: widget.onOpenSettings,
-                icon: const Icon(Icons.settings, size: 18),
-                label: const Text('去设置添加'),
+                onPressed: isRadioTab
+                    ? () => RadioSearchDialog.show(context)
+                    : widget.onOpenSettings,
+                icon: Icon(isRadioTab ? Icons.travel_explore : Icons.settings,
+                    size: 18),
+                label: Text(isRadioTab ? '搜索电台' : '去设置添加'),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.white70,
                 ),
@@ -579,10 +693,15 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         final isFav = hasFav && index == 0;
         final cat = isFav ? favCat! : cats[index - (hasFav ? 1 : 0)];
         final key = _categoryKeys.putIfAbsent(index, GlobalKey.new);
+        final isMine = cat.id == PlaylistSource.radioLibraryId;
         return _CategoryTile(
           key: key,
           category: cat,
-          icon: isFav ? Icons.star : Icons.category,
+          icon: isFav
+              ? Icons.star
+              : (_mediaTab == 1
+                  ? (isMine ? Icons.library_music : Icons.radio)
+                  : Icons.category),
           iconColor: isFav ? Colors.amber : Colors.blueAccent,
           keyboardSelected: index == _kbCategoryIndex,
           onTap: () => setState(() {
@@ -625,6 +744,71 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           },
         );
       },
+    );
+  }
+}
+
+/// 顶部 电视 / 电台 切换胶囊
+class _TabBtn extends StatelessWidget {
+  const _TabBtn({
+    required this.label,
+    required this.icon,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+    this.loading = false,
+  });
+
+  final String label;
+  final IconData icon;
+  final int count;
+  final bool selected;
+  final bool loading;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTypography.of(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(9),
+      child: Container(
+        height: 38,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.accent.withValues(alpha: 0.22)
+              : Colors.white.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(
+            color: selected ? AppColors.accent : AppColors.stroke,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+                size: 15, color: selected ? Colors.white : Colors.white54),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: t.listSub,
+                color: selected ? Colors.white : Colors.white60,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              loading ? '…' : '$count',
+              style: TextStyle(
+                fontSize: t.listSub - 1,
+                color: selected ? Colors.white70 : Colors.white38,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

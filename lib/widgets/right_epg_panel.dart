@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/epg_program.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
+import '../core/theme/app_colors.dart';
 import '../core/theme/app_typography.dart';
 import 'scaled_panel.dart';
 
@@ -260,8 +261,11 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                 ),
               ),
               child: Material(
-                color: Colors.black87,
-                elevation: 16,
+                // 与设置面板/左侧抽屉同一套表面色 + 描边
+                color: AppColors.overlay,
+                elevation: 28,
+                shape: const Border(
+                    left: BorderSide(color: AppColors.stroke)),
                 child: SafeArea(
                   child: Column(
                     children: [

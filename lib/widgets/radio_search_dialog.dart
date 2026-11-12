@@ -115,7 +115,8 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     } else {
       await c.addRadioStation(s);
       if (!mounted) return;
-      OsdBus.show('已加入我的电台：${s.name}', icon: Icons.playlist_add_check);
+      OsdBus.show('已加入左侧「电台 · 我的电台」：${s.name}',
+          icon: Icons.playlist_add_check);
     }
     if (mounted) setState(() {});
   }
@@ -171,7 +172,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              '搜索后加入「我的电台」，与电视源共用同一个入口',
+              '加入后就在左侧「频道列表 → 电台 → 我的电台」，随时可删',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
