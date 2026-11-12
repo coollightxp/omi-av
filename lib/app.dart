@@ -32,9 +32,27 @@ class OmiApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
       create: (_) => PlayerController(),
-      child: Consumer<PlayerController>(
-        // 字体缩放变化时重建整个应用，让 4K/8K 等大屏可整体放大文字
-        builder: (context, controller, _) => MaterialApp(
+      child: const _OmiMaterialApp(),
+    );
+  }
+}
+
+/// MaterialApp 只构建一次。
+///
+/// 旧实现把 `Consumer<PlayerController>` 套在 MaterialApp 外面，于是
+/// **任何** notifyListeners（播放进度、缓冲、切台、改一个设置）都会重建
+/// MaterialApp → 重建 ThemeData → 全树主题/媒体查询变化 → 播放层跟着
+/// 重排，表现就是"正在播的时候点设置里的开关卡一下"。
+/// 现在设置走 [PlayerController.settingsNotifier]、设备档位走
+/// [PlayerController.tvModeNotifier]，只有它们变化时才局部重建
+/// MediaQuery 包装层，导航树与播放树都不动。
+class _OmiMaterialApp extends StatelessWidget {
+  const _OmiMaterialApp();
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = context.read<PlayerController>();
+    return MaterialApp(
           title: 'Omi',
           debugShowCheckedModeBanner: false,
           // 中文本地化：输入框长按菜单（粘贴/复制）等系统文案用中文，
@@ -58,8 +76,15 @@ class OmiApp extends StatelessWidget {
               brightness: Brightness.dark,
             ),
           ),
-          builder: (context, child) {
+          builder: (context, child) => ListenableBuilder(
+            listenable: Listenable.merge([
+              controller.settingsNotifier,
+              controller.tvModeNotifier,
+            ]),
+            child: child,
+            builder: (context, child) {
             final mq = MediaQuery.of(context);
+            final settings = controller.settingsNotifier.value;
             // 全局文字缩放只反映用户在设置里的「界面缩放」：
             //   自动 → 大屏按物理宽度放大（TV 1080p=1.0/2K≈1.33/4K=2.0/8K=3.0），
             //          手机/小平板不放大（1.0）；
@@ -71,7 +96,7 @@ class OmiApp extends StatelessWidget {
                 defaultTargetPlatform == TargetPlatform.android;
             final isSmallAndroid = isAndroid && shortest < 720;
             double scale;
-            if (controller.settings.uiScaleAuto) {
+            if (settings.uiScaleAuto) {
               if (isSmallAndroid) {
                 scale = 1.0;
               } else {
@@ -79,17 +104,16 @@ class OmiApp extends StatelessWidget {
                 scale = (physicalW / 1920.0).clamp(1.0, 3.0);
               }
             } else {
-              scale = controller.settings.uiScale.clamp(0.8, 3.0);
+              scale = settings.uiScale.clamp(0.8, 3.0);
             }
             // 设备档位注入：桌面=desktop；安卓按 TV 检测结果分 tv/mobile；
             // Web 无 TV 场景按 desktop。token 体系（AppDensity/AppTypography）
             // 经此 InheritedWidget 对全树生效
+            final isTv = controller.tvModeNotifier.value;
             final profile = kIsWeb
                 ? DeviceProfile.desktop
                 : (defaultTargetPlatform == TargetPlatform.android
-                    ? (controller.isTv
-                        ? DeviceProfile.tv
-                        : DeviceProfile.mobile)
+                    ? (isTv ? DeviceProfile.tv : DeviceProfile.mobile)
                     : DeviceProfile.desktop);
             return MediaQuery(
               data: mq.copyWith(textScaler: TextScaler.linear(scale)),
@@ -98,10 +122,9 @@ class OmiApp extends StatelessWidget {
                 child: child!,
               ),
             );
-          },
+            },
+          ),
           home: const PlayerScreen(),
-        ),
-      ),
     );
   }
 }

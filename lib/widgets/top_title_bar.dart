@@ -40,7 +40,9 @@ class TopTitleBar extends StatelessWidget {
                 onDoubleTap: () async {
                   // 全屏状态下双击标题栏先退出全屏（同步控制器状态）
                   if (context.mounted &&
-                      await context.read<PlayerController>().exitFullscreenIfNeeded()) {
+                      await context
+                          .read<PlayerController>()
+                          .exitFullscreenIfNeeded()) {
                     return;
                   }
                   if (await windowManager.isMaximized()) {
@@ -52,44 +54,50 @@ class TopTitleBar extends StatelessWidget {
                 child: Row(
                   children: [
                     const SizedBox(width: 14),
-                    const Icon(Icons.live_tv,
-                        color: Colors.white70, size: 18),
+                    const Icon(Icons.live_tv, color: Colors.white70, size: 18),
                     const SizedBox(width: 8),
                     const Text(
                       'Omi',
-                      style: TextStyle(
-                          color: Colors.white70, fontSize: 13),
+                      style: TextStyle(color: Colors.white70, fontSize: 13),
                     ),
                     const Spacer(),
                     // 置顶 / 锁定：直接改控制器状态，与设置卡片、
                     // 退出卡片共用同一份数据，鼠标点完各处即时同步
-                    Consumer<PlayerController>(
-                      builder: (context, pc, _) => Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _winButton(
-                            pc.settings.alwaysOnTop
-                                ? Icons.push_pin
-                                : Icons.push_pin_outlined,
-                            pc.settings.alwaysOnTop ? '取消置顶' : '窗口置顶',
-                            () => pc.updateSettings(pc.settings
-                                .copyWith(
+                    // 置顶状态来自 settings，但 settings 变化不再走
+                    // notifyListeners（避免重建播放树），这里单独订阅
+                    // settingsNotifier，保证点完立刻换图标
+                    Builder(
+                      builder: (context) {
+                        final pc = context.read<PlayerController>();
+                        return ListenableBuilder(
+                          listenable:
+                              Listenable.merge([pc, pc.settingsNotifier]),
+                          builder: (context, _) => Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _winButton(
+                                pc.settings.alwaysOnTop
+                                    ? Icons.push_pin
+                                    : Icons.push_pin_outlined,
+                                pc.settings.alwaysOnTop ? '取消置顶' : '窗口置顶',
+                                () => pc.updateSettings(pc.settings.copyWith(
                                     alwaysOnTop: !pc.settings.alwaysOnTop)),
-                            active: pc.settings.alwaysOnTop,
+                                active: pc.settings.alwaysOnTop,
+                              ),
+                              _winButton(
+                                pc.locked ? Icons.lock : Icons.lock_open,
+                                pc.locked ? '解锁（当前已锁定）' : '锁定（防误触）',
+                                () => pc.toggleLock(),
+                                active: pc.locked,
+                              ),
+                            ],
                           ),
-                          _winButton(
-                            pc.locked ? Icons.lock : Icons.lock_open,
-                            pc.locked ? '解锁（当前已锁定）' : '锁定（防误触）',
-                            () => pc.toggleLock(),
-                            active: pc.locked,
-                          ),
-                        ],
-                      ),
+                        );
+                      },
                     ),
-                    _winButton(Icons.minimize, '最小化',
-                        () => windowManager.minimize()),
-                    _winButton(Icons.crop_square, '最大化/还原',
-                        () async {
+                    _winButton(
+                        Icons.minimize, '最小化', () => windowManager.minimize()),
+                    _winButton(Icons.crop_square, '最大化/还原', () async {
                       // 小窗状态下先恢复原窗口：420×236 直接最大化会留下
                       // miniWindow 标记与置顶状态，再次缩窗尺寸就乱了
                       final pc = context.read<PlayerController>();
@@ -108,8 +116,7 @@ class TopTitleBar extends StatelessWidget {
                         await windowManager.maximize();
                       }
                     }),
-                    _winButton(Icons.close, '关闭',
-                        () => windowManager.close(),
+                    _winButton(Icons.close, '关闭', () => windowManager.close(),
                         hoverColor: Colors.red),
                     const SizedBox(width: 6),
                   ],
@@ -135,8 +142,8 @@ class TopTitleBar extends StatelessWidget {
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
           onTap: onTap,
-          child:
-              HoverContainer(hoverColor: hoverColor, icon: icon, active: active),
+          child: HoverContainer(
+              hoverColor: hoverColor, icon: icon, active: active),
         ),
       ),
     );

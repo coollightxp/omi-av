@@ -147,6 +147,25 @@ class _SettingsPanelState extends State<SettingsPanel>
     canRequestFocus: false,
   );
 
+  /// 设置变化的独立订阅（不再依赖 PlayerController.notifyListeners，
+  /// 否则每次拨开关都会重建整个播放树，正在播时就是"卡一下"）
+  PlayerController? _settingsOwner;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final c = context.read<PlayerController>();
+    if (!identical(c, _settingsOwner)) {
+      _settingsOwner?.settingsNotifier.removeListener(_onSettingsChanged);
+      _settingsOwner = c;
+      c.settingsNotifier.addListener(_onSettingsChanged);
+    }
+  }
+
+  void _onSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
@@ -161,6 +180,7 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   @override
   void dispose() {
+    _settingsOwner?.settingsNotifier.removeListener(_onSettingsChanged);
     HardwareKeyboard.instance.removeHandler(_onVerticalKey);
     _tabController.removeListener(_onTabIndexChanged);
     _navFocus.dispose();

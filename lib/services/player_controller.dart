@@ -52,6 +52,20 @@ class PlayerController extends ChangeNotifier {
   /// Stack 的 notifyListeners（避免反复重建导致灰屏）
   final ValueNotifier<bool> clockVisible = ValueNotifier<bool>(false);
 
+  /// 设置变更的独立通知器（**不**走 notifyListeners）。
+  ///
+  /// 设置面板、根部的字号缩放各自监听它。以前切一个开关会调用
+  /// notifyListeners，而根部 `Consumer<PlayerController>` 包着整个
+  /// MaterialApp、播放页也包着整个 Stack——一次开关等于把主题、
+  /// 播放层、视频纹理全重建一遍，用户看到的就是"卡一下/闪一下"。
+  /// 设置只影响界面参数，不该惊动播放树，所以拆成独立通道。
+  final ValueNotifier<PlayerSettings> settingsNotifier =
+      ValueNotifier<PlayerSettings>(const PlayerSettings());
+
+  /// 设备档位（电视/手机）的独立通知器：启动检测完成时置位，
+  /// 根部据此切换密度 token，不用为它重建 MaterialApp
+  final ValueNotifier<bool> tvModeNotifier = ValueNotifier<bool>(false);
+
   /// 视频画面旋转（顺时针 90° 的倍数）：0=0°, 1=90°, 2=180°, 3=270°。
   /// 仅影响显示，不改变解码器或流本身。投屏竖屏直播时可旋转画面填满屏幕。
   final ValueNotifier<int> videoRotation = ValueNotifier<int>(0);
@@ -170,6 +184,10 @@ class PlayerController extends ChangeNotifier {
   // 播放进度定时刷新（进度条/倒计时）
   Timer? _tickTimer;
 
+  /// 进度秒级去重 + 直播节目跨段去重（见 tick 里的说明）
+  int? _lastTickSecond;
+  String? _lastProgramTitle;
+
   PlayerState get state => _state;
   Channel? get currentChannel => _currentChannel;
   double get volume => _volume;
@@ -250,6 +268,7 @@ class PlayerController extends ChangeNotifier {
     await _loadSettings();
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
     _isTv = await isTvDevice();
+    tvModeNotifier.value = _isTv;
     _boot('正在加载节目源…');
     await sourceManager.loadFromPrefs();
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
@@ -266,10 +285,26 @@ class PlayerController extends ChangeNotifier {
     // 播放中每 500ms 刷新一次（进度条、倒计时等）
     _tickTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
       _checkCastStall();
-      if (_videoController != null &&
-          _videoController!.value.isInitialized) {
-        notifyListeners();
+      final vc = _videoController;
+      if (vc == null || !vc.value.isInitialized) return;
+      final v = vc.value;
+      // 直播源（HLS 直播时长 0 或超长）没有进度可看：以前这里无条件
+      // notifyListeners，等于每 500ms 把整个播放树（视频纹理、底部面板、
+      // 开着的时候还有设置面板）重建一遍——开设置点开关时"卡一下"就是
+      // 撞上了这个周期重建。直播只在节目跨段时通知。
+      if (v.duration <= Duration.zero || _isLiveDuration(v.duration)) {
+        final title = currentProgram?.title;
+        if (title != _lastProgramTitle) {
+          _lastProgramTitle = title;
+          notifyListeners();
+        }
+        return;
       }
+      // 点播/投屏有时长：按秒推进通知（进度条、剩余时间要动）
+      final sec = v.position.inSeconds;
+      if (sec == _lastTickSecond) return;
+      _lastTickSecond = sec;
+      notifyListeners();
     });
 
     // 一个源都没有时（新装/刚删光）：把内置电台精选设为当前源，
@@ -2314,9 +2349,35 @@ class PlayerController extends ChangeNotifier {
       _favoriteChannelIds
         ..clear()
         ..addAll(p.getStringList(_kFavoriteChannelIds) ?? const <String>[]);
-      // 同步独立时钟通知器的初值
+      // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
+      settingsNotifier.value = _settings;
     } catch (_) {}
+  }
+
+  /// 设置写盘去抖：连续拨滑块/连点开关只在停手后写一次。
+  /// 原来每次变更都 getInstance + 19 次 setXxx，Windows 上 shared_prefs
+  /// 是"每次都整文件重写"，播放高负载时这就是卡顿源。
+  Timer? _settingsSaveTimer;
+  bool _settingsDirty = false;
+
+  void _scheduleSaveSettings() {
+    _settingsDirty = true;
+    _settingsSaveTimer?.cancel();
+    _settingsSaveTimer = Timer(const Duration(milliseconds: 250), () {
+      if (!_settingsDirty) return;
+      _settingsDirty = false;
+      unawaited(_saveSettings());
+    });
+  }
+
+  /// 立即落盘（退出前用）
+  Future<void> flushSettings() async {
+    _settingsSaveTimer?.cancel();
+    _settingsSaveTimer = null;
+    if (!_settingsDirty) return;
+    _settingsDirty = false;
+    await _saveSettings();
   }
 
   Future<void> _saveSettings() async {
@@ -2379,7 +2440,8 @@ class PlayerController extends ChangeNotifier {
         settings.remoteAdminEnabled != _settings.remoteAdminEnabled;
     final webChanged = settings.webEnabled != _settings.webEnabled;
     _settings = settings;
-    _saveSettings();
+    _settingsDirty = true;
+    _scheduleSaveSettings();
     if (launchChanged && isDesktop) {
       setAutoLaunchEnabled(settings.launchAtStartup);
     }
@@ -2414,7 +2476,9 @@ class PlayerController extends ChangeNotifier {
       _applyWebQuality();
       Timer(const Duration(seconds: 2), _applyWebQuality);
     }
-    notifyListeners();
+    // 只通知订阅设置的地方（设置面板 / 字号缩放 / 待机壳），
+    // **不** notifyListeners：播放树不该为设置变化重建
+    settingsNotifier.value = settings;
   }
 
   /// 单独切换「显示时间」。
@@ -2425,7 +2489,8 @@ class PlayerController extends ChangeNotifier {
   void setShowClock(bool value) {
     if (_settings.showClock == value) return;
     _settings = _settings.copyWith(showClock: value);
-    _saveSettings();
+    _settingsDirty = true;
+    _scheduleSaveSettings();
     clockVisible.value = value;
   }
 
@@ -3391,7 +3456,12 @@ class PlayerController extends ChangeNotifier {
     dlnaService.stop();
     remoteAdminService.stop();
     reservationManager.dispose();
+    // 退出前把未落盘的设置补写掉（去抖窗口内被杀会丢设置）
+    unawaited(flushSettings());
+    _settingsSaveTimer?.cancel();
     clockVisible.dispose();
+    settingsNotifier.dispose();
+    tvModeNotifier.dispose();
     super.dispose();
   }
 }
