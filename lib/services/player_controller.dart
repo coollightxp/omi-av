@@ -1641,9 +1641,22 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 按偏移量切换频道（跨分类、循环）
+  /// 换台用的频道序列：电视走当前源，电台走跨源目录。
+  ///
+  /// 方案 12.6「换台边界」：上下键只在当前域内循环——听电台时按下一台
+  /// 不能跳进电视频道里去。电台目录由 [RadioCatalog] 提供（内置 + 我的电台），
+  /// 与当前节目源无关，所以从左侧电台标签起的台也能一直往下翻。
+  List<Channel> get _switchDomainChannels {
+    final isRadio = _currentChannel?.isRadio ?? false;
+    if (isRadio && _radioCategories.isNotEmpty) {
+      return [for (final cat in _radioCategories) ...cat.channels];
+    }
+    return [for (final cat in _categories) ...cat.channels];
+  }
+
+  /// 按偏移量切换频道（同域内跨分类、循环）
   Future<void> playAdjacentChannel(int delta) async {
-    final all = [for (final cat in _categories) ...cat.channels];
+    final all = _switchDomainChannels;
     if (all.isEmpty) return;
     if (_currentChannel == null) {
       await playChannel(all.first);
@@ -1671,12 +1684,18 @@ class PlayerController extends ChangeNotifier {
     return idx < 0 ? null : idx + 1;
   }
 
-  /// 当前频道序号（1 起）
-  int? get currentChannelNumber => channelNumberOf(_currentChannel);
+  /// 当前频道序号（1 起，同域口径）
+  int? get currentChannelNumber {
+    final ch = _currentChannel;
+    if (ch == null) return null;
+    final idx = _switchDomainChannels.indexWhere((c) => c.id == ch.id);
+    return idx < 0 ? null : idx + 1;
+  }
 
-  /// 按序号跳台（1 起），序号无效时忽略
+  /// 按序号跳台（1 起），序号无效时忽略。
+  /// 电台域跳的是电台目录序号（与左侧列表显示一致），电视域跳源内序号。
   Future<void> playChannelByNumber(int number) async {
-    final all = flatChannels;
+    final all = _switchDomainChannels;
     if (number < 1 || number > all.length) return;
     await playChannel(all[number - 1]);
   }

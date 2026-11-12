@@ -414,18 +414,19 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   /// 频道全局序号（跨分类累加，1 起），与数字选台/OSD 序号一致
   int _globalIndexOf(PlayerController controller, ChannelCategory cat,
       int indexInCat) {
-    // 电台标签是跨源聚合，"全局序号"没有意义（数字跳台只认当前源）
-    if (_mediaTab == 1) return indexInCat + 1;
+    // 序号口径必须与数字跳台一致：电视=当前源，电台=跨源目录
+    // （PlayerController._switchDomainChannels 用的是同一份列表）
+    final cats = _catsOf(controller);
     var offset = 0;
-    for (final c in controller.categories) {
+    for (final c in cats) {
       if (c == cat) return offset + indexInCat + 1;
       offset += c.channels.length;
     }
-    // 虚拟分类（我的收藏）：按频道 id 反查其在源分类中的全局序号
+    // 虚拟分类（我的收藏）：按频道 id 反查其在分类里的全局序号
     if (indexInCat < cat.channels.length) {
       final id = cat.channels[indexInCat].id;
       var off = 0;
-      for (final c in controller.categories) {
+      for (final c in cats) {
         final i = c.channels.indexWhere((ch) => ch.id == id);
         if (i >= 0) return off + i + 1;
         off += c.channels.length;
