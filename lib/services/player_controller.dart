@@ -232,6 +232,10 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> _init() async {
+    // 启动计时：初始化耗时不足最短展示时长时，撤屏前补足等待。
+    // 首次启动（无列表/无 EPG/无历史频道）全程只有毫秒级 prefs 读取，
+    // 若不兜底，启动画面一闪而过甚至完全看不到，品牌动画形同虚设
+    final bootClock = Stopwatch()..start();
     _boot('正在读取设置…');
     await _loadSettings();
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
@@ -279,7 +283,14 @@ class PlayerController extends ChangeNotifier {
     _boot('正在恢复上次播放的频道…');
     await restoreLastChannel();
 
-    // 启动初始化完成：撤掉启动画面
+    // 启动初始化完成：撤掉启动画面。
+    // 最短展示 2.6 秒：既有初始化耗时则如实展示（不额外拖慢），
+    // 秒完成则补足，保证启动动画至少完整出现一轮
+    const minBootShow = Duration(milliseconds: 2600);
+    final remain = minBootShow - bootClock.elapsed;
+    if (remain > Duration.zero) {
+      await Future.delayed(remain);
+    }
     _bootReady = true;
     notifyListeners();
   }
