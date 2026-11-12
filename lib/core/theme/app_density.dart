@@ -83,7 +83,7 @@ class AppDensity {
   );
 
   static AppDensity of(BuildContext context) {
-    final profile = DeviceProfileScope.of(context);
+    final profile = DeviceProfileScope.profileOf(context);
     switch (profile) {
       case DeviceProfile.tv:
         return _tv;

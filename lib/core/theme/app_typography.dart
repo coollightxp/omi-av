@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 
+import 'app_density.dart';
 import 'device_profile.dart';
 
 /// 语义字号 token：三档设备基准（sp）。
@@ -42,7 +43,7 @@ class AppTypography {
   );
 
   static AppTypography of(BuildContext context) {
-    final profile = DeviceProfileScope.of(context);
+    final profile = DeviceProfileScope.profileOf(context);
     switch (profile) {
       case DeviceProfile.tv:
         return _tv;

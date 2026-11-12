@@ -403,7 +403,7 @@ class PlayerController extends ChangeNotifier {
   bool get dlnaRunning => _dlnaRunning;
   String get dlnaEndpoint => _dlnaEndpoint;
 
-  /// 启动 DLNA 接收服务：设备名 = OMPlayer + 机器唯一标识
+  /// 启动 DLNA 接收服务：设备名 = 欧米视听 + 机器唯一标识
   Future<void> _startDlna() async {
     if (dlnaService.isRunning) {
       // 已运行（用户刚重新打开开关）：只刷新状态展示

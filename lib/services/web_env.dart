@@ -34,7 +34,7 @@ String _resolveUserDataFolder() {
   }
   final local = Platform.environment['LOCALAPPDATA'] ?? '';
   if (local.isNotEmpty) {
-    return '$local${Platform.pathSeparator}OMPlayer'
+    return '$local${Platform.pathSeparator}Omi'
         '${Platform.pathSeparator}WebView2';
   }
   return '${exeDir.path}${Platform.pathSeparator}$exeName.WebView2';

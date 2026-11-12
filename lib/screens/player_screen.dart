@@ -869,7 +869,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'OMPlayer',
+                              '欧米视听',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 27,
@@ -1998,7 +1998,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   final Set<String> _nativeHeld = <String>{};
 
   /// 原生钩子转发的动作键（网页持有焦点时 HardwareKeyboard 收不到，
-  /// 由 WH_KEYBOARD_LL 经 omplayer/win_hotkeys 通道送达）。
+  /// 由 WH_KEYBOARD_LL 经 omi/win_hotkeys 通道送达）。
   /// isDown=true 按下边沿、false 抬起边沿，与 Flutter 路径共用
   /// 同一套短按/长按/面板导航逻辑。
   void _onNativeAction(String action, bool isDown) {

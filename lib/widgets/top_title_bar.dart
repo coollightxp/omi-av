@@ -56,7 +56,7 @@ class TopTitleBar extends StatelessWidget {
                         width: 18, height: 18),
                     const SizedBox(width: 8),
                     const Text(
-                      'OMPlayer',
+                      '欧米视听',
                       style: TextStyle(
                           color: Colors.white70, fontSize: 13),
                     ),

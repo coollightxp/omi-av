@@ -1,7 +1,7 @@
-name: omplayer
-description: A cross-platform Flutter live streaming media player.
+name: omi
+description: 欧米视听 (Omi) — 跨平台直播视听应用：电视直播、电台、投屏接收。
 publish_to: 'none'
-version: 1.1.006+2006
+version: 1.0.0+1
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

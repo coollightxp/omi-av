@@ -23,7 +23,7 @@ import 'package:flutter/services.dart';
 /// 非 Windows 平台调用全部静默无效。
 class WinHotkeys {
   static const BasicMessageChannel<String> _channel =
-      BasicMessageChannel<String>('omplayer/win_hotkeys', StringCodec());
+      BasicMessageChannel<String>('omi/win_hotkeys', StringCodec());
 
   void Function(int digit)? _onDigit;
 

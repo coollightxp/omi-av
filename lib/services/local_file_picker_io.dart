@@ -20,7 +20,7 @@ import 'package:window_manager/window_manager.dart';
 /// 返回文件绝对路径；用户取消返回 null。
 Future<String?> pickLocalPlaylistFile() async {
   if (Platform.isAndroid) {
-    const channel = MethodChannel('omplayer/local_file_picker');
+    const channel = MethodChannel('omi/local_file_picker');
     return channel.invokeMethod<String>('pick');
   }
 
