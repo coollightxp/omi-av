@@ -10,8 +10,9 @@ import '../../core/widgets/ghost_button.dart';
 /// - 点击中间文字弹出线路列表，可直接跳选（含当前项打勾）
 /// - 遥控器高亮态由 [prevSelected]/[nextSelected] 传入，样式与面板其它按钮一致
 ///
-/// 网页频道前台时（[qualityLabel] 非空）不弹菜单：此时左右键映射为
-/// 清晰度循环，菜单无意义。
+/// 网页频道前台时（[webLines] 非空）：清晰度档位归入线路体系，
+/// 中间同样显示「线路 n/m」，菜单每行右侧带该线路的分辨率
+/// （线路一 1080P），左右键仍映射为清晰度循环。
 class SourceStepper extends StatelessWidget {
   const SourceStepper({
     super.key,
@@ -20,7 +21,7 @@ class SourceStepper extends StatelessWidget {
     required this.onPrev,
     required this.onNext,
     this.onSelect,
-    this.qualityLabel,
+    this.webLines,
     this.prevSelected = false,
     this.nextSelected = false,
   });
@@ -37,19 +38,21 @@ class SourceStepper extends StatelessWidget {
   /// 直接跳选第 i 个源（i 从 0 起）
   final ValueChanged<int>? onSelect;
 
-  /// 网页清晰度文案（非空时替代"线路 n/m"显示，且不弹菜单）
-  final String? qualityLabel;
+  /// 网页各线路的分辨率标签（如 ['1080P','720P','540P']，与档位
+  /// 从高到低一一对应）。非空 = 网页模式：线路菜单每行右侧显示
+  /// 分辨率；空 = 普通源，菜单只列「线路 n」
+  final List<String>? webLines;
 
   final bool prevSelected;
   final bool nextSelected;
 
-  bool get _isWeb => qualityLabel != null;
+  bool get _isWeb => webLines != null;
 
   @override
   Widget build(BuildContext context) {
     final d = AppDensity.of(context);
     final t = AppTypography.of(context);
-    final label = _isWeb ? qualityLabel! : '线路 ${index + 1}/$count';
+    final label = '线路 ${index + 1}/$count';
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -64,7 +67,7 @@ class SourceStepper extends StatelessWidget {
         // 中央标签：可点击弹出线路菜单
         InkWell(
             borderRadius: BorderRadius.circular(8),
-            onTap: (!_isWeb && count > 1 && onSelect != null)
+            onTap: (count > 1 && onSelect != null)
                 ? () => _showMenu(context, d, t)
                 : null,
             child: Padding(
@@ -82,7 +85,7 @@ class SourceStepper extends StatelessWidget {
                       fontSize: t.caption,
                     ),
                   ),
-                  if (!_isWeb && count > 1 && onSelect != null)
+                  if (count > 1 && onSelect != null)
                     Icon(Icons.arrow_drop_down,
                         size: t.caption + 6, color: Colors.white54),
                 ],
@@ -160,6 +163,17 @@ class SourceStepper extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
+                // 网页模式：每行右侧带上该线路的分辨率
+                if (_isWeb && i < webLines!.length)
+                  Text(
+                    webLines![i],
+                    style: TextStyle(
+                      color: i == index
+                          ? const Color(0xFFFFB35C)
+                          : Colors.white38,
+                      fontSize: t.caption,
+                    ),
+                  ),
                 if (i == index)
                   Text('当前',
                       style:

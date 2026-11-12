@@ -314,7 +314,13 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             // 电台：脉冲小条 + 「音频直播」，替代分辨率/线路这类视频信息
             if (isRadio)
               _audioBadge(c.isPlaying)
-            else ...[
+            else if (c.webPageActive) ...[
+              // 网页频道：左边显示所选线路的分辨率（线路一 1080P → 1080P）
+              _badge(c.webQualityLabel),
+              _badge(
+                  '线路 ${c.webQualityIndex + 1}/${c.webQualityLevels.length}'),
+            ] else ...[
+              // 普通直播源：取视频实际分辨率显示在左边
               if (c.resolutionText.isNotEmpty) _badge(c.resolutionText),
               _badge('线路 ${c.sourceIndex + 1}/${c.sourceCount}'),
             ],
@@ -561,12 +567,18 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     _KbAction byId(String id) => actions.firstWhere((a) => a.id == id);
     final children = <Widget>[
       SourceStepper(
-        index: c.sourceIndex,
-        count: c.sourceCount,
+        // 网页频道：清晰度档位归入线路体系（线路一 = 最高档 1080P），
+        // 菜单可直选某条线路；普通频道：线路 = 频道的多源列表
+        index: c.webPageActive ? c.webQualityIndex : c.sourceIndex,
+        count: c.webPageActive ? c.webQualityLevels.length : c.sourceCount,
         onPrev: byId('prevSource').onPressed,
         onNext: byId('nextSource').onPressed,
-        onSelect: (i) => c.switchSource(i),
-        qualityLabel: c.webPageActive ? c.webQualityLabel : null,
+        onSelect: c.webPageActive
+            ? (i) => c.selectWebQuality(i)
+            : (i) => c.switchSource(i),
+        webLines: c.webPageActive
+            ? [for (final l in c.webQualityLevels) '${l}P']
+            : null,
         prevSelected: _kbId == 'prevSource',
         nextSelected: _kbId == 'nextSource',
       ),

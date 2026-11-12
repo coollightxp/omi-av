@@ -1422,8 +1422,23 @@ class PlayerController extends ChangeNotifier {
   /// 当前档位下标（0=最高，默认直接播放最大分辨率）
   int _webQualityIndex = 0;
 
+  /// 网页档位下标（0=最高档）。网页频道的「清晰度档位」在界面上
+  /// 归入线路体系：步进器/线路徽标显示「线路 n/m」，左侧分辨率徽标
+  /// 显示所选线路的分辨率（线路一 1080P → 左边就是 1080P）
+  int get webQualityIndex => _webQualityIndex;
+
   /// 面板/OSD 显示用：纯分辨率标签（如 1080P），不带「自动/蓝光」等字样
   String get webQualityLabel => '${webQualityLevels[_webQualityIndex]}P';
+
+  /// 线路菜单直接跳到第 i 档（0 起）
+  void selectWebQuality(int i) {
+    final levels = webQualityLevels;
+    if (i < 0 || i >= levels.length || i == _webQualityIndex) return;
+    _webQualityIndex = i;
+    _applyWebQuality();
+    OsdBus.show('线路 ${i + 1}：${webQualityLabel}', icon: Icons.hd_outlined);
+    notifyListeners();
+  }
 
   /// 画质偏好 → 默认档位下标：自动/全高清/超清=最高档，高清=中间档，
   /// 标清=最省流档（央视频中间=720P、央视网中间=576P）
