@@ -61,7 +61,10 @@ class _AudioWaveState extends State<AudioWave> with TickerProviderStateMixin {
       _fade.forward();
       if (!_wave.isAnimating) _wave.repeat();
     } else {
-      _fade.reverse();
+      // 收干净后把表停掉：暂停中的电台不该一直占一个 60fps 的 ticker
+      _fade.reverse().whenComplete(() {
+        if (mounted && !widget.active) _wave.stop();
+      });
     }
   }
 
