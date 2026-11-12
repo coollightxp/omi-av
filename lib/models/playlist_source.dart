@@ -25,6 +25,10 @@ class PlaylistSource {
   final DateTime addedAt;
   final DateTime? lastUpdated;
 
+  /// 导入过滤（方案 12.3）：分组关键字，逗号分隔；空 = 不过滤。
+  /// 只保留 group-title（或频道名）命中任一关键字的频道
+  final String groupFilter;
+
   const PlaylistSource({
     required this.id,
     required this.name,
@@ -33,6 +37,7 @@ class PlaylistSource {
     required this.format,
     required this.addedAt,
     this.lastUpdated,
+    this.groupFilter = '',
   });
 
   /// 内置电台精选：id 固定，便于升级时识别、恢复、去重
@@ -62,6 +67,7 @@ class PlaylistSource {
     PlaylistFormat? format,
     DateTime? addedAt,
     DateTime? lastUpdated,
+    String? groupFilter,
   }) {
     return PlaylistSource(
       id: id ?? this.id,
@@ -71,6 +77,7 @@ class PlaylistSource {
       format: format ?? this.format,
       addedAt: addedAt ?? this.addedAt,
       lastUpdated: lastUpdated ?? this.lastUpdated,
+      groupFilter: groupFilter ?? this.groupFilter,
     );
   }
 
@@ -82,6 +89,7 @@ class PlaylistSource {
         'format': format.name,
         'addedAt': addedAt.toIso8601String(),
         'lastUpdated': lastUpdated?.toIso8601String(),
+        if (groupFilter.isNotEmpty) 'groupFilter': groupFilter,
       };
 
   factory PlaylistSource.fromJson(Map<String, dynamic> json) {
@@ -101,6 +109,7 @@ class PlaylistSource {
       lastUpdated: json['lastUpdated'] != null
           ? DateTime.parse(json['lastUpdated'] as String)
           : null,
+      groupFilter: json['groupFilter'] as String? ?? '',
     );
   }
 

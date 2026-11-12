@@ -47,11 +47,11 @@ class LeftChannelDrawer extends StatefulWidget {
 }
 
 class LeftChannelDrawerState extends State<LeftChannelDrawer> {
-  /// 「我的收藏」虚拟分类 ID（不与真实源分类冲突）
-  static const String _favCategoryId = '::favorites::';
-
-  /// 收藏分类对象（按需重建，buildFavoriteChannels 内容随收藏变化）
-  ChannelCategory? _favCategoryCache;
+  /// 收藏场景虚拟分类 ID 前缀（不与真实源分类冲突）：
+  /// 场景制收藏（方案 12.3）后每个场景一个 L1 条目，id = 前缀 + 场景名
+  static const String _favCatPrefix = '::fav::';
+  static bool _isFavCat(String id) => id.startsWith(_favCatPrefix);
+  static String _sceneOfCat(String id) => id.substring(_favCatPrefix.length);
 
   /// 启动后首次打开抽屉的定位是否已完成。仅这一次允许「当前频道在
   /// 收藏夹就定位到收藏夹」（启动恢复场景）；此后用户在普通分类里
@@ -104,42 +104,52 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   List<ChannelCategory> _catsOf(PlayerController controller) =>
       _mediaTab == 0 ? controller.categories : controller.radioCategories;
 
-  /// 当前标签下该显示的收藏（电视/电台分开看，避免一列混两样）
+  /// 当前标签下的收藏（全部场景并集；电视/电台分开看，避免一列混两样）
   List<Channel> _favsOf(PlayerController controller) {
     final all = controller.buildFavoriteChannels();
     if (_mediaTab == 0) return all.where((e) => !e.isRadio).toList();
     return all.where((e) => e.isRadio).toList();
   }
 
-  /// 第一级列表：收藏夹（非空时）排在最前，其后为真实分类
-  List<ChannelCategory> _l1Categories(PlayerController controller) {
-    final cats = _catsOf(controller);
-    final favs = _favsOf(controller);
-    if (favs.isEmpty) return cats;
-    final fav = _favCategoryCache;
-    if (fav == null || fav.channels.length != favs.length) {
-      _favCategoryCache = ChannelCategory(
-        id: _favCategoryId,
-        name: '我的收藏',
-        channels: favs,
-      );
-    } else {
-      _favCategoryCache =
-          ChannelCategory(id: _favCategoryId, name: '我的收藏', channels: favs);
+  /// 各收藏场景的虚拟分类（电视/电台按标签过滤）。
+  /// 非空场景都显示；当前场景（收藏落点）即使为空也显示，
+  /// 否则新建的场景没有入口可进
+  List<ChannelCategory> _favCatsOf(PlayerController controller) {
+    final out = <ChannelCategory>[];
+    for (final scene in controller.sceneNames) {
+      final chans = controller
+          .buildSceneChannels(scene)
+          .where((e) => _mediaTab == 0 ? !e.isRadio : e.isRadio)
+          .toList();
+      if (chans.isEmpty && scene != controller.activeSceneName) continue;
+      out.add(ChannelCategory(
+          id: '$_favCatPrefix$scene', name: scene, channels: chans));
     }
-    return [_favCategoryCache!, ...cats];
+    return out;
   }
 
-  /// 分类下实际展示的频道列表（收藏分类动态聚合）
-  List<Channel> _channelsOf(PlayerController controller, ChannelCategory cat) =>
-      cat.id == _favCategoryId ? _favsOf(controller) : cat.channels;
+  /// 第一级列表：收藏场景（非空的）排在最前，其后为真实分类
+  List<ChannelCategory> _l1Categories(PlayerController controller) =>
+      [..._favCatsOf(controller), ..._catsOf(controller)];
+
+  /// 分类下实际展示的频道列表（收藏场景每次现算：收藏变化立即生效）
+  List<Channel> _channelsOf(PlayerController controller, ChannelCategory cat) {
+    if (!_isFavCat(cat.id)) return cat.channels;
+    final scene = _sceneOfCat(cat.id);
+    return controller
+        .buildSceneChannels(scene)
+        .where((e) => _mediaTab == 0 ? !e.isRadio : e.isRadio)
+        .toList();
+  }
 
   /// 收藏/取消收藏并提示（鼠标点星标或遥控器长按 OK）
   Future<void> _toggleFavorite(Channel ch) async {
     final c = context.read<PlayerController>();
     final nowFav = await c.toggleFavoriteChannel(ch.id);
+    final scene = c.activeSceneName;
+    final name = c.displayTitle(ch);
     OsdBus.show(
-      nowFav ? '已收藏：${ch.name}' : '已取消收藏：${ch.name}',
+      nowFav ? '已收藏到〈$scene〉：$name' : '已取消收藏：$name',
       icon: Icons.star,
     );
   }
@@ -187,9 +197,11 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       _lastOpenChannelId = cur?.id;
       final favs = _favsOf(controller);
 
-      // 上次停留在「我的收藏」：收藏夹仍非空时保持收藏夹层级，
+      // 上次停留在收藏场景：场景仍非空时保持层级，
       // 框选对齐刚播放的收藏频道；收藏已清空才退回普通分类定位
-      if (_selectedCategory?.id == _favCategoryId && favs.isNotEmpty) {
+      if (_selectedCategory != null &&
+          _isFavCat(_selectedCategory!.id) &&
+          favs.isNotEmpty) {
         _kbCategoryIndex = 0;
         final favIdx = cur == null
             ? -1
@@ -201,27 +213,33 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         });
         return;
       }
-      if (_selectedCategory?.id == _favCategoryId) {
-        // 收藏夹已空：退回第一级
+      if (_selectedCategory != null && _isFavCat(_selectedCategory!.id)) {
+        // 收藏已清空：退回第一级
         _selectedCategory = null;
       }
 
       if (cur != null) {
-        // 收藏夹非空时在 L1 占第 0 项，真实分类索引整体 +1
-        final favOffset = favs.isEmpty ? 0 : 1;
-        // 仅启动后首次打开抽屉：当前播放频道在收藏夹中则定位到
-        // 「我的收藏」（下次启动恢复收藏频道的场景）。
+        // 收藏场景在 L1 占前 N 项，真实分类索引整体 +N
+        final favOffset = _favCatsOf(controller).length;
+        // 仅启动后首次打开抽屉：当前播放频道在收藏中则定位到
+        // 所在场景（下次启动恢复收藏频道的场景）。
         // 之后的打开不再做此跳转，避免在普通分类点击收藏频道时
         // 列表被强制拉到收藏夹
         if (!_startupFavLocated) {
           _startupFavLocated = true;
           final favIdx = favs.indexWhere((ch) => ch.id == cur.id);
           if (favIdx >= 0) {
-            _favCategoryCache = ChannelCategory(
-                id: _favCategoryId, name: '我的收藏', channels: favs);
-            setState(() => _selectedCategory = _favCategoryCache);
-            _kbCategoryIndex = 0;
-            _kbChannelIndex = favIdx.clamp(0, favs.length - 1);
+            final favCats = _favCatsOf(controller);
+            final target = favCats.firstWhere(
+              (c) => c.channels.any((ch) => ch.id == cur.id),
+              orElse: () => favCats.first,
+            );
+            controller.setActiveScene(_sceneOfCat(target.id));
+            setState(() => _selectedCategory = target);
+            _kbCategoryIndex = favCats.indexOf(target);
+            _kbChannelIndex = target.channels
+                .indexWhere((ch) => ch.id == cur.id)
+                .clamp(0, target.channels.length - 1);
             WidgetsBinding.instance.addPostFrameCallback((_) {
               _scrollToCurrentChannel();
             });
@@ -284,6 +302,10 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         case 'right':
           final next = cats[_kbCategoryIndex.clamp(0, cats.length - 1)];
           final nextChannels = _channelsOf(controller, next);
+          // 进入收藏场景 = 切到该场景，此后收藏动作落到这个场景
+          if (_isFavCat(next.id)) {
+            controller.setActiveScene(_sceneOfCat(next.id));
+          }
           setState(() {
             _selectedCategory = next;
             final curId = controller.currentChannel?.id;
@@ -560,9 +582,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       builder: (context, controller, _) {
         final cats = _catsOf(controller);
         // 当前选中的分类对象已不在新列表中（说明刚切换了节目源），
-        // 自动回到第一级分类列表；收藏虚拟分类不受源切换影响
+        // 自动回到第一级分类列表；收藏场景分类不受源切换影响
         if (_selectedCategory != null &&
-            _selectedCategory!.id != _favCategoryId &&
+            !_isFavCat(_selectedCategory!.id) &&
             !cats.contains(_selectedCategory)) {
           _selectedCategory = null;
           // 本帧先按第一级渲染，下一帧刷新标题栏（标题栏在 Consumer 外）
@@ -631,11 +653,10 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     });
   }
 
-  /// 第一级：分类列表（收藏夹非空时排在最前）
+  /// 第一级：分类列表（收藏场景排在最前）
   Widget _buildCategoryList(PlayerController controller) {
     final t = AppTypography.of(context);
     final cats = _l1Categories(controller);
-    final favs = _favsOf(controller);
     if (cats.isEmpty) {
       if (_mediaTab == 1 && !controller.radioCatalogLoaded) {
         return const Center(
@@ -683,18 +704,16 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         ),
       );
     }
-    // 收藏夹（非空时）占第 0 项，其后为真实分类
-    final hasFav = favs.isNotEmpty;
-    final favCat = hasFav
-        ? ChannelCategory(id: _favCategoryId, name: '我的收藏', channels: favs)
-        : null;
+    // 收藏场景（非空的）占最前 N 项，其后为真实分类
+    final favCats = _favCatsOf(controller);
     return ListView.builder(
       controller: _categoryScroll,
       padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: cats.length + (hasFav ? 1 : 0),
+      itemCount: cats.length + favCats.length,
       itemBuilder: (context, index) {
-        final isFav = hasFav && index == 0;
-        final cat = isFav ? favCat! : cats[index - (hasFav ? 1 : 0)];
+        final isFav = index < favCats.length;
+        final cat =
+            isFav ? favCats[index] : cats[index - favCats.length];
         final key = _categoryKeys.putIfAbsent(index, GlobalKey.new);
         final isMine = cat.id == PlaylistSource.radioLibraryId;
         return _CategoryTile(
@@ -708,6 +727,10 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           iconColor: isFav ? Colors.amber : Colors.blueAccent,
           keyboardSelected: index == _kbCategoryIndex,
           onTap: () => setState(() {
+            // 进入收藏场景 = 切到该场景，此后收藏动作落到这个场景
+            if (_isFavCat(cat.id)) {
+              controller.setActiveScene(_sceneOfCat(cat.id));
+            }
             _selectedCategory = cat;
             _kbCategoryIndex = index;
             _kbChannelIndex = 0;
@@ -737,6 +760,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           isSelected: isCurrent,
           keyboardSelected: index == _kbChannelIndex,
           isFav: controller.isFavoriteChannel(channel.id),
+          displayName: controller.displayTitle(channel),
           nowTitle: _nowTitleFor(controller, channel),
           onToggleFavorite: () => _toggleFavorite(channel),
           onTap: () {
@@ -910,6 +934,9 @@ class _ChannelTile extends StatelessWidget {
   final bool isFav;
   final VoidCallback? onToggleFavorite;
 
+  /// 显示名（有别名用别名；null 用 channel.name）
+  final String? displayName;
+
   /// 遥控器/键盘焦点高亮
   final bool keyboardSelected;
 
@@ -922,6 +949,7 @@ class _ChannelTile extends StatelessWidget {
     this.nowTitle = '',
     this.isFav = false,
     this.onToggleFavorite,
+    this.displayName,
     this.keyboardSelected = false,
   });
 
@@ -990,7 +1018,7 @@ class _ChannelTile extends StatelessWidget {
                       ],
                       Expanded(
                         child: Text(
-                          channel.name,
+                          displayName ?? channel.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(

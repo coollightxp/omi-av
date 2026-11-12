@@ -163,7 +163,7 @@ class _RadioStage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ch = channel;
-    final name = ch.name;
+    final name = controller.displayTitle(ch);
 
     return Container(
       // 与启动页同一套暖黑底，避免纯黑发灰
@@ -249,6 +249,46 @@ class _RadioStage extends StatelessWidget {
                         );
                       },
                     ),
+                    // 录音中徽标：红点 + 已录时长（每秒走字）
+                    if (controller.isRadioRecording)
+                      ValueListenableBuilder<Duration>(
+                        valueListenable: controller.radioRecElapsed,
+                        builder: (context, el, _) {
+                          final h = el.inHours;
+                          final m = el.inMinutes % 60;
+                          final s = el.inSeconds % 60;
+                          final two = (int v) => v.toString().padLeft(2, '0');
+                          return Padding(
+                            padding: const EdgeInsets.only(left: 10),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: Colors.red.withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                    color: Colors.redAccent
+                                        .withValues(alpha: 0.55)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.fiber_manual_record,
+                                      size: 11, color: Colors.redAccent),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    'REC ${h > 0 ? '${two(h)}:' : ''}'
+                                    '${two(m)}:${two(s)}',
+                                    style: const TextStyle(
+                                        color: Color(0xE6FFFFFF),
+                                        fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
                   ],
                 ),
                 // 正在播的曲目/节目：优先 ICY 实时元数据（歌名会在

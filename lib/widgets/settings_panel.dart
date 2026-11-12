@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:file_picker/file_picker.dart';
-import 'dart:io' show Platform;
+import 'dart:io' show File, FileStat, Platform;
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
@@ -10,6 +10,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../core/theme/app_colors.dart';
+import '../models/channel.dart';
 import '../models/epg_source.dart';
 import 'radio_search_dialog.dart';
 import '../models/player_settings.dart';
@@ -17,6 +18,9 @@ import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
 import '../services/channel_blacklist.dart';
+import '../services/channel_alias.dart';
+import '../services/scene_favorites.dart';
+import '../services/radio_recorder.dart';
 import '../services/radio_library.dart';
 import '../services/web_diag.dart';
 import 'scaled_panel.dart';
@@ -58,11 +62,15 @@ class _ImeSafeTextField extends StatefulWidget {
   final TextEditingController controller;
   final InputDecoration? decoration;
   final TextStyle? style;
+  final bool autofocus;
+  final ValueChanged<String>? onChanged;
 
   const _ImeSafeTextField({
     required this.controller,
     this.decoration,
     this.style,
+    this.autofocus = false,
+    this.onChanged,
   });
 
   @override
@@ -101,6 +109,8 @@ class _ImeSafeTextFieldState extends State<_ImeSafeTextField> {
       focusNode: _focus,
       style: widget.style,
       decoration: widget.decoration,
+      autofocus: widget.autofocus,
+      onChanged: widget.onChanged,
       onTap: !_needsImeWorkaround
           ? null
           : () {
@@ -617,12 +627,15 @@ class _PlaylistTab extends StatefulWidget {
 class _PlaylistTabState extends State<_PlaylistTab> {
   final _nameController = TextEditingController();
   final _urlController = TextEditingController();
+  final _groupFilterController = TextEditingController();
   PlaylistSourceType _type = PlaylistSourceType.url;
   bool _isLoading = false;
 
   @override
   void dispose() {
     _nameController.dispose();
+    _urlController.dispose();
+    _groupFilterController.dispose();
     _urlController.dispose();
     super.dispose();
   }
@@ -658,10 +671,12 @@ class _PlaylistTabState extends State<_PlaylistTab> {
       type: _type,
       format: format,
       addedAt: DateTime.now(),
+      groupFilter: _groupFilterController.text.trim(),
     );
     await context.read<PlayerController>().addPlaylist(source);
     _nameController.clear();
     _urlController.clear();
+    _groupFilterController.clear();
     setState(() => _isLoading = false);
   }
 
@@ -669,6 +684,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
   Future<void> _editPlaylist(PlaylistSource source) async {
     final nameCtl = TextEditingController(text: source.name);
     final urlCtl = TextEditingController(text: source.url);
+    final filterCtl = TextEditingController(text: source.groupFilter);
     var type = source.type;
     if (!mounted) return;
     final result = await showDialog<PlaylistSource>(
@@ -708,21 +724,28 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                             urlCtl),
                       ),
                     ),
-                    if (type == PlaylistSourceType.local)
-                      IconButton(
-                        icon: const Icon(Icons.folder_open,
-                            color: Colors.blueAccent),
-                        onPressed: () async {
-                          final f =
-                              await _pickLocalFileWithTopmostFix();
-                          if (f?.path != null) urlCtl.text = f!.path!;
-                        },
-                      ),
-                  ],
-                ),
-              ],
+                      if (type == PlaylistSourceType.local)
+                        IconButton(
+                          icon: const Icon(Icons.folder_open,
+                              color: Colors.blueAccent),
+                          onPressed: () async {
+                            final f =
+                                await _pickLocalFileWithTopmostFix();
+                            if (f?.path != null) urlCtl.text = f!.path!;
+                          },
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  _ImeSafeTextField(
+                    controller: filterCtl,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: _inputDecoration(
+                        '分组过滤（可选）：只导入命中的分组，逗号分隔'),
+                  ),
+                ],
+              ),
             ),
-          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
@@ -735,7 +758,12 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                 if (name.isEmpty || url.isEmpty) return;
                 Navigator.pop(
                   ctx,
-                  source.copyWith(name: name, url: url, type: type),
+                  source.copyWith(
+                    name: name,
+                    url: url,
+                    type: type,
+                    groupFilter: filterCtl.text.trim(),
+                  ),
                 );
               },
               child: const Text('保存'),
@@ -822,6 +850,13 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                           onPressed: _pickLocalFile,
                         ),
                     ],
+                  ),
+                  const SizedBox(height: 8),
+                  _ImeSafeTextField(
+                    controller: _groupFilterController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: _inputDecoration(
+                        '分组过滤（可选）：只导入命中的分组，逗号分隔，如 央视,卫视'),
                   ),
                   const SizedBox(height: 8),
                   SizedBox(
@@ -982,10 +1017,587 @@ class _RadioSourcesTab extends StatelessWidget {
                   actions: const [],
                 ),
               ),
+            // ===== 方案 12.3 第一档：场景收藏 / 电台别名 / 录音库 =====
+            const _SceneManageSection(),
+            const _AliasSection(),
+            const _RecordingsSection(),
           ],
         );
       },
     );
+  }
+}
+
+// ==================== 场景收藏管理（方案 12.3） ====================
+
+/// 收藏从单列表升级为多场景分组：列表抽屉里每个场景一列，
+/// 进入某场景后收藏动作就落到该场景。这里管场景的增删改名。
+class _SceneManageSection extends StatefulWidget {
+  const _SceneManageSection();
+
+  @override
+  State<_SceneManageSection> createState() => _SceneManageSectionState();
+}
+
+class _SceneManageSectionState extends State<_SceneManageSection> {
+  InputDecoration _deco(String hint) => InputDecoration(
+        isDense: true,
+        hintText: hint,
+        hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: 0.05),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Colors.white12),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Colors.white12),
+        ),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      );
+
+  Future<void> _newScene() async {
+    final ctl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新建收藏场景'),
+        content: _ImeSafeTextField(
+          controller: ctl,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: _deco('场景名，如：新闻 / 音乐 / 戏曲'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+              child: const Text('创建')),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || !mounted) return;
+    await context.read<PlayerController>().createScene(name);
+    OsdBus.show('已创建场景〈$name〉，到列表抽屉进入它再收藏', icon: Icons.star);
+  }
+
+  Future<void> _renameScene(String oldName) async {
+    final ctl = TextEditingController(text: oldName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('重命名场景：$oldName'),
+        content: _ImeSafeTextField(
+          controller: ctl,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: _deco('新场景名'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || name == oldName || !mounted) return;
+    await context.read<PlayerController>().renameScene(oldName, name);
+  }
+
+  Future<void> _deleteScene(String name) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('删除场景〈$name〉？'),
+        content: const Text('组内收藏会一并清除，频道本身不受影响。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除', style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await context.read<PlayerController>().deleteScene(name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<PlayerController>(builder: (context, controller, _) {
+      final scenes = controller.sceneNames;
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.collections_bookmark,
+                    size: 18, color: Colors.white54),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('场景收藏',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold)),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _newScene,
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('新建场景'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: AppColors.stroke),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '列表抽屉里每个场景是一列；进入某场景后，收藏（星标/长按 OK）就落到该场景',
+              style: TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            for (final scene in scenes)
+              Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: scene == controller.activeSceneName
+                      ? Colors.amber.withValues(alpha: 0.10)
+                      : Colors.white.withValues(alpha: 0.04),
+                  borderRadius: BorderRadius.circular(8),
+                  border: scene == controller.activeSceneName
+                      ? Border.all(
+                          color: Colors.amber.withValues(alpha: 0.45))
+                      : null,
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      scene == controller.activeSceneName
+                          ? Icons.star
+                          : Icons.star_outline,
+                      size: 15,
+                      color: Colors.amber,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: scene == controller.activeSceneName
+                            ? null
+                            : () {
+                                controller.setActiveScene(scene);
+                                OsdBus.show('收藏落点已切到〈$scene〉',
+                                    icon: Icons.star);
+                                setState(() {});
+                              },
+                        child: Text(
+                          '$scene · ${SceneFavorites.countIn(scene)} 个'
+                          '${scene == controller.activeSceneName ? ' · 收藏落点' : ''}',
+                          style: const TextStyle(
+                              color: Color(0xDDFFFFFF), fontSize: 13),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '重命名',
+                      icon: const Icon(Icons.edit_outlined,
+                          size: 17, color: Colors.white54),
+                      onPressed: () => _renameScene(scene),
+                    ),
+                    // 至少保留一个场景
+                    if (scenes.length > 1)
+                      IconButton(
+                        tooltip: '删除场景',
+                        icon: const Icon(Icons.delete_outline,
+                            size: 17, color: Colors.redAccent),
+                        onPressed: () => _deleteScene(scene),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
+    });
+  }
+}
+
+// ==================== 电台别名（方案 12.3） ====================
+
+/// 个性化显示名：只改显示不动数据，列表/播放页/面板/通知栏统一生效。
+class _AliasSection extends StatefulWidget {
+  const _AliasSection();
+
+  @override
+  State<_AliasSection> createState() => _AliasSectionState();
+}
+
+class _AliasSectionState extends State<_AliasSection> {
+  final _searchController = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  InputDecoration _deco(String hint) => InputDecoration(
+        isDense: true,
+        hintText: hint,
+        hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: 0.05),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Colors.white12),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Colors.white12),
+        ),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      );
+
+  Future<void> _editAlias(Channel ch) async {
+    final controller = context.read<PlayerController>();
+    final ctl =
+        TextEditingController(text: ChannelAlias.aliasOf(ch.id) ?? '');
+    final alias = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('别名：${ch.name}'),
+        content: _ImeSafeTextField(
+          controller: ctl,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: _deco('显示名（清空 = 恢复原名）'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (alias == null || !mounted) return;
+    await controller.setChannelAlias(ch.id, alias);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<PlayerController>(builder: (context, controller, _) {
+      // 电台域全量频道：内置精选 + 我的电台 + 当前源里的电台
+      final channels = <Channel>[];
+      final seen = <String>{};
+      for (final cat in controller.radioCategories) {
+        for (final ch in cat.channels) {
+          if (seen.add(ch.id)) channels.add(ch);
+        }
+      }
+      channels.sort((a, b) => a.name.compareTo(b.name));
+      final q = _query.trim().toLowerCase();
+      final filtered = q.isEmpty
+          ? channels
+          : channels
+              .where((ch) =>
+                  ch.name.toLowerCase().contains(q) ||
+                  (ChannelAlias.aliasOf(ch.id) ?? '').toLowerCase().contains(q))
+              .toList();
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.label_outline, size: 18, color: Colors.white54),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text('电台别名',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '给台起自己的名字，只改显示，随时恢复',
+              style: TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            _ImeSafeTextField(
+              controller: _searchController,
+              onChanged: (v) => setState(() => _query = v),
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              decoration: _deco('搜索台名 / 别名'),
+            ),
+            const SizedBox(height: 6),
+            ...filtered.take(50).map((ch) {
+              final alias = ChannelAlias.aliasOf(ch.id);
+              return Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.04),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            alias == null ? ch.name : '$alias（原：${ch.name}）',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: alias == null
+                                  ? const Color(0xDDFFFFFF)
+                                  : Colors.amberAccent,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: alias == null ? '设置别名' : '修改别名',
+                      icon: Icon(Icons.edit_outlined,
+                          size: 17,
+                          color: alias == null
+                              ? Colors.white54
+                              : Colors.amberAccent),
+                      onPressed: () => _editAlias(ch),
+                    ),
+                  ],
+                ),
+              );
+            }),
+            if (filtered.length > 50)
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Text('只显示前 50 个，输入关键字缩小范围',
+                    style: TextStyle(color: Colors.white24, fontSize: 12)),
+              ),
+          ],
+        ),
+      );
+    });
+  }
+}
+
+// ==================== 录音库（方案 12.3） ====================
+
+/// 边听边录的录音管理：列出/播放/删除录音文件。
+class _RecordingsSection extends StatefulWidget {
+  const _RecordingsSection();
+
+  @override
+  State<_RecordingsSection> createState() => _RecordingsSectionState();
+}
+
+class _RecordingsSectionState extends State<_RecordingsSection> {
+  List<File> _files = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final files = await RadioRecorder.list();
+    if (mounted) setState(() => _files = files);
+  }
+
+  Future<void> _play(File f) async {
+    final controller = context.read<PlayerController>();
+    final name = f.path.split(Platform.pathSeparator).last;
+    await controller.playChannel(Channel(
+      id: 'recording:${f.path}',
+      name: name,
+      streamUrls: [f.path],
+      categoryId: '::recordings::',
+      channelType: ChannelType.radio,
+    ));
+    OsdBus.show('正在播放录音：$name', icon: Icons.graphic_eq);
+  }
+
+  Future<void> _delete(File f) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除录音？'),
+        content: Text(f.path.split(Platform.pathSeparator).last),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除', style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await RadioRecorder.delete(f.path);
+    await _refresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<PlayerController>(builder: (context, controller, _) {
+      final recording = controller.isRadioRecording;
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.graphic_eq, size: 18, color: Colors.white54),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('录音库',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold)),
+                ),
+                if (!kIsWeb &&
+                    (defaultTargetPlatform == TargetPlatform.windows ||
+                        defaultTargetPlatform == TargetPlatform.linux ||
+                        defaultTargetPlatform == TargetPlatform.macOS))
+                  OutlinedButton.icon(
+                    onPressed: () => RadioRecorder.openFolder(),
+                    icon: const Icon(Icons.folder_open, size: 16),
+                    label: const Text('打开文件夹'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: AppColors.stroke),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '播放电台时点底部面板「录音」即边听边录（原始流直存，不转码）',
+              style: TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            if (recording)
+              Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.red.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: Colors.redAccent.withValues(alpha: 0.4)),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.fiber_manual_record,
+                        size: 14, color: Colors.redAccent),
+                    SizedBox(width: 8),
+                    Text('正在录音…（底部面板可停止）',
+                        style: TextStyle(color: Color(0xDDFFFFFF), fontSize: 13)),
+                  ],
+                ),
+              ),
+            if (_files.isEmpty && !recording)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('还没有录音',
+                    style: TextStyle(color: Colors.white24, fontSize: 12.5)),
+              )
+            else
+              ..._files.map((f) {
+                final name = f.path.split(Platform.pathSeparator).last;
+                return FutureBuilder<FileStat>(
+                  future: f.stat(),
+                  builder: (context, snap) {
+                    final size = snap.data?.size ?? 0;
+                    final modified = snap.data?.modified;
+                    final when = modified == null
+                        ? ''
+                        : '${modified.year}-${modified.month.toString().padLeft(2, '0')}-${modified.day.toString().padLeft(2, '0')} '
+                            '${modified.hour.toString().padLeft(2, '0')}:${modified.minute.toString().padLeft(2, '0')}';
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.04),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: Color(0xDDFFFFFF), fontSize: 13)),
+                                Text(
+                                  '${RadioRecorder.humanSize(size)}  $when',
+                                  style: const TextStyle(
+                                      color: Colors.white38, fontSize: 11.5),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: '播放',
+                            icon: const Icon(Icons.play_circle_outline,
+                                size: 19, color: Colors.blueAccent),
+                            onPressed: () => _play(f),
+                          ),
+                          IconButton(
+                            tooltip: '删除',
+                            icon: const Icon(Icons.delete_outline,
+                                size: 17, color: Colors.redAccent),
+                            onPressed: () => _delete(f),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              }),
+          ],
+        ),
+      );
+    });
   }
 }
 

@@ -258,8 +258,10 @@ class SourceManager {
       final content = _decodePlaylistBytes(bytes);
       // 三级解析：m3u/txt 直接解析；HTML 聚合页提取 data-copy 接口地址；
       // TVBox 配置 JSON（lives）/多仓 JSON（urls）递归展开合并
-      _cachedChannels = await _resolveContent(content, source.url, 2,
-          {source.url});
+      final cats =
+          await _resolveContent(content, source.url, 2, {source.url});
+      // 导入过滤（方案 12.3）：只留 group-title/频道名命中关键字的频道
+      _cachedChannels = applyGroupFilter(cats, source.groupFilter);
       _channelsLoaded = true;
 
       // 更新最后更新时间
@@ -361,6 +363,37 @@ class SourceManager {
     }
     final format = PlaylistParser.detectFormat(content, url);
     return PlaylistParser.parse(content, format);
+  }
+
+  /// 导入分组过滤（方案 12.3）：groupFilter 逗号分隔多个关键字，
+  /// 不区分大小写、包含即命中；group-title 或频道名命中任一关键字
+  /// 的频道保留。过滤后空分类剔除；关键字为空则原样返回。
+  static List<ChannelCategory> applyGroupFilter(
+      List<ChannelCategory> cats, String groupFilter) {
+    final keys = groupFilter
+        .split(RegExp(r'[,，;；]'))
+        .map((e) => e.trim().toLowerCase())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (keys.isEmpty) return cats;
+    bool hit(Channel ch) {
+      final name = ch.name.toLowerCase();
+      final group = ch.groupTitle.toLowerCase();
+      for (final k in keys) {
+        if (name.contains(k) || group.contains(k)) return true;
+      }
+      return false;
+    }
+
+    return [
+      for (final c in cats)
+        if (c.channels.any(hit))
+          ChannelCategory(
+            id: c.id,
+            name: c.name,
+            channels: c.channels.where(hit).toList(),
+          ),
+    ];
   }
 
   /// HTML 聚合页：提取所有 data-copy 接口地址，逐个递归解析

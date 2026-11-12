@@ -254,7 +254,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            c.currentChannel?.name ?? '正在投屏',
+            c.currentChannel == null
+                ? '正在投屏'
+                : c.displayTitle(c.currentChannel!),
             style: TextStyle(
               color: Colors.white,
               fontSize: scale < 1 ? t.title - 2 : t.title,
@@ -488,7 +490,14 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isPlaying ? Icons.pause : Icons.play_arrow,
           c.isPlaying ? '暂停' : '播放',
           hasChannel ? widget.onTogglePlayPause : null),
-      if (isRadio)
+      if (isRadio) ...[
+        // 电台录音（方案 12.3）：边听边录，流内直抓不转码
+        _KbAction(
+          'radioRec',
+          c.isRadioRecording ? Icons.stop_rounded : Icons.fiber_manual_record,
+          c.isRadioRecording ? '停止录音' : '录音',
+          hasChannel ? c.toggleRadioRecord : null,
+        ),
         _KbAction(
           'sleep',
           Icons.bedtime_outlined,
@@ -497,6 +506,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
               : '定时关闭（剩 ${_fmtRemain(sleepRemain)}）',
           () => _showSleepMenu(context),
         ),
+      ],
       if (c.isDesktop && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
@@ -611,6 +621,12 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     if (tail.isNotEmpty) {
       children.add(_groupDivider(d));
       children.addAll(tail);
+    }
+
+    // 电台录音（电台专属）：边听边录，放尾部与高频操作隔开
+    if (isRadio) {
+      children.add(_groupDivider(d));
+      children.add(_btn(byId('radioRec')));
     }
 
     // 定时关闭独占最末位（电台专属）：跟换台/播放这些高频操作隔开，

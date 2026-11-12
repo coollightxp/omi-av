@@ -308,7 +308,10 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                       ),
                     ),
                     Text(
-                      controller.currentChannel?.name ?? '未选择频道',
+                      controller.currentChannel == null
+                          ? '未选择频道'
+                          : controller
+                              .displayTitle(controller.currentChannel!),
                       maxLines: 1,
                       softWrap: false,
                       overflow: TextOverflow.ellipsis,

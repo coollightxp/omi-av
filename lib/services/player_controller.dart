@@ -30,6 +30,9 @@ import 'media/omi_video.dart';
 import 'media_capture_service.dart';
 import 'radio_library.dart';
 import 'channel_blacklist.dart';
+import 'channel_alias.dart';
+import 'scene_favorites.dart';
+import 'radio_recorder.dart';
 import 'radio_catalog.dart';
 import 'radio_logo.dart';
 import 'remote_admin_service.dart';
@@ -263,22 +266,50 @@ class PlayerController extends ChangeNotifier {
   bool get isInitialized =>
       _videoController != null && _videoController!.value.isInitialized;
 
-  // 用户收藏的频道 ID（独立持久化，不改动频道/分类结构）
-  final Set<String> _favoriteChannelIds = <String>{};
-  List<String> get favoriteChannelIds =>
-      _favoriteChannelIds.toList(growable: false);
-  bool isFavoriteChannel(String id) => _favoriteChannelIds.contains(id);
+  // 场景制收藏（方案 12.3）：收藏落在「当前场景」，数据在 SceneFavorites
+  List<String> get favoriteChannelIds => SceneFavorites.allIds;
+  bool isFavoriteChannel(String id) => SceneFavorites.contains(id);
 
-  /// 聚合收藏频道：按频道在源分类中的原始顺序输出
-  List<Channel> buildFavoriteChannels() {
+  /// 全部场景名（列表抽屉按场景分组展示）
+  List<String> get sceneNames => SceneFavorites.sceneNames;
+
+  /// 当前场景名（收藏动作的落点）
+  String get activeSceneName => SceneFavorites.activeScene;
+
+  void setActiveScene(String name) => SceneFavorites.setActive(name);
+
+  /// 场景内的频道：按频道在各分类中的原始顺序输出。
+  /// 电视频道在 _categories，电台频道（内置精选/我的电台）在
+  /// _radioCategories（跨源目录）——两边都扫，id 去重
+  List<Channel> buildSceneChannels(String scene) {
+    final ids = SceneFavorites.idsIn(scene);
+    if (ids.isEmpty) return const [];
     final result = <Channel>[];
-    for (final cat in _categories) {
+    final seen = <String>{};
+    for (final cat in [..._categories, ..._radioCategories]) {
       for (final ch in cat.channels) {
-        if (_favoriteChannelIds.contains(ch.id)) result.add(ch);
+        if (seen.contains(ch.id)) continue;
+        seen.add(ch.id);
+        if (ids.contains(ch.id)) result.add(ch);
       }
     }
     return result;
   }
+
+  /// 聚合收藏频道（全部场景并集，老口径兼容）：按场景顺序去重输出
+  List<Channel> buildFavoriteChannels() {
+    final seen = <String>{};
+    final out = <Channel>[];
+    for (final n in SceneFavorites.sceneNames) {
+      for (final ch in buildSceneChannels(n)) {
+        if (seen.add(ch.id)) out.add(ch);
+      }
+    }
+    return out;
+  }
+
+  /// 显示名：有别名用别名（列表/播放页/面板/通知栏统一口径）
+  String displayTitle(Channel ch) => ChannelAlias.displayName(ch);
 
   /// 已同步给原生的「切后台自动画中画」开关状态（去重，避免每次刷新都走通道）
   bool _autoPipSynced = false;
@@ -327,6 +358,9 @@ class PlayerController extends ChangeNotifier {
     unawaited(RadioLogo.ensure());
     // 黑名单只影响换台跳过，几毫秒的事，但不阻塞启动
     unawaited(ChannelBlacklist.ensure());
+    // 别名/场景收藏同样只影响显示与列表，不阻塞启动
+    unawaited(ChannelAlias.ensure());
+    unawaited(SceneFavorites.ensure());
     // 电台目录（内置 + 我的电台）也给左侧「电台」标签备好，
     // 同样不 await：它只影响抽屉里那一列，不影响起播
     unawaited(ensureRadioCatalog());
@@ -2262,7 +2296,8 @@ class PlayerController extends ChangeNotifier {
     final program = (icy.isNotEmpty && !isJunkTrack(icy))
         ? icy
         : (currentProgram?.title ?? '');
-    final sig = '${ch.id}|$program|${isPlaying ? 1 : 0}';
+    final name = ChannelAlias.displayName(ch);
+    final sig = '${ch.id}|$name|$program|${isPlaying ? 1 : 0}';
     if (sig == _lastAudioSig) return;
     _lastAudioSig = sig;
     // 台标：源里给的优先，其次 Radio Browser 索引（与 ChannelBadge 同源）；
@@ -2270,7 +2305,7 @@ class PlayerController extends ChangeNotifier {
     final logoUrl =
         ch.logoUrl.isNotEmpty ? ch.logoUrl : RadioLogo.logoFor(ch);
     unawaited(audioNotify(
-      name: ch.name,
+      name: name,
       program: program,
       playing: isPlaying,
       logoUrl: logoUrl,
@@ -2675,7 +2710,8 @@ class PlayerController extends ChangeNotifier {
   static const _kRetryTimes = 'settings_retry_times';
   static const _kCastEndWait = 'settings_cast_end_wait_seconds';
   static const _kResumeLastChannel = 'settings_resume_last_channel';
-  static const _kFavoriteChannelIds = 'omi_favorite_channel_ids';
+  // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
+  // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
   /// 投屏结束后等待档位只认五档：0 / 60 / 300 / 600 / -1。
   /// 老版本存过 5、30 秒，统一归到"马上返回"（0），避免出现
@@ -2713,9 +2749,6 @@ class PlayerController extends ChangeNotifier {
         castEndWaitSeconds: _normalizeCastWait(p.getInt(_kCastEndWait) ?? 0),
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
       );
-      _favoriteChannelIds
-        ..clear()
-        ..addAll(p.getStringList(_kFavoriteChannelIds) ?? const <String>[]);
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
       settingsNotifier.value = _settings;
@@ -3214,25 +3247,86 @@ class PlayerController extends ChangeNotifier {
     );
   }
 
-  // ==================== 频道收藏 ====================
+  // ==================== 频道收藏（场景制） ====================
 
-  /// 切换频道收藏状态，返回切换后是否为已收藏
+  /// 切换频道收藏状态，返回切换后是否为已收藏。
+  /// 已收藏（任一场景）→ 彻底取消；未收藏 → 加入当前场景。
   Future<bool> toggleFavoriteChannel(String channelId) async {
+    await SceneFavorites.ensure();
     bool now;
-    if (_favoriteChannelIds.contains(channelId)) {
-      _favoriteChannelIds.remove(channelId);
+    if (SceneFavorites.contains(channelId)) {
+      await SceneFavorites.removeFromAll(channelId);
       now = false;
     } else {
-      _favoriteChannelIds.add(channelId);
+      await SceneFavorites.add(SceneFavorites.activeScene, channelId);
       now = true;
     }
-    try {
-      final p = await SharedPreferences.getInstance();
-      await p.setStringList(
-          _kFavoriteChannelIds, _favoriteChannelIds.toList(growable: false));
-    } catch (_) {}
     notifyListeners();
     return now;
+  }
+
+  // ==================== 场景管理（设置中心调用） ====================
+
+  Future<void> createScene(String name) async {
+    await SceneFavorites.ensure();
+    await SceneFavorites.createScene(name);
+    notifyListeners();
+  }
+
+  Future<void> renameScene(String oldName, String newName) async {
+    await SceneFavorites.ensure();
+    await SceneFavorites.renameScene(oldName, newName);
+    notifyListeners();
+  }
+
+  Future<void> deleteScene(String name) async {
+    await SceneFavorites.ensure();
+    await SceneFavorites.deleteScene(name);
+    notifyListeners();
+  }
+
+  Future<void> setChannelAlias(String channelId, String? alias) async {
+    await ChannelAlias.ensure();
+    await ChannelAlias.setAlias(channelId, alias);
+    notifyListeners();
+  }
+
+  // ==================== 电台录音（方案 12.3） ====================
+
+  bool get isRadioRecording => RadioRecorder.isRecording;
+  ValueNotifier<Duration> get radioRecElapsed => RadioRecorder.elapsed;
+
+  /// 开始/停止录音。开始失败时弹原因；成功落盘后弹保存路径。
+  Future<void> toggleRadioRecord() async {
+    if (RadioRecorder.isRecording) {
+      final path = await RadioRecorder.stop();
+      notifyListeners();
+      if (path != null) {
+        OsdBus.show('录音已保存：${path.split(RegExp(r'[\\/]')).last}',
+            icon: Icons.check_circle_outline);
+      }
+      return;
+    }
+    final ch = _currentChannel;
+    if (ch == null || !ch.isRadio || kIsWeb) return;
+    final err = await RadioRecorder.start(
+      url: ch.streamUrl,
+      name: ChannelAlias.displayName(ch),
+      userAgent: ch.userAgent,
+      referer: ch.httpReferer,
+    );
+    notifyListeners();
+    switch (err) {
+      case null:
+        OsdBus.show('开始录音（原始流直存，不转码）',
+            icon: Icons.fiber_manual_record);
+      case 'busy':
+        break;
+      case 'hls':
+        OsdBus.show('该台是 HLS 流，暂不支持录音', icon: Icons.warning_amber_rounded);
+      default:
+        OsdBus.show('录音启动失败（流不可直连）', icon: Icons.error_outline);
+    }
   }
 
   // ==================== 预约 ====================
