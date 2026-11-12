@@ -6361,10 +6361,9 @@ class _BootSplash extends StatelessWidget {
     final titleSize = (logoW * 0.26).clamp(22.0, 72.0);
     // 整体上移一点，图像再额外上移一点，和文字拉开距离
     final lift = MediaQuery.sizeOf(context).height * 0.045;
-    final imgLift = logoW * 0.12;
     return Positioned.fill(
       child: DecoratedBox(
-        // 极深暖棕 → 纯黑的径向渐变背景，比纯黑柔和、衬托暖色粒子
+        // 极深暖棕 → 纯黑的径向渐变背景
         decoration: const BoxDecoration(
           gradient: RadialGradient(
             center: Alignment(0, -0.25),
@@ -6373,74 +6372,60 @@ class _BootSplash extends StatelessWidget {
             stops: [0.0, 1.0],
           ),
         ),
-        child: Stack(
-          children: [
-            // 全屏动画层：粒子/雾团环绕 logo 公转 + 中心呼吸辉光
-            Positioned.fill(
-              child: BootAnimation(
-                logoSize: logoW,
-                centerOffset: Offset(0, -(lift + imgLift)),
-              ),
-            ),
-            Center(
-              child: Transform.translate(
-                offset: Offset(0, -(lift + imgLift)),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(height: logoW * 0.92),
-                    SizedBox(height: logoW * 0.10 + imgLift),
-                    Padding(
-                      // 抵消末字字距造成的视觉左偏
-                      padding: EdgeInsets.only(left: titleSize * 0.14),
-                      child: Text(
-                        '欧米视听',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: titleSize,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: titleSize * 0.14,
-                          height: 1.12,
-                        ),
-                      ),
-                    ),
-                  ],
+        // 原版布局：中上部图标（呼吸灯）→ 大字标题 → 下方状态数据
+        child: Center(
+          child: Transform.translate(
+            offset: Offset(0, -lift),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 呼吸灯图标
+                SizedBox(
+                  width: logoW,
+                  height: logoW,
+                  child: BootAnimation(logoSize: logoW),
                 ),
-              ),
-            ),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 44,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.4,
-                      color: Color(0xFFFFB35C),
+                SizedBox(height: logoW * 0.16),
+                Padding(
+                  // 抵消末字字距造成的视觉左偏
+                  padding: EdgeInsets.only(left: titleSize * 0.14),
+                  child: Text(
+                    '欧米视听',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: titleSize,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: titleSize * 0.14,
+                      height: 1.12,
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  // 状态文字切换时淡入，避免生硬跳变
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 350),
-                    child: Text(
-                      status.isEmpty ? '正在启动…' : status,
-                      key: ValueKey(status),
-                      style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 13,
-                      ),
+                ),
+                SizedBox(height: titleSize * 0.9),
+                const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.4,
+                    color: Color(0xFFFFB35C),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // 状态文字切换时淡入，避免生硬跳变
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 350),
+                  child: Text(
+                    status.isEmpty ? '正在启动…' : status,
+                    key: ValueKey(status),
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 13,
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
