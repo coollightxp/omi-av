@@ -4,9 +4,10 @@ import 'package:flutter/services.dart';
 /// 通知栏音频卡片（含上一台/暂停/下一台/关闭）。
 ///
 /// 原生实现由 CI 在 flutter create 生成 android/ 工程时注入
-/// （MainActivity + AudioPlaybackService，AndroidManifest 开启
-/// supportsPictureInPicture / 前台服务权限）。其他平台没有该通道，
-/// 调用会抛 MissingPluginException，这里统一吞掉并返回 false。
+/// （MainActivity + MediaService：画中画、听电视退后台、
+/// 通知栏/锁屏音频卡片；AndroidManifest 开启 supportsPictureInPicture /
+/// 前台服务权限）。其他平台没有该通道，调用会抛
+/// MissingPluginException，这里统一吞掉并返回 false。
 const MethodChannel _channel = MethodChannel('omi/pip');
 
 void Function(bool active)? _pipCb;
@@ -94,27 +95,27 @@ Future<bool> openNotifSettings() async {
   }
 }
 
-/// 更新通知栏「音频播放」卡片（前台服务，含上一台/暂停/下一台/关闭）
-/// [logo]/[logoKey] 为当前频道台标 PNG 的 base64 与标识：
-/// 原生把它作为卡片右侧大图与锁屏封面（变化时才重新解码）
+/// 更新通知栏/锁屏音频卡片（MediaService 前台服务 + MediaSession，
+/// LXFM 同款电台体验）：台名 + 当前曲目 + 播放态按钮
+/// （上一台/播放暂停/下一台/关闭），锁屏与下拉栏同卡。
+/// [logoUrl] 为当前频道台标图：原生下载后作为卡片大图与锁屏封面
+/// （URL 变化才重新下载，失败静默回落应用图标）。
 Future<void> audioNotify(
     {required String name,
     required String program,
     required bool playing,
-    String logo = '',
-    String logoKey = ''}) async {
+    String logoUrl = ''}) async {
   try {
     await _channel.invokeMethod('audioUpdate', {
       'name': name,
       'program': program,
       'playing': playing,
-      'logo': logo,
-      'logoKey': logoKey,
+      'logo': logoUrl,
     });
   } catch (_) {}
 }
 
-/// 关闭通知栏卡片（退出听电视时）
+/// 关闭通知栏/锁屏卡片（退出听电视时）
 Future<void> audioStop() async {
   try {
     await _channel.invokeMethod('audioStop');
@@ -127,7 +128,7 @@ void listenPipState(void Function(bool active)? cb) {
   _ensureHandler();
 }
 
-/// 注册通知栏卡片命令回调（playpause / prev / next / stop / restore）
+/// 注册通知栏/锁屏卡片命令回调（playpause / prev / next / stop / restore）
 void listenAudioCommands(void Function(String cmd)? cb) {
   _audioCb = cb;
   _ensureHandler();

@@ -2235,10 +2235,15 @@ class PlayerController extends ChangeNotifier {
     final sig = '${ch.id}|$program|${isPlaying ? 1 : 0}';
     if (sig == _lastAudioSig) return;
     _lastAudioSig = sig;
+    // 台标：源里给的优先，其次 Radio Browser 索引（与 ChannelBadge 同源）；
+    // 原生下载做卡片大图 + 锁屏封面，失败回落应用图标
+    final logoUrl =
+        ch.logoUrl.isNotEmpty ? ch.logoUrl : RadioLogo.logoFor(ch);
     unawaited(audioNotify(
       name: ch.name,
       program: program,
       playing: isPlaying,
+      logoUrl: logoUrl,
     ));
   }
 

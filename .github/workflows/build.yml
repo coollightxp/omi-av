@@ -98,10 +98,13 @@ jobs:
           package $PKG
 
           import android.app.PictureInPictureParams
+          import android.content.Intent
           import android.content.pm.PackageManager
           import android.content.res.Configuration
           import android.os.Build
+          import android.provider.Settings
           import android.util.Rational
+          import androidx.core.app.NotificationManagerCompat
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
@@ -113,24 +116,58 @@ jobs:
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
-                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-                      .setMethodCallHandler { call, result ->
+                  val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+                  // 通知栏/锁屏卡片（MediaService）经同一通道向 Dart 发按钮命令
+                  MediaService.dart = ch
+                  ch.setMethodCallHandler { call, result ->
                           when (call.method) {
                               "enter" -> result.success(enterPip())
                               "exit" -> result.success(true)
                               "isTv" -> result.success(isTv())
-                              "notifGranted" -> result.success(true)
-                              "openNotifSettings" -> result.success(false)
-                              "background" -> result.success(false)
+                              "notifGranted" -> result.success(
+                                  NotificationManagerCompat.from(this).areNotificationsEnabled())
+                              "openNotifSettings" -> result.success(openNotifSettings())
+                              // 听电视：整任务退到后台但不杀进程，音频继续
+                              "background" -> result.success(moveTaskToBack(true))
                               "setAutoPip" -> {
                                   autoPipArmed = call.argument<Boolean>("armed") == true
                                   setAutoEnterEnabled(autoPipArmed)
                                   result.success(true)
                               }
-                              "audioUpdate", "audioStop" -> result.success(true)
+                              "audioUpdate" -> {
+                                  MediaService.update(
+                                      this,
+                                      call.argument<String>("name") ?: "",
+                                      call.argument<String>("program") ?: "",
+                                      call.argument<Boolean>("playing") == true,
+                                      call.argument<String>("logo") ?: "")
+                                  result.success(true)
+                              }
+                              "audioStop" -> {
+                                  MediaService.stop(this)
+                                  result.success(true)
+                              }
                               else -> result.notImplemented()
                           }
                       }
+              }
+
+              private fun openNotifSettings(): Boolean {
+                  return try {
+                      val i = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                      i.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(i)
+                      true
+                  } catch (e: Exception) {
+                      try {
+                          val j = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                          j.setData(android.net.Uri.fromParts("package", packageName, null))
+                          j.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                          startActivity(j)
+                          true
+                      } catch (e2: Exception) { false }
+                  }
               }
 
               private fun enterPip(): Boolean {
@@ -187,6 +224,261 @@ jobs:
             echo "MainActivity patched: $ACTIVITY (package=$PKG)"
           else
             echo "::warning::MainActivity.kt not found, PiP entry will be unavailable"
+          fi
+
+          # 通知栏/锁屏音频卡片（MediaService）：前台服务持有 MediaSession，
+          # 下拉栏与锁屏显示 台标+台名+曲目+按钮（上一台/播放暂停/下一台/关闭），
+          # 按钮命令经 omi/pip 通道回 Dart。LXFM 同款电台体验。
+          if [ -n "$ACTIVITY" ]; then
+            ACTDIR=$(dirname "$ACTIVITY")
+            cat > "$ACTDIR/MediaService.kt" <<KOTLIN
+          package $PKG
+
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.os.Build
+          import android.os.IBinder
+          import android.support.v4.media.MediaMetadataCompat
+          import android.support.v4.media.session.MediaSessionCompat
+          import android.support.v4.media.session.PlaybackStateCompat
+          import androidx.core.app.NotificationCompat
+          import androidx.media.app.NotificationCompat as MediaNotificationCompat
+          import io.flutter.plugin.common.MethodChannel
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          class MediaService : Service() {
+              companion object {
+                  const val NOTIF_ID = 20260101
+                  const val CH_ID = "omi_audio"
+                  // Dart 命令通道（MainActivity.configureFlutterEngine 时赋值）
+                  @Volatile var dart: MethodChannel? = null
+                  @Volatile private var live: MediaService? = null
+
+                  fun update(ctx: android.content.Context, name: String, program: String,
+                             playing: Boolean, logoUrl: String) {
+                      val i = Intent(ctx, MediaService::class.java)
+                          .setAction("omi.audio.UPDATE")
+                          .putExtra("name", name)
+                          .putExtra("program", program)
+                          .putExtra("playing", playing)
+                          .putExtra("logo", logoUrl)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          ctx.startForegroundService(i)
+                      } else {
+                          ctx.startService(i)
+                      }
+                  }
+
+                  fun stop(ctx: android.content.Context) {
+                      val s = live
+                      if (s != null) {
+                          s.stopCard()
+                      } else {
+                          val i = Intent(ctx, MediaService::class.java).setAction("omi.audio.STOP")
+                          ctx.startService(i)
+                      }
+                  }
+
+                  private fun send(cmd: String) {
+                      try { dart?.invokeMethod("audio", cmd) } catch (e: Exception) {}
+                  }
+              }
+
+              private var session: MediaSessionCompat? = null
+              private var logoBitmap: Bitmap? = null
+              private var logoLoaded = ""
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  live = this
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                      if (nm.getNotificationChannel(CH_ID) == null) {
+                          val c = NotificationChannel(CH_ID, "电台播放",
+                              NotificationManager.IMPORTANCE_LOW)
+                          c.setShowBadge(false)
+                          nm.createNotificationChannel(c)
+                      }
+                  }
+                  val s = MediaSessionCompat(this, "omi")
+                  s.setCallback(object : MediaSessionCompat.Callback() {
+                      override fun onPlay() { send("playpause") }
+                      override fun onPause() { send("playpause") }
+                      override fun onSkipToNext() { send("next") }
+                      override fun onSkipToPrevious() { send("prev") }
+                      override fun onStop() { send("stop") }
+                  })
+                  s.isActive = true
+                  session = s
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  when (intent?.action) {
+                      "omi.audio.UPDATE" -> showCard(
+                          intent.getStringExtra("name") ?: "",
+                          intent.getStringExtra("program") ?: "",
+                          intent.getBooleanExtra("playing", true),
+                          intent.getStringExtra("logo") ?: "")
+                      "omi.audio.STOP" -> stopCard()
+                      "prev" -> send("prev")
+                      "next" -> send("next")
+                      "playpause" -> send("playpause")
+                      "stop" -> { send("stop"); stopCard() }
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun showCard(name: String, program: String, playing: Boolean, logoUrl: String) {
+                  val s = session ?: return
+                  if (logoUrl.isNotEmpty() && logoUrl != logoLoaded) {
+                      // 先用现有封面立即出卡片（保证 startForeground 5 秒时限），
+                      // 台标下载完成后再刷一次
+                      post(s, name, program, playing, logoBitmap)
+                      val bm = logoBitmap
+                      Thread {
+                          val b = fetchBitmap(logoUrl)
+                          if (b != null) {
+                              logoBitmap = b
+                              logoLoaded = logoUrl
+                              post(s, name, program, playing, b)
+                          }
+                      }.start()
+                  } else {
+                      post(s, name, program, playing, logoBitmap)
+                  }
+              }
+
+              private fun post(s: MediaSessionCompat, name: String, program: String,
+                               playing: Boolean, logo: Bitmap?) {
+                  val md = MediaMetadataCompat.Builder()
+                      .putString(MediaMetadataCompat.METADATA_KEY_TITLE, name)
+                      .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, program)
+                  if (logo != null) {
+                      md.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, logo)
+                      md.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, logo)
+                  }
+                  s.setMetadata(md.build())
+                  val state = if (playing) PlaybackStateCompat.STATE_PLAYING
+                              else PlaybackStateCompat.STATE_PAUSED
+                  s.setPlaybackState(PlaybackStateCompat.Builder()
+                      .setActions(PlaybackStateCompat.ACTION_PLAY
+                          or PlaybackStateCompat.ACTION_PAUSE
+                          or PlaybackStateCompat.ACTION_PLAY_PAUSE
+                          or PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+                          or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                          or PlaybackStateCompat.ACTION_STOP)
+                      .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 0f)
+                      .build())
+                  s.isActive = true
+
+                  val b = NotificationCompat.Builder(this, CH_ID)
+                      .setSmallIcon(applicationInfo.icon)
+                      .setContentTitle(name)
+                      .setContentText(program)
+                      .setLargeIcon(logo)
+                      .setContentIntent(openPi())
+                      .setDeleteIntent(cmdPi("stop"))
+                      .setOnlyAlertOnce(true)
+                      .setOngoing(playing)
+                      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                      .addAction(android.R.drawable.ic_media_previous, "上一台", cmdPi("prev"))
+                      .addAction(if (playing) android.R.drawable.ic_media_pause
+                                 else android.R.drawable.ic_media_play,
+                                 if (playing) "暂停" else "播放", cmdPi("playpause"))
+                      .addAction(android.R.drawable.ic_media_next, "下一台", cmdPi("next"))
+                      .addAction(android.R.drawable.ic_menu_close_clear_cancel, "关闭", cmdPi("stop"))
+                      .setStyle(MediaNotificationCompat.MediaStyle()
+                          .setMediaSession(s.sessionToken)
+                          .setShowActionsInCompactView(0, 1, 2))
+                  val n = b.build()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      startForeground(NOTIF_ID, n,
+                          android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                  } else {
+                      startForeground(NOTIF_ID, n)
+                  }
+              }
+
+              private fun cmdPi(cmd: String): PendingIntent {
+                  val i = Intent(this, MediaService::class.java).setAction(cmd)
+                  var f = PendingIntent.FLAG_UPDATE_CURRENT
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      f = f or PendingIntent.FLAG_IMMUTABLE
+                  }
+                  return PendingIntent.getService(this, cmd.hashCode(), i, f)
+              }
+
+              private fun openPi(): PendingIntent {
+                  val i = packageManager.getLaunchIntentForPackage(packageName)
+                  if (i != null) {
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                  }
+                  var f = PendingIntent.FLAG_UPDATE_CURRENT
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      f = f or PendingIntent.FLAG_IMMUTABLE
+                  }
+                  return PendingIntent.getActivity(this, 1, i, f)
+              }
+
+              private fun fetchBitmap(url: String): Bitmap? {
+                  return try {
+                      val conn = URL(url).openConnection() as HttpURLConnection
+                      conn.connectTimeout = 5000
+                      conn.readTimeout = 5000
+                      conn.instanceFollowRedirects = true
+                      if (conn.responseCode != 200) {
+                          conn.disconnect()
+                          null
+                      } else {
+                          BitmapFactory.decodeStream(conn.inputStream)
+                      }
+                  } catch (e: Exception) { null }
+              }
+
+              fun stopCard() {
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                          stopForeground(STOP_FOREGROUND_REMOVE)
+                      } else {
+                          stopForeground(true)
+                      }
+                  } catch (e: Exception) {}
+                  try {
+                      (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_ID)
+                  } catch (e: Exception) {}
+                  live = null
+                  stopSelf()
+              }
+
+              override fun onDestroy() {
+                  live = null
+                  try { session?.release() } catch (e: Exception) {}
+                  session = null
+                  super.onDestroy()
+              }
+          }
+          KOTLIN
+            echo "MediaService patched: $ACTDIR/MediaService.kt"
+
+            # androidx.media（MediaSessionCompat / MediaStyle）
+            grep -q "androidx.media:media" android/app/build.gradle || cat >> android/app/build.gradle <<GRADLE
+
+          dependencies {
+              implementation 'androidx.media:media:1.7.0'
+          }
+          GRADLE
+
+            # 前台服务声明（mediaPlayback 类型）
+            MANIFEST=android/app/src/main/AndroidManifest.xml
+            grep -q ".MediaService" $MANIFEST || sed -i 's#</application>#    <service android:name=".MediaService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>#' $MANIFEST
           fi
 
       - name: Install dependencies
