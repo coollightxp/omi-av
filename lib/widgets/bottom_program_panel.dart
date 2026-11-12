@@ -265,6 +265,35 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
 
   Widget _buildInfo(PlayerController c, double scale) {
     final t = AppTypography.of(context);
+    // 投屏态：信息区换成"正在投屏 · 片名/频道名"，不显示 EPG 节目
+    if (c.isCasting) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            c.currentChannel?.name ?? '正在投屏',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: scale < 1 ? t.title - 2 : t.title,
+              fontWeight: FontWeight.bold,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          SizedBox(height: scale < 1 ? 3 : 5),
+          Row(children: [
+            const Icon(Icons.cast_connected,
+                size: 14, color: Color(0xFFFFB35C)),
+            const SizedBox(width: 6),
+            Text(
+              c.dlnaName.isNotEmpty ? '正在投屏 · ${c.dlnaName}' : '正在投屏',
+              style: TextStyle(color: Colors.white54, fontSize: t.body),
+            ),
+          ]),
+        ],
+      );
+    }
     final info = c.getNowPlayingInfo();
     final current = c.currentProgram;
     final next = c.nextProgram;
@@ -355,6 +384,38 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
 
   Widget _buildButtons(PlayerController c) {
     final hasVideo = c.currentChannel != null;
+    // 投屏态：播放会话由发送端控制，只保留必要操作
+    if (c.isCasting) {
+      final castActions = <_KbAction>[
+        _KbAction(
+            'playpause',
+            c.isPlaying ? Icons.pause : Icons.play_arrow,
+            c.isPlaying ? '暂停' : '播放',
+            widget.onTogglePlayPause),
+        if (c.isDesktop)
+          _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
+              c.isMuted ? '取消静音' : '静音', c.toggleMute),
+        _KbAction(
+            'rotate',
+            Icons.screen_rotation,
+            c.videoRotation.value == 0
+                ? '旋转画面'
+                : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
+            c.cycleVideoRotation),
+        _KbAction('cast', Icons.cast_connected, '断开投屏',
+            c.stopCastAndRestore),
+      ];
+      _actions = castActions;
+      if (_kbId != null && !castActions.any((a) => a.id == _kbId)) {
+        _kbId = null;
+      }
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        for (final a in castActions) ...[
+          _btn(a, big: a.id == 'playpause'),
+          if (a.id == 'rotate') _groupDivider(AppDensity.of(context)),
+        ],
+      ]);
+    }
     // 可用动作：禁用按钮不进列表，遥控器只会高亮能点的按钮
     final actions = <_KbAction>[
       // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
