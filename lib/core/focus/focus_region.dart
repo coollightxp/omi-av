@@ -1,5 +1,3 @@
-import 'package:flutter/widgets.dart';
-
 /// 焦点区域枚举：全 App 所有可能持有焦点的区域。
 ///
 /// [player] 是栈底常驻区域；其余区域通过 FocusCoordinator.push 压栈获得

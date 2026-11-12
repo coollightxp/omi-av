@@ -10,6 +10,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../models/channel.dart';
 import '../services/osd_bus.dart';
 import '../services/pip.dart';
 import '../services/player_controller.dart';
@@ -80,6 +81,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   // 切台 OSD
   Timer? _osdTimer;
   bool _osdVisible = false;
+
+  // 换台防抖：方向键换台时 OSD 立即显示目标频道（[_osdPreview]），
+  // 停顿 450ms 后才真正切流。长按连换时每次都重置计时，松手才播最后一个，
+  // 避免逐台起播卡顿与"停在很后面的频道"竞态
+  Timer? _tuneDebounce;
+  Channel? _osdPreview;
 
   // 数字选台输入缓存
   String _numBuffer = '';
@@ -467,6 +474,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _drawerHideTimer?.cancel();
     _osdTimer?.cancel();
     _numTimer?.cancel();
+    _tuneDebounce?.cancel();
     _okLongTimer?.cancel();
     _arrowLongTimer?.cancel();
     _menuLongTimer?.cancel();
@@ -907,6 +915,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 安卓返回键/遥控器返回处理（PopScope 拦截后调用）：
   /// 按层级关闭 设置→投屏→面板→全屏；都没有时弹退出确认
   Future<void> _handleBackPressed() async {
+    // 数字选台输入中：返回键 = 取消输入（清缓存并隐藏 OSD），
+    // 不落入退出确认等后续分支
+    if (_numBuffer.isNotEmpty) {
+      _numTimer?.cancel();
+      setState(() {
+        _numBuffer = '';
+        _osdVisible = false;
+      });
+      return;
+    }
     // 关机确认卡片：返回键 = 取消关机
     if (_shutdownDialogOpen) {
       _confirmShutdown(false);
@@ -2172,10 +2190,26 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // ==================== 切台 OSD / 时钟 ====================
 
+  /// 数字选台部分匹配提示后缀：有匹配 → " → CCTV-1 综合"；
+  /// 无匹配 → "（无此频道号）"。取输入序号的前缀匹配
+  String _numPreviewSuffix(PlayerController controller) {
+    final number = int.tryParse(_numBuffer);
+    if (number == null) return '';
+    final preview = controller.previewChannelByNumber(number);
+    if (preview == null) return '（无此频道号）';
+    if (preview.name == (controller.currentChannel?.name)) return '';
+    return ' → ${preview.name}';
+  }
+
   Widget _buildChannelOsd(PlayerController controller) {
-    final ch = controller.currentChannel;
-    final program = controller.currentProgram?.title;
-    final number = controller.currentChannelNumber;
+    // 换台防抖期间显示预览频道（尚未真正切流）：
+    // 序号取预览频道；节目名仅真实播放中显示（预览时拿不到且会误导）
+    final ch = _osdPreview ?? controller.currentChannel;
+    final number = _osdPreview != null
+        ? controller.channelNumberOf(_osdPreview)
+        : controller.currentChannelNumber;
+    final program =
+        _osdPreview == null ? controller.currentProgram?.title : null;
     final showOsd = (_osdVisible && ch != null) || _numBuffer.isNotEmpty;
     final isPhone = defaultTargetPlatform == TargetPlatform.android &&
         MediaQuery.of(context).size.shortestSide < 600;
@@ -2242,12 +2276,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       ),
                     ],
                   ),
-                  // 数字选台输入提示
+                  // 数字选台输入提示：已输入数字 + 部分匹配的频道名（灰字）
                   if (_numBuffer.isNotEmpty)
                     Padding(
                       padding: EdgeInsets.only(top: isPhone ? 5 : 8),
                       child: Text(
-                        '输入: $_numBuffer',
+                        '输入: $_numBuffer${_numPreviewSuffix(controller)}',
                         style: TextStyle(
                           color: Colors.blueAccent,
                           fontSize: isPhone ? 12 : 14,
@@ -2482,10 +2516,33 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'nextSource':
         controller.nextSource();
       case 'prevChannel':
-        controller.previousChannel();
+        _requestTune(controller, -1);
       case 'nextChannel':
-        controller.nextChannel();
+        _requestTune(controller, 1);
     }
+  }
+
+  /// 换台防抖：OSD 立即显示目标频道，停顿 450ms 后才真正切流。
+  /// 长按连换时计时被不断重置，松手后播放最后一个目标；
+  /// 换流失败时清除预览，避免 OSD 停留在没播出来的频道上
+  void _requestTune(PlayerController controller, int delta) {
+    final target = controller.adjacentChannel(delta);
+    if (target == null) return;
+    _osdTimer?.cancel();
+    _tuneDebounce?.cancel();
+    setState(() {
+      _osdPreview = target;
+      _osdVisible = true;
+    });
+    _osdTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted) setState(() => _osdVisible = false);
+    });
+    _tuneDebounce = Timer(const Duration(milliseconds: 450), () {
+      _tuneDebounce = null;
+      controller.playChannel(target).whenComplete(() {
+        if (mounted) setState(() => _osdPreview = null);
+      });
+    });
   }
 
   /// 钩子按住期间系统会重复发 WM_KEYDOWN：记录已按下动作去重，

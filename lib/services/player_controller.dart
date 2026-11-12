@@ -1557,6 +1557,29 @@ class PlayerController extends ChangeNotifier {
   /// 下一个频道
   Future<void> nextChannel() => playAdjacentChannel(1);
 
+  /// 查询相邻频道（不触发播放）。
+  /// 供换台防抖预览：OSD 立即显示目标频道，停顿后 playChannel 真正切流
+  Channel? adjacentChannel(int delta) {
+    final all = flatChannels;
+    if (all.isEmpty) return null;
+    if (_currentChannel == null) return all.first;
+    final idx = all.indexWhere((c) => c.id == _currentChannel!.id);
+    if (idx < 0) return all.first;
+    return all[(idx + delta + all.length) % all.length];
+  }
+
+  /// 数字选台部分匹配：返回序号以 [buffer] 开头的第一个频道。
+  /// 供输入提示"123 → CCTV-1 综合"；无匹配返回 null
+  Channel? previewChannelByNumber(int buffer) {
+    if (buffer <= 0) return null;
+    final all = flatChannels;
+    final prefix = buffer.toString();
+    for (var i = 0; i < all.length; i++) {
+      if ((i + 1).toString().startsWith(prefix)) return all[i];
+    }
+    return null;
+  }
+
   /// 按偏移量切换频道（跨分类、循环）
   Future<void> playAdjacentChannel(int delta) async {
     final all = [for (final cat in _categories) ...cat.channels];

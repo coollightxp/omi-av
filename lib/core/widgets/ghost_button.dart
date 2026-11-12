@@ -56,7 +56,7 @@ class _GhostButtonState extends State<GhostButton> {
     // 尺寸：基准 × (主控 1.2)；电视档基准值本身已大，不再乘滑块避免溢出
     final size = d.buttonSize * (isPrimary ? 1.2 : 1.0);
 
-    final hasFocus = Focus.of(context)?.hasFocus ?? false;
+    final hasFocus = Focus.of(context).hasFocus;
     final highlighted = _hovering || hasFocus;
 
     final button = AnimatedScale(
