@@ -224,7 +224,10 @@ class PlayerController extends ChangeNotifier {
   void notifyListeners() {
     super.notifyListeners();
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
-    final armed = isPlaying && !_isCasting && !_isTv;
+    // 电台没有画面，进画中画只会得到一个小黑窗：电台应该在通知栏
+    // 用音频卡片（上一台/暂停/下一台）控制，而不是切小窗
+    final audioOnly = _currentChannel?.isRadio ?? false;
+    final armed = isPlaying && !_isCasting && !_isTv && !audioOnly;
     if (armed == _autoPipSynced) return;
     _autoPipSynced = armed;
     setAutoPip(armed);
@@ -2539,7 +2542,10 @@ class PlayerController extends ChangeNotifier {
     final isBuf = v.isBuffering;
     final vw = v.size.width.toInt();
     final vh = v.size.height.toInt();
-    final noVideo = vw <= 0 || vh <= 0;
+    // 电台流没有视频轨，尺寸恒为 0：不能走「有声无画」恢复，
+    // 否则会每 8 秒重建一次连接、电台永远起不来
+    final noVideo = !(_currentChannel?.isRadio ?? false) &&
+        (vw <= 0 || vh <= 0);
 
     // buffering 持续计时。两条豁免规则：
     // 1. 已缓冲末尾仍在增长 = 下载在推进只是慢（长视频远距 seek 后 CDN

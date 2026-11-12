@@ -823,17 +823,35 @@ class _ChannelTile extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    channel.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: isSelected ? Colors.blueAccent : Colors.white,
-                      fontSize: t.listItem,
-                      height: 1.2,
-                      fontWeight:
-                          isSelected ? FontWeight.bold : FontWeight.normal,
-                    ),
+                  Row(
+                    children: [
+                      // 电台徽标：与电视区分（电台没有画面，播放页是
+                      // Now Playing 卡片）
+                      if (channel.isRadio) ...[
+                        Icon(Icons.podcasts,
+                            size: 13,
+                            color: isSelected
+                                ? Colors.blueAccent
+                                : Colors.white54),
+                        const SizedBox(width: 4),
+                      ],
+                      Expanded(
+                        child: Text(
+                          channel.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color:
+                                isSelected ? Colors.blueAccent : Colors.white,
+                            fontSize: t.listItem,
+                            height: 1.2,
+                            fontWeight: isSelected
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                   // 正在播出的节目名（无 EPG 数据时整行不显示）
                   if (nowTitle.isNotEmpty)

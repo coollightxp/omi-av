@@ -44,6 +44,47 @@ class PlaylistParser {
   /// 频道名合并时的噪声字符（空格、横线、下划线、括号）
   static final _mergeNoiseRe = RegExp(r'[\s\-_（）()\[\]]');
 
+  /// 纯音频流后缀（电台）：命中即按电台处理。故意不含 m3u8——
+  /// 音频型 HLS 与视频流无法从地址区分，交给属性/分组名判断
+  static final _audioExtRe = RegExp(
+      r'\.(mp3|aac|m4a|ogg|opus|flac|wma|mp2|ac3)([?#].*)?$',
+      caseSensitive: false);
+
+  /// 分组名里的电台词（含中英；用词边界避免 "Radio China TV" 之类误判）
+  static final _radioGroupRe =
+      RegExp(r'(电台|广播|收音机|radio|fm\b)', caseSensitive: false);
+
+  /// 判定频道类型：显式属性 > 音频后缀 > 分组名。
+  ///
+  /// 显式优先是硬要求——有些源把音频 HLS 挂在"卫视"组里，
+  /// 也有源把带画面的"广播"直播挂在电台组，属性写了就听属性。
+  static ChannelType _detectType({
+    required String url,
+    required Map<String, String> attrs,
+    required String groupTitle,
+    required String name,
+  }) {
+    final explicit = (attrs['radio'] ??
+            attrs['tvg-type'] ??
+            attrs['type'] ??
+            '')
+        .toLowerCase()
+        .trim();
+    if (explicit == 'true' || explicit == 'radio' || explicit == 'audio') {
+      return ChannelType.radio;
+    }
+    if (explicit == 'false' || explicit == 'tv' || explicit == 'video') {
+      return ChannelType.tv;
+    }
+    if (_audioExtRe.hasMatch(url)) return ChannelType.radio;
+    // 分组名与频道名都看一眼：有些源整份是电台、分组叫"音乐"，
+    // 但频道名叫"XX 广播电台"
+    if (_radioGroupRe.hasMatch(groupTitle) || _radioGroupRe.hasMatch(name)) {
+      return ChannelType.radio;
+    }
+    return ChannelType.tv;
+  }
+
   /// 根据【内容】判断格式（后缀名不可靠：.php 可能返回 M3U 也可能返回
   /// TXT，.nzk 等自定义后缀实际是 TXT）
   static PlaylistFormat detectFormat(String content, String url) {
@@ -157,6 +198,12 @@ class PlaylistParser {
             streamUrls: [url],
             categoryId: '未分类',
             groupTitle: '未分类',
+            channelType: _detectType(
+              url: url,
+              attrs: const {},
+              groupTitle: '未分类',
+              name: fallbackName,
+            ),
           ));
         }
       }
@@ -203,6 +250,12 @@ class PlaylistParser {
         tvgId: tvgId,
         tvgName: tvgName,
         userAgent: ua,
+        channelType: _detectType(
+          url: url,
+          attrs: attrs,
+          groupTitle: groupTitle,
+          name: name,
+        ),
       );
     } catch (_) {
       return null;
@@ -244,6 +297,12 @@ class PlaylistParser {
               streamUrls: [gluedUrl],
               categoryId: currentGroup,
               groupTitle: currentGroup,
+              channelType: _detectType(
+                url: gluedUrl,
+                attrs: const {},
+                groupTitle: currentGroup,
+                name: gluedName,
+              ),
             ));
           }
         }
@@ -271,6 +330,12 @@ class PlaylistParser {
               streamUrls: urls3,
               categoryId: name,
               groupTitle: name,
+              channelType: _detectType(
+                url: urls3.first,
+                attrs: const {},
+                groupTitle: name,
+                name: mid,
+              ),
             ));
             continue;
           }
@@ -286,6 +351,12 @@ class PlaylistParser {
         streamUrls: urls,
         categoryId: currentGroup,
         groupTitle: currentGroup,
+        channelType: _detectType(
+          url: urls.first,
+          attrs: const {},
+          groupTitle: currentGroup,
+          name: name,
+        ),
       ));
     }
 

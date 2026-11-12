@@ -27,6 +27,12 @@ class ChannelCategory {
   }
 }
 
+/// 频道类型：电视（默认）/ 电台
+///
+/// 电台不是独立入口：与电视共用同一份源与列表，解析时按属性/地址后缀/
+/// 分组名自动识别，列表里带类型徽标。
+enum ChannelType { tv, radio }
+
 /// 直播频道
 class Channel {
   final String id;
@@ -49,6 +55,13 @@ class Channel {
   /// 播放该频道流时要求的 HTTP Referer（网页嗅探出的真实流通常
   /// 校验 Referer/Origin 防盗链）
   final String httpReferer;
+
+  /// 电视 / 电台。电台走音频模式：不显示视频区，播放页换成
+  /// Now Playing 卡片（台标 + 台名 + 正在播曲目）
+  final ChannelType channelType;
+
+  /// 是否电台
+  bool get isRadio => channelType == ChannelType.radio;
 
   /// 默认播放源（第一个）
   String get streamUrl => streamUrls.first;
@@ -112,6 +125,7 @@ class Channel {
     this.groupTitle = '',
     this.userAgent = '',
     this.httpReferer = '',
+    this.channelType = ChannelType.tv,
   });
 
   Channel copyWith({
@@ -126,6 +140,7 @@ class Channel {
     String? groupTitle,
     String? userAgent,
     String? httpReferer,
+    ChannelType? channelType,
   }) {
     return Channel(
       id: id ?? this.id,
@@ -139,6 +154,7 @@ class Channel {
       groupTitle: groupTitle ?? this.groupTitle,
       userAgent: userAgent ?? this.userAgent,
       httpReferer: httpReferer ?? this.httpReferer,
+      channelType: channelType ?? this.channelType,
     );
   }
 }

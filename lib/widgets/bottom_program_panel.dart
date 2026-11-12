@@ -384,7 +384,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   // ==================== 控制按钮 ====================
 
   Widget _buildButtons(PlayerController c) {
-    final hasVideo = c.currentChannel != null;
+    final hasChannel = c.currentChannel != null;
+    // 电台没有画面：旋转/截图/录制无意义，置灰；播放/暂停仍可用
+    final hasVideo = hasChannel && !(c.currentChannel?.isRadio ?? false);
     // 投屏态：播放会话由发送端控制，只保留必要操作
     if (c.isCasting) {
       final castActions = <_KbAction>[
@@ -435,7 +437,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           'playpause',
           c.isPlaying ? Icons.pause : Icons.play_arrow,
           c.isPlaying ? '暂停' : '播放',
-          hasVideo ? widget.onTogglePlayPause : null),
+          hasChannel ? widget.onTogglePlayPause : null),
       if (c.isDesktop) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
