@@ -39,6 +39,9 @@ dependencies:
   # 桌面窗口管理（双击全屏，仅 Windows/macOS/Linux 生效）
   window_manager: ^0.5.2
 
+  # Windows 系统托盘（后台播放/摸鱼模式的容器，仅 Windows 生效）
+  system_tray: ^2.0.3
+
   # 日期时间格式化
   intl: ^0.20.2
 
@@ -95,3 +98,5 @@ flutter:
     - assets/logos/
     # 出厂内置电台精选（电视伴音 / 央广 / 省市台 / 音乐 / 故事）
     - assets/radio/
+    # Windows 系统托盘图标（后台播放/摸鱼模式）
+    - assets/tray/

@@ -33,6 +33,7 @@ import 'channel_blacklist.dart';
 import 'channel_alias.dart';
 import 'scene_favorites.dart';
 import 'radio_recorder.dart';
+import 'tray_service.dart';
 import 'radio_catalog.dart';
 import 'radio_logo.dart';
 import 'remote_admin_service.dart';
@@ -351,6 +352,8 @@ class PlayerController extends ChangeNotifier {
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
     _isTv = await isTvDevice();
     tvModeNotifier.value = _isTv;
+    // Windows 托盘：后台播放/摸鱼模式的容器（不阻塞启动）
+    unawaited(bindTrayHandlers());
     _boot('正在加载节目源…');
     await sourceManager.loadFromPrefs();
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
@@ -2283,7 +2286,8 @@ class PlayerController extends ChangeNotifier {
   /// 通知栏/锁屏卡片：只在电台域出现（电视正常播放有画面，不需要）。
   /// 台名 + 当前曲目 + 播放态，变化时才推给原生，避免每 500ms 跨通道。
   void _syncAudioNotification() {
-    if (!_androidNative) return;
+    // 电视/盒子不做后台播放：没有通知栏，息屏也不该挂着前台服务
+    if (!_androidNative || _isTv) return;
     final ch = _currentChannel;
     if (ch == null || !ch.isRadio) {
       if (_lastAudioSig.isNotEmpty) {
@@ -2752,6 +2756,13 @@ class PlayerController extends ChangeNotifier {
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
       settingsNotifier.value = _settings;
+      // ✕ 最小化到托盘：读回设置并同步给关闭拦截（Windows）
+      if (isDesktop && kIsWindowsDesktop) {
+        TrayService.closeToTray = _settings.closeToTray;
+        if (_settings.closeToTray) {
+          unawaited(windowManager.setPreventClose(true));
+        }
+      }
     } catch (_) {}
   }
 
@@ -2834,6 +2845,8 @@ class PlayerController extends ChangeNotifier {
   void updateSettings(PlayerSettings settings) {
     final launchChanged = settings.launchAtStartup != _settings.launchAtStartup;
     final topChanged = settings.alwaysOnTop != _settings.alwaysOnTop;
+    final closeToTrayChanged =
+        settings.closeToTray != _settings.closeToTray;
     final dlnaChanged = settings.dlnaEnabled != _settings.dlnaEnabled;
     final qualityChanged =
         settings.preferredQuality != _settings.preferredQuality;
@@ -2848,6 +2861,11 @@ class PlayerController extends ChangeNotifier {
     }
     if (topChanged && isDesktop) {
       _applyAlwaysOnTop();
+    }
+    if (closeToTrayChanged && kIsWindowsDesktop) {
+      // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播
+      TrayService.closeToTray = settings.closeToTray;
+      unawaited(windowManager.setPreventClose(settings.closeToTray));
     }
     if (dlnaChanged) {
       if (settings.dlnaEnabled) {
@@ -2902,6 +2920,74 @@ class PlayerController extends ChangeNotifier {
       await windowManager
           .setAlwaysOnTop(_isFullscreen ? true : _settings.alwaysOnTop);
     } catch (_) {}
+  }
+
+  // ==================== 后台播放 / 摸鱼模式（桌面端） ====================
+
+  /// 摸鱼模式：窗口隐藏 + 静音，托盘图标是唯一入口（方案：后台播放场景矩阵）
+  bool get fishMode => TrayService.instance.fishMode;
+  bool? _mutedBeforeFish;
+
+  /// 注入托盘回调：托盘菜单/左键如何驱动窗口与播放状态（启动时调用一次）
+  Future<void> bindTrayHandlers() async {
+    if (!isDesktop || !kIsWindowsDesktop) return;
+    TrayService.onShowWindow = () async {
+      try {
+        await windowManager.show();
+        await windowManager.focus();
+      } catch (_) {}
+    };
+    TrayService.onEnterFish = () => enterFishMode();
+    TrayService.onExitFish = () => exitFishMode();
+    TrayService.onQuit = () async {
+      await flushSettings();
+      try {
+        // 先解除关闭拦截再销毁，否则 destroy 又被拦回 hide
+        await windowManager.setPreventClose(false);
+        await windowManager.destroy();
+      } catch (_) {}
+    };
+    unawaited(TrayService.ensure());
+  }
+
+  /// 是否 Windows 桌面（托盘只实装在 Windows）
+  bool get kIsWindowsDesktop =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+  /// 后台播放：窗口缩到托盘，只听声（电视/电台都可用）。
+  /// 窗口状态（全屏/尺寸）原样保留，show 回来就是原来的样子。
+  Future<void> enterBackgroundAudio() async {
+    if (!kIsWindowsDesktop) return;
+    await TrayService.ensure();
+    try {
+      await windowManager.hide();
+    } catch (_) {}
+  }
+
+  /// 摸鱼模式：静音 + 隐藏窗口（音量状态先记住）
+  Future<void> enterFishMode() async {
+    if (!kIsWindowsDesktop || fishMode) return;
+    await TrayService.ensure();
+    await TrayService.updateMenu(fishMode: true);
+    _mutedBeforeFish = _isMuted;
+    if (!_isMuted) await setMuted(true);
+    try {
+      await windowManager.hide();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// 退出摸鱼：显示窗口 + 还原音量状态
+  Future<void> exitFishMode() async {
+    if (!kIsWindowsDesktop || !fishMode) return;
+    await TrayService.updateMenu(fishMode: false);
+    if (_mutedBeforeFish == false) await setMuted(false);
+    _mutedBeforeFish = null;
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (_) {}
+    notifyListeners();
   }
 
   // ==================== EPG & 节目信息 ====================

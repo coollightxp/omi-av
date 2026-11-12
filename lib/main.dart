@@ -8,7 +8,21 @@ import 'package:window_manager/window_manager.dart';
 import 'app.dart';
 import 'services/auto_launch.dart';
 import 'services/media_capture_service.dart';
+import 'services/tray_service.dart';
 import 'services/web_env.dart';
+
+/// 窗口关闭拦截：设置开了「✕ 最小化到托盘」时隐藏窗口继续播放，
+/// 托盘图标左键恢复；否则正常销毁退出。
+class _OmiWindowListener extends WindowListener {
+  @override
+  void onWindowClose() async {
+    if (TrayService.closeToTray) {
+      await windowManager.hide();
+    } else {
+      await windowManager.destroy();
+    }
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -51,6 +65,8 @@ void main() async {
   final desktop = MediaCaptureService.isDesktop;
   if (desktop) {
     await windowManager.ensureInitialized();
+    // 关闭拦截统一在这处理（托盘设置见 设置→系统）
+    windowManager.addListener(_OmiWindowListener());
 
     final launchAtStartupSynced = launchAtStartup;
     if (prefsOk) {

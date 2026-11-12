@@ -75,6 +75,11 @@ class PlayerSettings {
   /// 按 OK/方向键/点屏幕才打开频道列表。方案第九节。
   final bool resumeLastChannel;
 
+  /// 关闭按钮最小化到托盘（桌面端，默认关）：开着时点 ✕ 窗口隐藏、
+  /// 继续播放（托盘图标可恢复/退出）；关着时 ✕ 直接退出。
+  /// 「后台播放」随时可用：底部面板「后台」按钮把窗口缩到托盘只听声。
+  final bool closeToTray;
+
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -97,6 +102,7 @@ class PlayerSettings {
     this.retryTimes = 3,
     this.castEndWaitSeconds = 0,
     this.resumeLastChannel = true,
+    this.closeToTray = false,
   });
 
   PlayerSettings copyWith({
@@ -121,6 +127,7 @@ class PlayerSettings {
     int? retryTimes,
     int? castEndWaitSeconds,
     bool? resumeLastChannel,
+    bool? closeToTray,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -145,6 +152,7 @@ class PlayerSettings {
       retryTimes: retryTimes ?? this.retryTimes,
       castEndWaitSeconds: castEndWaitSeconds ?? this.castEndWaitSeconds,
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
+      closeToTray: closeToTray ?? this.closeToTray,
     );
   }
 }

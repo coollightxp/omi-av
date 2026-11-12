@@ -2121,6 +2121,21 @@ class _SystemSettingsTab extends StatelessWidget {
                     .updateSettings(s.copyWith(alwaysOnTop: v)),
                 activeColor: Colors.blueAccent,
               ),
+              if (defaultTargetPlatform == TargetPlatform.windows)
+                SwitchListTile(
+                  secondary:
+                      const Icon(Icons.dock, color: Colors.white70),
+                  title: const Text('✕ 最小化到托盘',
+                      style: TextStyle(color: Colors.white, fontSize: 15)),
+                  subtitle: const Text(
+                      '点关闭按钮时窗口缩到托盘继续播放，托盘图标左键恢复；'
+                      '关着时 ✕ 直接退出。随时可用底部面板「后台播放」',
+                      style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  value: s.closeToTray,
+                  onChanged: (v) => controller
+                      .updateSettings(s.copyWith(closeToTray: v)),
+                  activeColor: Colors.blueAccent,
+                ),
               SwitchListTile(
                 secondary: const Icon(Icons.power_settings_new,
                     color: Colors.white70),
@@ -2394,6 +2409,16 @@ class _HelpTab extends StatelessWidget {
                 _helpRow('右键', '相当于返回键，弹出退出卡片'),
                 _helpRow('网页频道前台时', '右键被网页接管，可移到底部呼出控制面板后右键，或按 S 键'),
                 _helpRow('退出卡片', '返回 / 锁定 / 设置 / 退出 / 关机'),
+              ]),
+              _helpSection('后台播放与摸鱼模式（Windows）'),
+              _helpInfoCard([
+                _helpRow('小窗播放', '悬浮置顶的小画面，边干别的边看'),
+                _helpRow('后台播放', '底部面板「后台」：窗口缩到托盘只听声，'
+                    '托盘图标左键恢复'),
+                _helpRow('摸鱼模式', '托盘右键菜单：静音 + 隐藏窗口；'
+                    '左键托盘图标一键恢复画面与音量'),
+                _helpRow('✕ 最小化到托盘', '设置 → 系统里打开后，'
+                    '点关闭按钮不退出、缩到托盘继续播'),
               ]),
             ],
             _helpSection('遥控器'),

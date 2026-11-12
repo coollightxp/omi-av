@@ -557,6 +557,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.webPageActive ? '内置播放器播放' : '网页播放器播放',
           c.canToggleWebNative ? widget.onSwitchWebNative : null,
         ),
+      // 后台播放（桌面端）：窗口缩到托盘只听声，托盘图标恢复
+      if (c.isDesktop)
+        _KbAction('background', Icons.dock, '后台播放（缩到托盘只听声）',
+            c.enterBackgroundAudio),
       if (c.isCasting)
         _KbAction('cast', Icons.cast_connected, '断开投屏',
             c.stopCastAndRestore),
