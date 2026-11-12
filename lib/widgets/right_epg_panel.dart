@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/epg_program.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
+import '../core/theme/app_typography.dart';
 import 'scaled_panel.dart';
 
 /// 右侧隐藏式 EPG 节目菜单面板
@@ -279,6 +280,7 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   }
 
   Widget _buildHeader() {
+    final t = AppTypography.of(context);
     return Consumer<PlayerController>(
       builder: (context, controller, _) {
         return Container(
@@ -291,11 +293,11 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
+                    Text(
                       '节目单 EPG',
                       style: TextStyle(
                         color: Colors.white,
-                        fontSize: 18,
+                        fontSize: t.listHeader,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -304,8 +306,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                       maxLines: 1,
                       softWrap: false,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          color: Colors.white54, fontSize: 13),
+                      style: TextStyle(
+                          color: Colors.white54, fontSize: t.listSub),
                     ),
                     // 联动显示当前正在播放的节目名
                     if (controller.currentProgram != null)
@@ -313,8 +315,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                         '正在直播：${controller.currentProgram!.title}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: Colors.greenAccent, fontSize: 13),
+                        style: TextStyle(
+                            color: Colors.greenAccent, fontSize: t.listSub),
                       ),
                   ],
                 ),
@@ -429,6 +431,7 @@ class _EpgProgramTile extends StatelessWidget {
 
   Widget _buildCard(
       BuildContext context, bool isNow, bool isPast, bool canReserve) {
+    final t = AppTypography.of(context);
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       padding: const EdgeInsets.all(12),
@@ -463,7 +466,7 @@ class _EpgProgramTile extends StatelessWidget {
                 program.timeRange,
                 style: TextStyle(
                   color: isNow ? Colors.greenAccent : Colors.white60,
-                  fontSize: 13,
+                  fontSize: t.listSub,
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -476,9 +479,10 @@ class _EpgProgramTile extends StatelessWidget {
                     color: Colors.redAccent,
                     borderRadius: BorderRadius.circular(3),
                   ),
-                  child: const Text(
+                  child: Text(
                     '直播中',
-                    style: TextStyle(color: Colors.white, fontSize: 10.5),
+                    style:
+                        TextStyle(color: Colors.white, fontSize: t.listSub - 2),
                   ),
                 ),
               const Spacer(),
@@ -517,7 +521,7 @@ class _EpgProgramTile extends StatelessWidget {
             program.title,
             style: TextStyle(
               color: isPast ? Colors.white38 : Colors.white,
-              fontSize: 15.5,
+              fontSize: t.listItem,
               fontWeight: isNow ? FontWeight.bold : FontWeight.normal,
             ),
           ),
@@ -529,7 +533,7 @@ class _EpgProgramTile extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: isPast ? Colors.white24 : Colors.white54,
-                fontSize: 12,
+                fontSize: t.listSub,
               ),
             ),
           ],

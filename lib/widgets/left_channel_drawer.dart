@@ -7,6 +7,7 @@ import '../models/channel.dart';
 import '../services/channel_logo.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
+import '../core/theme/app_typography.dart';
 import 'scaled_panel.dart';
 
 /// 左侧两级抽屉式频道面板
@@ -466,6 +467,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   }
 
   Widget _buildHeader() {
+    final t = AppTypography.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: const BoxDecoration(
@@ -481,9 +483,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               maxLines: 1,
               softWrap: false,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white,
-                fontSize: 18,
+                fontSize: t.listHeader,
                 fontWeight: FontWeight.bold,
               ),
             ),
@@ -528,6 +530,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
 
   /// 第一级：分类列表（收藏夹非空时排在最前）
   Widget _buildCategoryList(PlayerController controller) {
+    final t = AppTypography.of(context);
     final cats = controller.categories;
     final favs = controller.buildFavoriteChannels();
     if (cats.isEmpty) {
@@ -539,14 +542,14 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             children: [
               const Icon(Icons.playlist_add, size: 56, color: Colors.white38),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 '暂无频道列表',
-                style: TextStyle(color: Colors.white54, fontSize: 18),
+                style: TextStyle(color: Colors.white54, fontSize: t.listHeader),
               ),
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 '请在设置中添加 M3U/TXT 播放列表',
-                style: TextStyle(color: Colors.white38, fontSize: 13),
+                style: TextStyle(color: Colors.white38, fontSize: t.listSub),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 20),
@@ -648,6 +651,7 @@ class _CategoryTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = AppTypography.of(context);
     return InkWell(
       onTap: onTap,
       child: Container(
@@ -682,16 +686,15 @@ class _CategoryTile extends StatelessWidget {
                     category.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: Colors.white,
-                      fontSize: 16,
+                      fontSize: t.listItem,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
                   Text(
                     '${category.channels.length} 个频道',
-                    style:
-                        const TextStyle(color: Colors.white54, fontSize: 12),
+                    style: TextStyle(color: Colors.white54, fontSize: t.listSub),
                   ),
                 ],
               ),
@@ -763,6 +766,7 @@ class _ChannelTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = AppTypography.of(context);
     return InkWell(
       onTap: onTap,
       child: Container(
@@ -797,7 +801,7 @@ class _ChannelTile extends StatelessWidget {
                   softWrap: false,
                   style: TextStyle(
                     color: isSelected ? Colors.blueAccent : Colors.white38,
-                    fontSize: 13,
+                    fontSize: t.listSub,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -825,7 +829,7 @@ class _ChannelTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: isSelected ? Colors.blueAccent : Colors.white,
-                      fontSize: 16,
+                      fontSize: t.listItem,
                       height: 1.2,
                       fontWeight:
                           isSelected ? FontWeight.bold : FontWeight.normal,
@@ -841,7 +845,7 @@ class _ChannelTile extends StatelessWidget {
                         color: isSelected
                             ? Colors.blueAccent.withOpacity(0.85)
                             : Colors.white38,
-                        fontSize: 12.5,
+                        fontSize: t.listSub,
                         height: 1.2,
                       ),
                     ),
