@@ -459,6 +459,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         ],
       ]);
     }
+    // 电台变体（方案 13.3）：音频没有画面，截图/旋转/小窗都不出现；
+    // 睡前听广播高频，专给一个「定时关闭」
+    final isRadio = c.currentChannel?.isRadio ?? false;
+    final sleepRemain = c.sleepRemain;
     // 可用动作：禁用按钮不进列表，遥控器只会高亮能点的按钮
     final actions = <_KbAction>[
       // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
@@ -478,7 +482,16 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isPlaying ? Icons.pause : Icons.play_arrow,
           c.isPlaying ? '暂停' : '播放',
           hasChannel ? widget.onTogglePlayPause : null),
-      if (c.isDesktop) ...[
+      if (isRadio)
+        _KbAction(
+          'sleep',
+          Icons.bedtime_outlined,
+          sleepRemain == null
+              ? '定时关闭'
+              : '定时关闭（剩 ${sleepRemain.inMinutes + 1} 分）',
+          () => _showSleepMenu(context),
+        ),
+      if (c.isDesktop && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
         _KbAction(
@@ -489,13 +502,14 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       ],
       // 顺序必须与界面从左到右一致：旋转在小窗/静音/全屏之前，
       // 否则遥控器 ←/→ 会在「全屏 ↔ 旋转 ↔ 小窗」之间来回跳
-      _KbAction(
-          'rotate',
-          Icons.screen_rotation,
-          c.videoRotation.value == 0
-              ? '旋转画面'
-              : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
-          hasVideo ? c.cycleVideoRotation : null),
+      if (!isRadio)
+        _KbAction(
+            'rotate',
+            Icons.screen_rotation,
+            c.videoRotation.value == 0
+                ? '旋转画面'
+                : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
+            hasVideo ? c.cycleVideoRotation : null),
       // 静音 / 全屏（与 OMTV 底部栏一致，鼠标直接可点）
       if (c.isDesktop) ...[
         _KbAction(
@@ -544,28 +558,30 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
 
     // 分组：换源 | 播放 | 截录旋转 | 静音全屏 | 重载/切换/投屏
     // 组间用竖线分隔（电视/桌面档），组内紧凑
+    _KbAction byId(String id) => actions.firstWhere((a) => a.id == id);
     final children = <Widget>[
       SourceStepper(
         index: c.sourceIndex,
         count: c.sourceCount,
-        onPrev: actions[0].onPressed,
-        onNext: actions[1].onPressed,
+        onPrev: byId('prevSource').onPressed,
+        onNext: byId('nextSource').onPressed,
         onSelect: (i) => c.switchSource(i),
         qualityLabel: c.webPageActive ? c.webQualityLabel : null,
         prevSelected: _kbId == 'prevSource',
         nextSelected: _kbId == 'nextSource',
       ),
       _groupDivider(d),
-      _btn(actions[2], big: true),
+      _btn(byId('playpause'), big: true),
+      if (isRadio) _btn(byId('sleep')),
       _groupDivider(d),
     ];
-    if (c.isDesktop) {
+    if (c.isDesktop && !isRadio) {
       children.addAll([
-        _btn(actions.firstWhere((a) => a.id == 'screenshot')),
-        _btn(actions.firstWhere((a) => a.id == 'record'), big: true),
+        _btn(byId('screenshot')),
+        _btn(byId('record'), big: true),
       ]);
     }
-    children.add(_btn(actions.firstWhere((a) => a.id == 'rotate')));
+    if (!isRadio) children.add(_btn(byId('rotate')));
     children.add(_groupDivider(d));
 
     void addById(String id) {
@@ -587,6 +603,54 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     }
 
     return Row(mainAxisSize: MainAxisSize.min, children: children);
+  }
+
+  /// 定时关闭菜单：30/60/90 分钟、取消定时。
+  /// 只暂停播放不退出——听着睡着的人第二天还想接着听。
+  Future<void> _showSleepMenu(BuildContext context) async {
+    final c = context.read<PlayerController>();
+    final remain = c.sleepRemain;
+    final picked = await showDialog<int>(
+      context: context,
+      barrierColor: AppColors.scrim,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.overlay,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: AppColors.stroke),
+        ),
+        title: const Text('定时关闭',
+            style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              remain == null ? '到点自动暂停播放' : '剩余 ${remain.inMinutes + 1} 分钟',
+              style:
+                  const TextStyle(color: AppColors.textSecondary, fontSize: 12.5),
+            ),
+            const SizedBox(height: 10),
+            for (final m in const [30, 60, 90])
+              ListTile(
+                dense: true,
+                title: Text('$m 分钟后',
+                    style: const TextStyle(
+                        color: AppColors.textPrimary, fontSize: 14)),
+                onTap: () => Navigator.pop(ctx, m),
+              ),
+            if (remain != null)
+              ListTile(
+                dense: true,
+                title: const Text('取消定时',
+                    style: TextStyle(color: AppColors.live, fontSize: 14)),
+                onTap: () => Navigator.pop(ctx, 0),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    c.setSleepTimer(picked == 0 ? null : Duration(minutes: picked));
   }
 
   /// 面板按钮：统一走 [GhostButton]（全 App 唯一圆形操作钮）。

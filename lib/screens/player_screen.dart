@@ -2226,6 +2226,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   void _toggleDrawer({required bool left}) {
     final c = context.read<PlayerController>();
     if (c.locked) return;
+    // 方案 13.1：投屏独占输出，内容由发送方决定——
+    // 左侧频道面板禁止呼出、右侧节目单不显示，避免"换了台画面没变"
+    if (c.isCasting) {
+      OsdBus.show('正在投屏，请先断开', icon: Icons.cast_connected);
+      return;
+    }
     setState(() {
       _topBarVisible = false;
       if (left) {

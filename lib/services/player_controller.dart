@@ -957,6 +957,7 @@ class PlayerController extends ChangeNotifier {
   /// 进入「正在等待投屏」。seconds<0 = 一直等待。
   void _enterCastWait(int seconds) {
     _castWaitTimer?.cancel();
+    _sleepTimer?.cancel();
     _castWaiting = true;
     _castWaitRemain = seconds;
     if (seconds > 0) {
@@ -1110,6 +1111,8 @@ class PlayerController extends ChangeNotifier {
       _lastError = '加载频道列表失败: $e';
     } finally {
       _isLoadingPlaylist = false;
+      // 电视源换了：电台目录里的「电视伴音」要按新频道重匹配
+      if (_radioCatalogLoaded) _refreshRadioCatalog();
       notifyListeners();
     }
   }
@@ -2159,6 +2162,45 @@ class PlayerController extends ChangeNotifier {
         });
       }
     }
+  }
+
+  // ---------- 睡眠定时（方案 12.4 / 13.3：睡前听广播的高频场景） ----------
+
+  Timer? _sleepTimer;
+  DateTime? _sleepAt;
+
+  /// 剩余时间；null 表示未设定时
+  Duration? get sleepRemain {
+    final at = _sleepAt;
+    if (at == null) return null;
+    final d = at.difference(DateTime.now());
+    return d.isNegative ? Duration.zero : d;
+  }
+
+  /// 定时关闭：[d] 为 null 表示取消。到点只暂停播放，不退出程序
+  /// （电台用户多半是听着睡着，第二天还想接着听）。
+  void setSleepTimer(Duration? d) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (d == null) {
+      _sleepAt = null;
+      OsdBus.show('已取消定时关闭', icon: Icons.bedtime_outlined);
+      notifyListeners();
+      return;
+    }
+    _sleepAt = DateTime.now().add(d);
+    _sleepTimer = Timer(d, () async {
+      _sleepTimer = null;
+      _sleepAt = null;
+      if (isPlaying) {
+        await togglePlayPause();
+      }
+      OsdBus.show('定时关闭：已暂停播放', icon: Icons.bedtime);
+      notifyListeners();
+    });
+    final m = d.inMinutes;
+    OsdBus.show('$m 分钟后自动暂停', icon: Icons.bedtime_outlined);
+    notifyListeners();
   }
 
   /// 播放/暂停切换
@@ -3403,10 +3445,15 @@ class PlayerController extends ChangeNotifier {
 
   bool get radioCatalogLoaded => _radioCatalogLoaded;
 
+  /// 当前电视源的频道（给「电视伴音」自动匹配用）
+  List<Channel> get _tvSourceChannels =>
+      [for (final c in _categories) ...c.channels];
+
   Future<void> ensureRadioCatalog() async {
     if (_radioCatalogLoaded) return;
     try {
-      _radioCategories = await RadioCatalog.all();
+      _radioCategories =
+          await RadioCatalog.all(tvChannels: _tvSourceChannels);
       _radioCatalogLoaded = true;
     } catch (e) {
       debugPrint('[RadioCatalog] load failed: $e');
@@ -3417,7 +3464,8 @@ class PlayerController extends ChangeNotifier {
 
   /// 「我的电台」增删后只重建自己那一段，不重读安装包
   void _refreshRadioCatalog() {
-    final rebuilt = RadioCatalog.rebuildIfLoaded();
+    final rebuilt =
+        RadioCatalog.rebuildIfLoaded(tvChannels: _tvSourceChannels);
     if (rebuilt == null) return;
     _radioCategories = rebuilt;
   }
