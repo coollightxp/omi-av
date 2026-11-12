@@ -14,9 +14,9 @@ jobs:
   # ==================== Android APK ====================
   build-android:
     name: Build Android APK
-    # push 触发只跑 Windows 做编译验证，其余平台仅在发版/手动时构建，
-    # 避免私有仓库 Actions 额度被日常提交耗尽
-    if: github.event_name != 'push'
+    # 通知栏/锁屏 MediaService 为 CI 注入的 Kotlin，从未被真正编译过——
+    # 临时放开 push 构建以便验证并产出可安装 APK；验证通过后可改回省额度
+    if: github.event_name != 'push' || true
     runs-on: ubuntu-latest
     env:
       OMI_KEYSTORE: /home/runner/.android/omi.keystore
