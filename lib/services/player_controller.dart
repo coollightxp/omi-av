@@ -1785,6 +1785,8 @@ class PlayerController extends ChangeNotifier {
       headers: headers.isEmpty ? null : headers,
       formatHint: formatHint,
       bufferSeconds: bufSecs,
+      // 电台：让 mpv 走 showwaves 出真实波形纹理（失败会自动退回）
+      radioSpectrum: _currentChannel?.isRadio ?? false,
     );
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);

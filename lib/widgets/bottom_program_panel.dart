@@ -329,17 +329,28 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           )
-        else if (isRadio && radioGroup.isNotEmpty)
-          // 电台没有节目单，第三行放分组（电视伴音 / 央广·国家台 / …），
-          // 播放状态交给上面的「音频直播」徽章说，不重复
-          Text(
-            radioGroup,
-            style: TextStyle(
-              color: AppColors.wave.withValues(alpha: 0.66),
-              fontSize: t.caption,
-            ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+        else if (isRadio)
+          // 电台没有节目单：第三行放 ICY 实时曲目（有的话），
+          // 没有就放分组名（电视伴音 / 央广·国家台 / …）
+          AnimatedBuilder(
+            animation: Listenable.merge([c.videoController]),
+            builder: (context, _) {
+              final icy =
+                  (c.videoController?.value.mediaTitle ?? '').trim();
+              final text = icy.isNotEmpty ? '♪ $icy' : radioGroup;
+              if (text.isEmpty) return const SizedBox.shrink();
+              return Text(
+                text,
+                style: TextStyle(
+                  color: icy.isNotEmpty
+                      ? Colors.white70
+                      : AppColors.wave.withValues(alpha: 0.66),
+                  fontSize: t.caption,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              );
+            },
           )
         else if (!hasChannel)
           Text(

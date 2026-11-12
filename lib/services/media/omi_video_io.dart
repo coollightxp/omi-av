@@ -19,8 +19,10 @@ class OmiVideoController extends ChangeNotifier {
     Map<String, String>? headers,
     String? formatHint,
     int bufferSeconds = 5,
+    bool radioSpectrum = false,
   }) : _url = url,
-       _headers = headers {
+       _headers = headers,
+       _radioSpectrum = radioSpectrum {
     MediaKit.ensureInitialized();
     final bytes = (bufferSeconds.clamp(3, 120)) * 1024 * 1024;
     _player = Player(
@@ -32,10 +34,12 @@ class OmiVideoController extends ChangeNotifier {
     );
     _video = VideoController(_player);
     _bindStreams();
+    _observeMediaTitle();
   }
 
   final Uri _url;
   final Map<String, String>? _headers;
+  final bool _radioSpectrum;
   late final Player _player;
   late final VideoController _video;
   final List<StreamSubscription<dynamic>> _subs = [];
@@ -49,6 +53,25 @@ class OmiVideoController extends ChangeNotifier {
     if (_disposed) return;
     _value = next;
     notifyListeners();
+  }
+
+  /// 电台流的曲目元数据：libmpv 把 ICY `StreamTitle` 映射到 `media-title`，
+  /// 属性变化事件比轮询省事也更及时。Web 端没有 mpv，不参与。
+  void _observeMediaTitle() {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    unawaited(() async {
+      try {
+        await platform.observeProperty('media-title', (value) async {
+          final t = value.trim();
+          if (t.isEmpty || t == _value.mediaTitle) return;
+          _set(_value.copyWith(mediaTitle: t));
+        });
+      } catch (e) {
+        // 某些内核/资源不允许观测：静默降级，标题回落到台名
+        debugPrint('[OmiVideo] observe media-title failed: $e');
+      }
+    }());
   }
 
   void _bindStreams() {
@@ -100,6 +123,7 @@ class OmiVideoController extends ChangeNotifier {
   }
 
   Future<void> initialize() async {
+    if (_radioSpectrum) await _applySpectrumFilter();
     await _player.open(
       Media(_url.toString(), httpHeaders: _headers),
       play: false,
@@ -115,6 +139,58 @@ class OmiVideoController extends ChangeNotifier {
         duration: _player.state.duration,
       ),
     );
+    if (_spectrumApplied) {
+      // 6 秒内报错 = 滤镜链建不起来（mpv 未编 showwaves / 流不支持），
+      // 摘掉重开；正常出声的流不会走到这里
+      _spectrumGuard?.cancel();
+      _spectrumGuard = Timer(const Duration(seconds: 6), () {
+        if (_disposed) return;
+        if (_value.hasError) unawaited(_dropSpectrumFilter());
+      });
+    }
+  }
+
+  /// 电台专用：用 libmpv 的 lavfi-complex 把音频喂给 ffmpeg 的
+  /// showwaves，让 mpv 输出"真实波形"视频帧，Flutter 侧当纹理贴出来。
+  /// 这样波形是跟着真实 PCM 起伏的，不需要自己抓音频做 FFT。
+  ///
+  /// 滤镜链：aid1 一分为二，一路照常出声 [ao]，一路画成波形 [vo]。
+  /// 如果当前 mpv 构建没编进 showwaves，open 后会报错，[initialize]
+  /// 里的兜底定时器会摘掉滤镜重开，退回缓动波形。
+  Future<void> _applySpectrumFilter() async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    try {
+      await platform.setProperty(
+        'lavfi-complex',
+        '[aid1]asplit[ao][sp];'
+            '[sp]showwaves=s=480x96:mode=cline:rate=25:colors=0xFFFFFF[vo]',
+      );
+      _spectrumApplied = true;
+    } catch (e) {
+      debugPrint('[OmiVideo] lavfi-complex failed: $e');
+    }
+  }
+
+  bool _spectrumApplied = false;
+  Timer? _spectrumGuard;
+
+  /// 频谱滤镜起不来时的自愈：摘掉滤镜重开同一路流
+  Future<void> _dropSpectrumFilter() async {
+    if (!_spectrumApplied || _disposed) return;
+    _spectrumApplied = false;
+    try {
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        await platform.setProperty('lavfi-complex', '');
+      }
+      await _player.open(
+        Media(_url.toString(), httpHeaders: _headers),
+        play: _value.isPlaying,
+      );
+    } catch (e) {
+      debugPrint('[OmiVideo] drop spectrum failed: $e');
+    }
   }
 
   Future<void> play() async {
@@ -184,6 +260,7 @@ class OmiVideoController extends ChangeNotifier {
   Future<void> release() async {
     if (_disposed) return;
     _disposed = true;
+    _spectrumGuard?.cancel();
     for (final s in _subs) {
       await s.cancel();
     }

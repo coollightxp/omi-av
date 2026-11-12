@@ -13,6 +13,7 @@ class OmiVideoController extends ChangeNotifier {
     Map<String, String>? headers,
     String? formatHint,
     int bufferSeconds = 5,
+    bool radioSpectrum = false,
   });
 
   OmiVideoValue get value => const OmiVideoValue();

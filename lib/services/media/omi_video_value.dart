@@ -15,6 +15,7 @@ class OmiVideoValue {
     this.position = Duration.zero,
     this.duration = Duration.zero,
     this.bufferedEnd = Duration.zero,
+    this.mediaTitle = '',
     this.errorDescription,
   });
 
@@ -29,6 +30,11 @@ class OmiVideoValue {
 
   /// 已缓冲到的位置（部分平台不上报，恒为 0 时上层退化为固定超时判定）
   final Duration bufferedEnd;
+
+  /// 内核上报的媒体标题。对电台流：libmpv 会把 ICY 的 `StreamTitle`
+  /// （正在播的歌名/节目名）映射到 `media-title`，是真实元数据；
+  /// 对视频/点播：通常是文件名，业务层按频道类型决定用不用。
+  final String mediaTitle;
   final String? errorDescription;
 
   double get aspectRatio =>
@@ -44,6 +50,7 @@ class OmiVideoValue {
     Duration? position,
     Duration? duration,
     Duration? bufferedEnd,
+    String? mediaTitle,
     String? errorDescription,
   }) {
     return OmiVideoValue(
@@ -56,6 +63,7 @@ class OmiVideoValue {
       position: position ?? this.position,
       duration: duration ?? this.duration,
       bufferedEnd: bufferedEnd ?? this.bufferedEnd,
+      mediaTitle: mediaTitle ?? this.mediaTitle,
       errorDescription: errorDescription ?? this.errorDescription,
     );
   }

@@ -18,6 +18,7 @@ class OmiVideoController extends ChangeNotifier {
     Map<String, String>? headers,
     String? formatHint,
     int bufferSeconds = 5,
+    bool radioSpectrum = false,
   }) {
     VideoFormat? fmt;
     if (formatHint == 'hls') fmt = VideoFormat.hls;
