@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 
 import '../models/channel.dart';
 import '../core/widgets/channel_badge.dart';
+import '../core/theme/app_colors.dart';
+import '../core/widgets/audio_wave.dart';
 import '../services/player_controller.dart';
 
 /// 视频播放器显示组件
@@ -76,8 +78,7 @@ class VideoPlayerWidget extends StatelessWidget {
                       } else if (controller.flatChannels.isNotEmpty) {
                         // 启动恢复失败等场景下 currentChannel 可能为空：
                         // 兜底播放列表第一个频道，避免按钮完全无反应
-                        controller
-                            .playChannel(controller.flatChannels.first);
+                        controller.playChannel(controller.flatChannels.first);
                       }
                     },
                     icon: const Icon(Icons.refresh),
@@ -150,9 +151,9 @@ class VideoPlayerWidget extends StatelessWidget {
 
 /// 电台音频模式（Now Playing）。
 ///
-/// 电台没有画面，黑屏会让人以为"没播"：这里用台标 + 台名 +
+/// 电台没有画面，黑屏会让人以为"没播"：这里用台标 + 波形 + 台名 +
 /// 正在收听状态替代视频区，播放/暂停/切台都照旧走底部面板与遥控器。
-/// 后续（方案 12.3）再加 FFT 波形与实时字幕。
+/// 波形见 [AudioWave]（不是真 FFT，播放器不暴露 PCM，靠播放态驱动起伏）。
 class _RadioStage extends StatelessWidget {
   const _RadioStage({required this.controller, required this.channel});
 
@@ -176,56 +177,74 @@ class _RadioStage extends StatelessWidget {
           colors: [Color(0xFF1A1209), Color(0xFF000000)],
         ),
       ),
+      // 小窗/分屏时整体等比缩放，不裁不溢
       child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _logo(ch),
-            const SizedBox(height: 22),
-            Text(
-              name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 26,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 1,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Row(
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: SizedBox(
+            width: 440,
+            child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _LiveDot(playing: controller.isPlaying),
-                const SizedBox(width: 8),
-                Text(
-                  controller.isPlaying ? '正在收听' : '已暂停',
-                  style: const TextStyle(
-                    color: Color(0xCCFFFFFF),
-                    fontSize: 14,
-                  ),
+                _logo(ch),
+                const SizedBox(height: 20),
+                // 声音的可视化：播放时起伏，暂停时压平成静止细线
+                AudioWave(
+                  active: controller.isPlaying,
+                  height: 44,
+                  bars: 25,
+                  barWidth: 3.0,
+                  gap: 5.0,
                 ),
-              ],
-            ),
-            if (now.isNotEmpty && now != name) ...[
-              const SizedBox(height: 14),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 40),
-                child: Text(
-                  now,
-                  maxLines: 2,
+                const SizedBox(height: 14),
+                Text(
+                  name,
+                  maxLines: 1,
                   textAlign: TextAlign.center,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    color: Color(0x99FFFFFF),
-                    fontSize: 15,
-                    height: 1.4,
+                    color: Colors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1,
                   ),
                 ),
-              ),
-            ],
-          ],
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _LiveDot(playing: controller.isPlaying),
+                    const SizedBox(width: 8),
+                    Text(
+                      controller.isPlaying ? '正在收听' : '已暂停',
+                      style: const TextStyle(
+                        color: Color(0xCCFFFFFF),
+                        fontSize: 14,
+                      ),
+                    ),
+                    // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
+                    const SizedBox(width: 10),
+                    _AudioTag(playing: controller.isPlaying),
+                  ],
+                ),
+                if (now.isNotEmpty && now != name) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    now,
+                    maxLines: 2,
+                    textAlign: TextAlign.center,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0x99FFFFFF),
+                      fontSize: 15,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 6),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -248,6 +267,46 @@ class _RadioStage extends StatelessWidget {
         size: size - 4,
         circular: true,
         background: Colors.white.withValues(alpha: 0.06),
+      ),
+    );
+  }
+}
+
+/// 「音频流」小标：耳机图标 + 三根跳动条。
+/// 和底部面板的「音频直播」徽章是同一个语义，两处都出现
+/// 是刻意的——用户可能只看大屏，也可能只看面板。
+class _AudioTag extends StatelessWidget {
+  const _AudioTag({required this.playing});
+
+  final bool playing;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: AppColors.wave.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppColors.wave.withValues(alpha: 0.30)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.headphones, size: 12, color: AppColors.wave),
+          const SizedBox(width: 5),
+          Text(
+            '音频流',
+            style: TextStyle(
+              color: AppColors.wave.withValues(alpha: 0.95),
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(width: 6),
+          AudioBars(
+              active: playing, height: 10, bars: 3, barWidth: 2.2, gap: 2.0),
+        ],
       ),
     );
   }
@@ -298,8 +357,9 @@ class _LiveDotState extends State<_LiveDot>
       animation: _c,
       builder: (context, _) {
         // 呼吸式明暗，不跳动（电台画面本来就静，跳点太吵）
-        final t = _c.isAnimating ? 0.45 + 0.55 * (0.5 + 0.5 *
-            math.sin(_c.value * 2 * math.pi)) : 0.7;
+        final t = _c.isAnimating
+            ? 0.45 + 0.55 * (0.5 + 0.5 * math.sin(_c.value * 2 * math.pi))
+            : 0.7;
         return Container(
           width: 8,
           height: 8,

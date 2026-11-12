@@ -3,6 +3,8 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/epg_program.dart';
+import '../core/theme/app_colors.dart';
+import '../core/widgets/audio_wave.dart';
 import '../core/widgets/channel_badge.dart';
 import '../core/theme/app_density.dart';
 import '../core/theme/app_typography.dart';
@@ -285,6 +287,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     final current = c.currentProgram;
     final next = c.nextProgram;
     final hasChannel = c.currentChannel != null;
+    // 电台：没有画面也没有 EPG，信息区要自己说清"在播音频"
+    final isRadio = c.currentChannel?.isRadio ?? false;
+    final radioGroup = isRadio ? (c.currentChannel?.groupTitle ?? '') : '';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -311,11 +316,15 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           children: [
             // 有 EPG 时大字行已是节目名，这里才需要频道名；
             // 无 EPG 时大字行本身就是频道名，避免重复
-            if (hasChannel && current != null)
+            if (hasChannel && current != null && !isRadio)
               _metaText(info.channelName, Colors.white70),
-            if (c.resolutionText.isNotEmpty)
-              _badge(c.resolutionText),
-            _badge('线路 ${c.sourceIndex + 1}/${c.sourceCount}'),
+            // 电台：脉冲小条 + 「音频直播」，替代分辨率/线路这类视频信息
+            if (isRadio)
+              _audioBadge(c.isPlaying)
+            else ...[
+              if (c.resolutionText.isNotEmpty) _badge(c.resolutionText),
+              _badge('线路 ${c.sourceIndex + 1}/${c.sourceCount}'),
+            ],
           ],
         ),
         const SizedBox(height: 3),
@@ -324,6 +333,18 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           Text(
             '${_range(next)}  ${next.title}',
             style: TextStyle(color: Colors.white54, fontSize: t.body),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          )
+        else if (isRadio && radioGroup.isNotEmpty)
+          // 电台没有节目单，第三行放分组（电视伴音 / 央广·国家台 / …），
+          // 播放状态交给上面的「音频直播」徽章说，不重复
+          Text(
+            radioGroup,
+            style: TextStyle(
+              color: AppColors.wave.withValues(alpha: 0.66),
+              fontSize: t.caption,
+            ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           )
@@ -342,6 +363,35 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             color: color,
             fontSize: AppTypography.of(context).body,
             fontWeight: FontWeight.w500));
+  }
+
+  /// 「音频直播」徽章：跳动的四根小条 + 文案，暂停时条压平、文案改「已暂停」
+  Widget _audioBadge(bool playing) {
+    final t = AppTypography.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: AppColors.wave.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppColors.wave.withValues(alpha: 0.32)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AudioBars(
+              active: playing, height: 11, bars: 4, barWidth: 2.2, gap: 2.2),
+          const SizedBox(width: 6),
+          Text(
+            playing ? '音频直播' : '已暂停',
+            style: TextStyle(
+              color: AppColors.wave,
+              fontSize: t.caption,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _badge(String text) {

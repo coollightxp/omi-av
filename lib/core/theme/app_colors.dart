@@ -47,6 +47,10 @@ class AppColors {
   /// 直播中红点 / 错误
   static const Color live = Color(0xFFE5484D);
 
+  /// 音频波形（电台 Now Playing / 底部「音频直播」徽章专用暖金）。
+  /// 与电台舞台的暖黑底同源，是深蓝体系里唯一允许的暖色语义色。
+  static const Color wave = Color(0xFFFFB35C);
+
   /// 成功/已连接
   static const Color success = Color(0xFF46A758);
 

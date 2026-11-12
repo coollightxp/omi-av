@@ -3168,6 +3168,22 @@ class PlayerController extends ChangeNotifier {
 
   /// 库变化后：补源条目、必要时重载频道列表
   Future<void> _afterRadioLibraryChanged() async {
+    // 最后一个台被删：把「我的电台」源一并收回，源列表里不留空条目
+    if (RadioLibrary.isEmpty) {
+      final wasCurrent =
+          sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId;
+      await sourceManager.removePlaylist(PlaylistSource.radioLibraryId);
+      if (wasCurrent) {
+        // 当前源没了就落回内置精选；正在响的这台不被掐断
+        if (!sourceManager.builtinRadioRemoved) {
+          await sourceManager.selectPlaylist(PlaylistSource.builtinRadioId);
+        }
+        await refreshChannels();
+      } else {
+        notifyListeners();
+      }
+      return;
+    }
     await sourceManager.ensureRadioLibrarySource();
     if (sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId) {
       await refreshChannels();

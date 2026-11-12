@@ -23,6 +23,23 @@ class RadioDirectory {
     'https://nl1.api.radio-browser.info',
   ];
 
+  /// 地名快捷搜索：用户想的是"听听上海的台"，不是"上海"这两个字。
+  /// 点一下就把地名填进搜索框按名称匹配（多数中国台台名里带城市/省份）。
+  static const List<String> quickRegions = [
+    '北京',
+    '上海',
+    '广东',
+    '浙江',
+    '江苏',
+    '四川',
+    '湖南',
+    '湖北',
+    '山东',
+    '河南',
+    '陕西',
+    '福建',
+  ];
+
   /// 快捷标签：中文给人看，英文给接口用
   static const List<(String, String)> quickTags = [
     ('新闻', 'news'),
@@ -67,9 +84,9 @@ class RadioDirectory {
       try {
         final uri = Uri.parse('$host/json/stations/search')
             .replace(queryParameters: params);
-        final resp = await http
-            .get(uri, headers: {'User-Agent': 'OmiPlayer/1.0'})
-            .timeout(const Duration(seconds: 12));
+        final resp = await http.get(uri, headers: {
+          'User-Agent': 'OmiPlayer/1.0'
+        }).timeout(const Duration(seconds: 12));
         if (resp.statusCode != 200) {
           lastError = 'HTTP ${resp.statusCode}';
           continue;

@@ -16,6 +16,7 @@ import '../models/player_settings.dart';
 import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
+import '../services/radio_library.dart';
 import '../services/web_diag.dart';
 import 'scaled_panel.dart';
 
@@ -750,7 +751,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   const SizedBox(width: 8),
                   const Expanded(
                     child: Text(
-                      '电台：内置精选 + 在线搜索',
+                      '内置精选不可删（可整源移除）· 搜到的台进「我的电台」可随时删',
                       style: TextStyle(color: Colors.white54, fontSize: 12.5),
                     ),
                   ),
@@ -853,9 +854,11 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   // 让用户一眼看出这不是自己加的、删了还能恢复
                   title: p.isBuiltin ? '${p.name} · 内置' : p.name,
                   subtitle: p.isBuiltin
-                      ? '出厂自带 · 电视伴音 / 央广 / 省市台 / 音乐 / 故事'
+                      ? '出厂自带 · 电视伴音 / 央广 / 省市台 / 音乐 / 故事 · '
+                          '单台不可删，只能整源移除（之后可恢复）'
                       : (p.type == PlaylistSourceType.radioLibrary
-                          ? '在线目录里加入的电台，随加随播'
+                          ? '在线目录加入的电台 · 共 ${RadioLibrary.count} 个 · '
+                              '单个移除/清空都在「在线电台」里'
                           : p.url),
                   icon: p.isBuiltin
                       ? Icons.radio

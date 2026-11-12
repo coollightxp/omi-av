@@ -28,6 +28,11 @@ class RadioLibrary {
   static bool contains(String stationId) =>
       _items.any((e) => e.id == stationId);
 
+  static int get count => _items.length;
+
+  /// 电台 id → 频道 id（列表里的「正在播放」高亮按这个比对）
+  static String channelIdOf(String stationId) => 'myradio:$stationId';
+
   static Future<void> load() async {
     if (_loaded) return;
     try {
@@ -78,16 +83,15 @@ class RadioLibrary {
       ChannelCategory(
         id: PlaylistSource.radioLibraryId,
         name: categoryName,
-        channels: [
-          for (int i = 0; i < _items.length; i++) _toChannel(_items[i], i + 1),
-        ],
+        channels: [for (final s in _items) toChannel(s)],
       ),
     ];
   }
 
-  static Channel _toChannel(RadioStation s, int number) => Channel(
-        // 前缀避免和电视源里同名频道的 id 撞车（收藏/历史按 id 存）
-        id: 'myradio:${s.id}',
+  /// 单台转频道：列表、搜索结果「点一下直接听」都用这一份转换，
+  /// id 前缀保证与电视源不会撞车（收藏/历史按 id 存）
+  static Channel toChannel(RadioStation s) => Channel(
+        id: channelIdOf(s.id),
         name: s.name,
         streamUrls: [s.url],
         logoUrl: s.favicon,
