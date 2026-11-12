@@ -468,13 +468,24 @@ jobs:
           KOTLIN
             echo "MediaService patched: $ACTDIR/MediaService.kt"
 
-            # androidx.media（MediaSessionCompat / MediaStyle）
-            grep -q "androidx.media:media" android/app/build.gradle || cat >> android/app/build.gradle <<GRADLE
+            # androidx.media（MediaSessionCompat / MediaStyle）。
+            # 新版 flutter create 可能生成 Kotlin DSL（build.gradle.kts），
+            # 两种格式都兼容，追加重复 dependencies 块是合法的
+            if ls android/app/build.gradle.kts >/dev/null 2>&1; then
+              grep -q "androidx.media:media" android/app/build.gradle.kts || cat >> android/app/build.gradle.kts <<GRADLE2
+
+          dependencies {
+              implementation("androidx.media:media:1.7.0")
+          }
+          GRADLE2
+            else
+              grep -q "androidx.media:media" android/app/build.gradle || cat >> android/app/build.gradle <<GRADLE
 
           dependencies {
               implementation 'androidx.media:media:1.7.0'
           }
           GRADLE
+            fi
 
             # 前台服务声明（mediaPlayback 类型）
             MANIFEST=android/app/src/main/AndroidManifest.xml
