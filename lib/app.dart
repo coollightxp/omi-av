@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 
+import 'core/theme/app_density.dart';
+import 'core/theme/device_profile.dart';
 import 'services/player_controller.dart';
 import 'screens/player_screen.dart';
 
@@ -79,9 +81,22 @@ class OmiApp extends StatelessWidget {
             } else {
               scale = controller.settings.uiScale.clamp(0.8, 3.0);
             }
+            // 设备档位注入：桌面=desktop；安卓按 TV 检测结果分 tv/mobile；
+            // Web 无 TV 场景按 desktop。token 体系（AppDensity/AppTypography）
+            // 经此 InheritedWidget 对全树生效
+            final profile = kIsWeb
+                ? DeviceProfile.desktop
+                : (defaultTargetPlatform == TargetPlatform.android
+                    ? (controller.isTv
+                        ? DeviceProfile.tv
+                        : DeviceProfile.mobile)
+                    : DeviceProfile.desktop);
             return MediaQuery(
               data: mq.copyWith(textScaler: TextScaler.linear(scale)),
-              child: child!,
+              child: DeviceProfileScope(
+                data: DeviceProfileScopeData(profile: profile, userScale: 1.0),
+                child: child!,
+              ),
             );
           },
           home: const PlayerScreen(),

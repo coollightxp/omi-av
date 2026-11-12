@@ -32,14 +32,17 @@ class AppTypography {
   /// OSD 辅助行
   final double osdCaption;
 
+  /// 数值以 1.0.201 实测观感校准（面板大字 24/节目行 14.5/badge 13），
+  /// 而非激进紧凑值：token 化的收益是集中可调 + 三档联动，
+  /// 数值必须先贴近现状再谈优化，避免"改完不如原来"
   static const AppTypography _tv = AppTypography(
-    title: 18, body: 15, caption: 13, osdNumber: 26, osdCaption: 14,
+    title: 24, body: 17, caption: 14, osdNumber: 46, osdCaption: 15,
   );
   static const AppTypography _desktop = AppTypography(
-    title: 15, body: 13, caption: 11, osdNumber: 20, osdCaption: 12,
+    title: 22, body: 14.5, caption: 12.5, osdNumber: 42, osdCaption: 14,
   );
   static const AppTypography _mobile = AppTypography(
-    title: 13, body: 10.5, caption: 10.5, osdNumber: 17, osdCaption: 10.5,
+    title: 17, body: 12.5, caption: 11, osdNumber: 30, osdCaption: 12,
   );
 
   static AppTypography of(BuildContext context) {

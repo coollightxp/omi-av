@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../models/epg_program.dart';
 import '../services/channel_logo.dart';
+import '../core/theme/app_typography.dart';
 import '../services/player_controller.dart';
 import 'scaled_panel.dart';
 
@@ -260,6 +261,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   // ==================== 节目信息 ====================
 
   Widget _buildInfo(PlayerController c, double scale) {
+    final t = AppTypography.of(context);
     final info = c.getNowPlayingInfo();
     final current = c.currentProgram;
     final next = c.nextProgram;
@@ -274,7 +276,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           current?.title ?? (hasChannel ? info.channelName : '未选择频道'),
           style: TextStyle(
             color: Colors.white,
-            fontSize: scale < 1 ? 22 : 24,
+            fontSize: scale < 1 ? t.title - 2 : t.title,
             fontWeight: FontWeight.bold,
           ),
           maxLines: 1,
@@ -302,14 +304,14 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         if (next != null)
           Text(
             '${_range(next)}  ${next.title}',
-            style: const TextStyle(color: Colors.white54, fontSize: 14.5),
+            style: TextStyle(color: Colors.white54, fontSize: t.body),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           )
         else if (!hasChannel)
-          const Text(
+          Text(
             '点击屏幕或 ≡ 按钮打开频道列表',
-            style: TextStyle(color: Colors.white38, fontSize: 13.5),
+            style: TextStyle(color: Colors.white38, fontSize: t.caption),
           ),
       ],
     );
@@ -317,8 +319,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
 
   Widget _metaText(String text, Color color) {
     return Text(text,
-        style:
-            TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.w500));
+        style: TextStyle(
+            color: color,
+            fontSize: AppTypography.of(context).body,
+            fontWeight: FontWeight.w500));
   }
 
   Widget _badge(String text) {
@@ -329,7 +333,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(text,
-          style: const TextStyle(color: Colors.white70, fontSize: 13)),
+          style: TextStyle(
+              color: Colors.white70,
+              fontSize: AppTypography.of(context).caption)),
     );
   }
 
@@ -429,7 +435,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.webPageActive
               ? c.webQualityLabel
               : '源${c.sourceIndex + 1}/${c.sourceCount}',
-          style: const TextStyle(color: Colors.white54, fontSize: 12.5)),
+          style: TextStyle(
+              color: Colors.white54,
+              fontSize: AppTypography.of(context).caption)),
       _btn(actions[1], big: true),
       _btn(actions[2], big: true),
     ];
@@ -559,7 +567,9 @@ class _SeekBarState extends State<_SeekBar> {
     return Row(
       children: [
         Text(widget.clock(Duration(milliseconds: value.round())),
-            style: const TextStyle(color: Colors.white70, fontSize: 11)),
+            style: TextStyle(
+                color: Colors.white70,
+                fontSize: AppTypography.of(context).caption - 1.5)),
         Expanded(
           child: SliderTheme(
             data: SliderThemeData(
@@ -585,7 +595,9 @@ class _SeekBarState extends State<_SeekBar> {
           ),
         ),
         Text(widget.clock(total),
-            style: const TextStyle(color: Colors.white70, fontSize: 11)),
+            style: TextStyle(
+                color: Colors.white70,
+                fontSize: AppTypography.of(context).caption - 1.5)),
       ],
     );
   }

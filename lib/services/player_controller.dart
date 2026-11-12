@@ -214,6 +214,9 @@ class PlayerController extends ChangeNotifier {
   /// 电视端按 Home 进小窗会打断看电视的主流程，不做自动画中画
   bool _isTv = false;
 
+  /// 是否电视/盒子设备（TV 检测结果，供设备档位/画中画策略使用）
+  bool get isTv => _isTv;
+
   /// 播放状态可能从多处改变（内核回调/网页 JS/切台/投屏），统一在
   /// notifyListeners 出口处同步：播放中（非投屏/非电视端）时，
   /// 安卓按 Home 或切到别的应用会自动进入画中画小窗
