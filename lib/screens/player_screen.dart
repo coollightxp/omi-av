@@ -6358,7 +6358,10 @@ class _BootSplash extends StatelessWidget {
     // logo 宽度按屏宽缩放并限幅；标题用 Flutter Text 渲染（矢量、任意
     // 分辨率都清晰），不依赖位图里的文字
     final logoW = (MediaQuery.sizeOf(context).width * 0.15).clamp(110.0, 300.0);
-    final titleSize = (logoW * 0.26).clamp(22.0, 72.0);
+    // 原版观感比例：图标略小于字框（原 splash 图内含留白），
+    // 字号相对图标略大；透明主图顶满画布，故图标缩至 0.8 倍、
+    // 字号提至 0.30 倍以贴回原版视觉比例
+    final titleSize = (logoW * 0.30).clamp(24.0, 78.0);
     // 整体上移一点，图像再额外上移一点，和文字拉开距离
     final lift = MediaQuery.sizeOf(context).height * 0.045;
     return Positioned.fill(
@@ -6383,7 +6386,7 @@ class _BootSplash extends StatelessWidget {
                 SizedBox(
                   width: logoW,
                   height: logoW,
-                  child: BootAnimation(logoSize: logoW),
+                  child: BootAnimation(logoSize: logoW * 0.80),
                 ),
                 SizedBox(height: logoW * 0.16),
                 Padding(

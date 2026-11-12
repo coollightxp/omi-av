@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 /// 启动图标：呼吸灯形式。
 ///
 /// 图标亮度循环显亮/渐暗（约 2.4 秒一个呼吸周期），持续运行，
-/// 直到初始化完毕、启动画面被撤掉为止；背后一层同步呼吸的淡暖辉光。
+/// 直到初始化完毕、启动画面被撤掉为止。
 /// 单个 [AnimationController] 无缝循环驱动，`RepaintBoundary` 限定重绘范围。
 class BootAnimation extends StatefulWidget {
   const BootAnimation({
@@ -45,41 +45,20 @@ class _BootAnimationState extends State<BootAnimation>
         builder: (context, _) {
           final t = _ctrl.value;
           // 呼吸灯：0（暗）→ 1（亮）→ 0，余弦平滑，循环无缝
-          final breath =
-              0.5 - 0.5 * math.cos(2 * math.pi * t);
+          final breath = 0.5 - 0.5 * math.cos(2 * math.pi * t);
           return Transform.translate(
             offset: widget.centerOffset,
             child: SizedBox(
               width: widget.logoSize,
               height: widget.logoSize,
-              child: Stack(
-                alignment: Alignment.center,
-                fit: StackFit.expand,
-                children: [
-                  // 同步呼吸的淡暖辉光
-                  DecoratedBox(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(
-                        colors: [
-                          const Color(0xFFFF9A4D)
-                              .withValues(alpha: 0.10 + 0.14 * breath),
-                          const Color(0x00000000),
-                        ],
-                        stops: const [0.0, 1.0],
-                      ),
-                    ),
-                  ),
-                  // 图标本体的呼吸显亮
-                  Opacity(
-                    opacity: 0.35 + 0.65 * breath,
-                    child: Image.asset(
-                      'branding/splash.png',
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
-                  ),
-                ],
+              child: Opacity(
+                // 图标本体的呼吸显亮（无光晕：光晕易显脏画面）
+                opacity: 0.35 + 0.65 * breath,
+                child: Image.asset(
+                  'branding/splash.png',
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                ),
               ),
             ),
           );
