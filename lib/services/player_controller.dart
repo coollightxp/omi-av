@@ -322,6 +322,8 @@ class PlayerController extends ChangeNotifier {
     NetworkMonitor.instance.onNetworkChanged.listen(_onNetworkChanged);
     // 播放中每 500ms 刷新一次（进度条、倒计时等）
     _tickTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      // 通知栏卡片状态跟播放/曲目走（内部有签名去重，几乎零成本）
+      _syncAudioNotification();
       _checkCastStall();
       final vc = _videoController;
       if (vc == null || !vc.value.isInitialized) return;
@@ -365,6 +367,10 @@ class PlayerController extends ChangeNotifier {
       await refreshEpg();
     }
 
+    // 安卓：通知栏音频卡片的按钮（上一台/暂停/下一台/关闭）
+    if (_androidNative) {
+      listenAudioCommands(_onAudioCommand);
+    }
     // 先启动 DLNA 投屏接收服务（不等系统值初始化，避免被阻塞）；
     // 用户可在设置中关闭
     if (_settings.dlnaEnabled) {
@@ -2189,6 +2195,57 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  // ==================== 安卓通知栏音频卡片（方案 12.5） ====================
+
+  bool get _androidNative =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  String _lastAudioSig = '';
+
+  /// 通知栏/锁屏卡片：只在电台域出现（电视正常播放有画面，不需要）。
+  /// 台名 + 当前曲目 + 播放态，变化时才推给原生，避免每 500ms 跨通道。
+  void _syncAudioNotification() {
+    if (!_androidNative) return;
+    final ch = _currentChannel;
+    if (ch == null || !ch.isRadio) {
+      if (_lastAudioSig.isNotEmpty) {
+        _lastAudioSig = '';
+        unawaited(audioStop());
+      }
+      return;
+    }
+    final program = _lastMediaTitle.isNotEmpty
+        ? _lastMediaTitle
+        : (currentProgram?.title ?? '');
+    final sig = '${ch.id}|$program|${isPlaying ? 1 : 0}';
+    if (sig == _lastAudioSig) return;
+    _lastAudioSig = sig;
+    unawaited(audioNotify(
+      name: ch.name,
+      program: program,
+      playing: isPlaying,
+    ));
+  }
+
+  /// 通知栏按钮回调：只在本域内换台，播完关卡片
+  void _onAudioCommand(String cmd) {
+    switch (cmd) {
+      case 'playpause':
+        unawaited(togglePlayPause());
+      case 'prev':
+        unawaited(playAdjacentChannel(-1));
+      case 'next':
+        unawaited(playAdjacentChannel(1));
+      case 'stop':
+        if (isPlaying) unawaited(togglePlayPause());
+        _lastAudioSig = '';
+        unawaited(audioStop());
+      case 'restore':
+        // 原生侧负责把界面拉回前台，这里只需要刷新一次状态
+        notifyListeners();
+    }
+  }
+
   // ---------- 睡眠定时（方案 12.4 / 13.3：睡前听广播的高频场景） ----------
 
   Timer? _sleepTimer;
@@ -3682,6 +3739,7 @@ class PlayerController extends ChangeNotifier {
     WakelockPlus.disable();
     dlnaService.stop();
     remoteAdminService.stop();
+    unawaited(audioStop());
     reservationManager.dispose();
     // 退出前把未落盘的设置补写掉（去抖窗口内被杀会丢设置）
     unawaited(flushSettings());
