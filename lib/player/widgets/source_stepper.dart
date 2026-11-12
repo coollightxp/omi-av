@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/app_density.dart';
 import '../../core/theme/app_typography.dart';
+import '../../core/widgets/ghost_button.dart';
 
 /// 换源步进器：`‹  线路 2/6 ▾  ›`
 ///
@@ -106,21 +107,13 @@ class SourceStepper extends StatelessWidget {
     required VoidCallback? onTap,
     required bool selected,
   }) {
-    final widget = IconButton(
-      icon: Icon(icon,
-          color: onTap == null ? Colors.white24 : Colors.white,
-          size: 24),
-      onPressed: onTap,
+    // 与面板其它按钮同一组件：高亮态永远是白描边，
+    // 不再出现"箭头是蓝框、其它钮是白框"的混搭
+    return GhostButton(
+      icon: icon,
       tooltip: tooltip,
-    );
-    if (!selected) return widget;
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.blueAccent.withOpacity(0.22),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.blueAccent, width: 1.6),
-      ),
-      child: widget,
+      onPressed: onTap,
+      selected: selected,
     );
   }
 

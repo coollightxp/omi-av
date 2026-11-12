@@ -6,6 +6,7 @@ import '../models/epg_program.dart';
 import '../services/channel_logo.dart';
 import '../core/theme/app_density.dart';
 import '../core/theme/app_typography.dart';
+import '../core/widgets/ghost_button.dart';
 import '../player/widgets/source_stepper.dart';
 import '../services/player_controller.dart';
 import 'scaled_panel.dart';
@@ -546,49 +547,61 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     return Row(mainAxisSize: MainAxisSize.min, children: children);
   }
 
+  /// 面板按钮：统一走 [GhostButton]（全 App 唯一圆形操作钮）。
+  ///
+  /// 遥控器高亮走 `selected`（与键盘/悬停同一套白描边视觉），
+  /// 不再有"蓝底方框"这种第二种高亮样式。
   Widget _btn(_KbAction a, {bool big = false}) {
     final selected = a.id == _kbId;
-    final color = a.id == 'record'
-        ? (a.tooltip.contains('停止') ? Colors.redAccent : Colors.white)
-        : (a.id == 'cast'
-            ? Colors.redAccent
-            : (a.id == 'rotate'
-                ? null
-                : Colors.white));
-    final iconColor = a.id == 'rotate'
-        ? null // ValueListenableBuilder 内部按旋转角度决定颜色
-        : (a.onPressed == null ? Colors.white24 : color);
-    final iconSize = big ? 30.0 : 24.0;
+    final role = big ? GhostButtonRole.emphasis : GhostButtonRole.normal;
 
     // 旋转按钮的颜色随旋转状态变化，单独保留 ValueListenableBuilder
     if (a.id == 'rotate') {
-      return _wrapSelected(
-        selected,
-        ValueListenableBuilder<int>(
-          valueListenable: context.read<PlayerController>().videoRotation,
-          builder: (context, rot, _) => IconButton(
-            icon: Icon(Icons.screen_rotation,
-                color: a.onPressed == null
-                    ? Colors.white24
-                    : (rot == 0 ? Colors.white54 : Colors.amber),
-                size: iconSize),
-            onPressed: a.onPressed,
-            tooltip: a.tooltip,
-          ),
+      return ValueListenableBuilder<int>(
+        valueListenable: context.read<PlayerController>().videoRotation,
+        builder: (context, rot, _) => GhostButton(
+          icon: Icons.screen_rotation,
+          tooltip: _withHotkey(a),
+          onPressed: a.onPressed,
+          selected: selected,
+          role: role,
+          iconColor: rot == 0 ? Colors.white70 : Colors.amber,
         ),
       );
     }
 
-    return _wrapSelected(
-      selected,
-      IconButton(
-        icon: Icon(a.icon,
-            color: a.onPressed == null ? Colors.white24 : iconColor,
-            size: iconSize),
-        onPressed: a.onPressed,
-        tooltip: a.tooltip,
-      ),
+    // 状态色：录制中红点、断开投屏红；其余保持白色
+    Color? iconColor;
+    if (a.id == 'record') {
+      iconColor = a.tooltip.contains('停止') ? Colors.redAccent : null;
+    } else if (a.id == 'cast') {
+      iconColor = Colors.redAccent;
+    }
+
+    return GhostButton(
+      icon: a.icon,
+      tooltip: _withHotkey(a),
+      onPressed: a.onPressed,
+      selected: selected,
+      role: role,
+      iconColor: iconColor,
     );
+  }
+
+  /// 桌面端在提示后追加真实快捷键（第 8 步：键位与实际分发保持一致，
+  /// 只标注确实已注册的键，避免提示写了按不出来）
+  static const Map<String, String> _hotkeys = {
+    'playpause': '空格',
+    'fullscreen': 'F',
+    'mute': 'M',
+    'record': 'R',
+  };
+
+  String _withHotkey(_KbAction a) {
+    final key = _hotkeys[a.id];
+    if (key == null) return a.tooltip;
+    if (!context.read<PlayerController>().isDesktop) return a.tooltip;
+    return '${a.tooltip} ($key)';
   }
 
   /// 分组竖线：电视/桌面显示，手机档不画（5 钮连线显碎）
@@ -599,19 +612,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       height: 26,
       margin: EdgeInsets.symmetric(horizontal: d.interGroupGap * 0.5),
       color: Colors.white.withOpacity(0.10),
-    );
-  }
-
-  /// 遥控器高亮：蓝底圆角方框
-  Widget _wrapSelected(bool selected, Widget child) {
-    if (!selected) return child;
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.blueAccent.withOpacity(0.22),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.blueAccent, width: 1.6),
-      ),
-      child: child,
     );
   }
 
