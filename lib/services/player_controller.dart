@@ -6,7 +6,6 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Icons;
 import 'package:flutter/widgets.dart';
-import 'package:video_player/video_player.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:volume_controller/volume_controller.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -24,11 +23,10 @@ import 'auto_launch.dart';
 import 'cast_stream_proxy.dart';
 import 'dlna_service.dart';
 import 'win_hotkeys.dart';
-import 'fvp_register.dart';
 import 'cast_log.dart';
 import 'format_hint.dart';
+import 'media/omi_video.dart';
 import 'media_capture_service.dart';
-import 'native_capture.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
 import 'source_manager.dart';
@@ -43,7 +41,7 @@ enum PlayerState { idle, loading, playing, paused, error, ended, waitingForNetwo
 
 /// 播放器控制器 - 使用 ChangeNotifier 进行状态管理
 class PlayerController extends ChangeNotifier {
-  VideoPlayerController? _videoController;
+  OmiVideoController? _videoController;
   PlayerSettings _settings = const PlayerSettings();
 
   /// 时钟显隐的独立通知器：切换它只重建时钟本身，不触发整棵播放
@@ -173,7 +171,7 @@ class PlayerController extends ChangeNotifier {
   double get volume => _volume;
   double get brightness => _brightness;
   PlayerSettings get settings => _settings;
-  VideoPlayerController? get videoController => _videoController;
+  OmiVideoController? get videoController => _videoController;
   List<ChannelCategory> get categories => _categories;
   bool get isLoadingPlaylist => _isLoadingPlaylist;
   bool get isLoadingEpg => _isLoadingEpg;
@@ -1625,7 +1623,6 @@ class PlayerController extends ChangeNotifier {
         bufSecs = 15;
       }
     }
-    registerFvp(bufferSeconds: bufSecs);
 
     await _disposeVideoController();
 
@@ -1646,9 +1643,9 @@ class PlayerController extends ChangeNotifier {
       headers['Referer'] = channel.httpReferer.trim();
     }
 
-    // ExoPlayer（安卓）不嗅探内容：live.php?id=... 这类脚本入口 302 跳到
-    // m3u8，没有后缀又没有显式 MIME 时会被当作 progressive 文件解析而失败。
-    // 依据后缀或轻量预检推断格式，通过 formatHint 让其选择正确的 MediaSource
+    // libmpv 自行嗅探容器格式，无需 formatHint；Web 端 video_player 仍需
+    // 依据后缀/MIME 选择正确解析器，这里统一算好交给门面
+    // 依据后缀或轻量预检推断格式
     var streamUrl = channel.streamUrls[_sourceIndex];
     // 投屏点播经本地中转代理：mdk 对视频号 CDN 的 Range 断点请求会挂死
     // （服务器接受但永不回数据，mpv 无此问题）。代理保证每请求全新连接
@@ -1670,18 +1667,16 @@ class PlayerController extends ChangeNotifier {
       'mp4', 'mkv', 'avi', 'flv', 'ts', 'mov', 'wmv', 'm4v', 'webm', 'mpg',
       'mpeg', '3gp', 'rmvb', 'rm', 'mp3', 'aac', 'flac', 'ogg', 'wav', 'mka',
     };
-    VideoFormat? formatHint;
+    String? formatHint;
     if (ext == 'm3u8' || ext == 'm3u') {
-      formatHint = VideoFormat.hls;
+      formatHint = 'hls';
     } else if (ext == 'mpd') {
-      formatHint = VideoFormat.dash;
+      formatHint = 'dash';
     } else if (!knownMediaExt.contains(ext)) {
       // 后缀无法识别（php/html/无后缀等）：预检拿真实 Content-Type
       final fmt =
           await inferStreamFormat(url: streamUrl, headers: headers);
-      formatHint = fmt == 'hls'
-          ? VideoFormat.hls
-          : (fmt == 'dash' ? VideoFormat.dash : null);
+      formatHint = (fmt == 'hls' || fmt == 'dash') ? fmt : null;
     }
 
     // 慢源预检/代理等待期间用户已切新台：本代作废，不再创建播放器。
@@ -1689,13 +1684,12 @@ class PlayerController extends ChangeNotifier {
     // 新台前播、旧台后台出声的双路直播
     if (gen != _playGeneration) return;
 
-    final c = VideoPlayerController.networkUrl(
+    final c = OmiVideoController.network(
       Uri.parse(streamUrl),
-      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+      // libmpv 通过 http-header-fields 透传 UA/Referer；Web 端直接给 video 元素
+      headers: headers.isEmpty ? null : headers,
       formatHint: formatHint,
-      // video_player 2.8.x 该参数为非空 Map（默认空）；空 map 时
-      // fvp 不会设置 avio.headers，与不传等价
-      httpHeaders: headers,
+      bufferSeconds: bufSecs,
     );
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
@@ -1725,17 +1719,14 @@ class PlayerController extends ChangeNotifier {
         c.removeListener(closure);
       } catch (_) {}
       // 必须真正释放：只移除监听会泄漏整个 native 播放器。
-      // 注意必须串行且不并发：fvp 对同一播放器同时调 pause/dispose
-      // 会直接崩溃（0xc0000409，快速切台时旧代迟到即命中此路径）
+      // media_kit 的 release 内部串行 cancel 订阅 + dispose player，
+      // 且自身有 _disposed 幂等守卫，重复/并发调用安全
       Future<void>(() async {
         try {
-          await c.pause().timeout(const Duration(seconds: 1));
+          await c.release().timeout(const Duration(seconds: 5));
         } catch (_) {
-          return; // 内核卡死：不再触碰该实例
+          // 释放卡住（内核挂死）：不再触碰该实例，交给进程回收
         }
-        try {
-          await c.dispose().timeout(const Duration(seconds: 3));
-        } catch (_) {}
       });
     }
 
@@ -1829,7 +1820,7 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _onVideoListener(VideoPlayerController self) {
+  void _onVideoListener(OmiVideoController self) {
     // 只处理当前 controller 的事件，旧实例的迟到事件一律忽略
     if (!identical(self, _videoController)) return;
     final v = self.value;
@@ -2485,10 +2476,9 @@ class PlayerController extends ChangeNotifier {
     final inSeekGrace =
         _seekGraceUntil != null && now.isBefore(_seekGraceUntil!);
     if (isBuf) {
-      var bufEnd = 0;
-      for (final r in v.buffered) {
-        if (r.end.inMilliseconds > bufEnd) bufEnd = r.end.inMilliseconds;
-      }
+      // media_kit 只上报"已缓冲末尾"，取该值作为下载推进判据；
+      // 悬空区间（seek 留下的空洞）不影响"是否还在下载"的判断
+      final bufEnd = v.bufferedEnd.inMilliseconds;
       if (bufEnd > _lastBufferedEndMs) {
         _lastBufferedEndMs = bufEnd;
         _bufferingSince = now;
@@ -2802,7 +2792,14 @@ class PlayerController extends ChangeNotifier {
     try {
       _recordPath =
           await captureService.buildFilePath('recordings', _currentChannel!.name, 'mp4');
-      fvpRecord(vc, to: _recordPath);
+      // libmpv 的 stream-record 直接落盘原始流（TS/MP4 容器由流本身决定）
+      final ok = await vc.startRecord(_recordPath!);
+      if (!ok) {
+        _lastError = '当前内核不支持录制';
+        _isRecording = false;
+        notifyListeners();
+        return false;
+      }
       _isRecording = true;
       notifyListeners();
       return true;
@@ -2820,7 +2817,7 @@ class PlayerController extends ChangeNotifier {
     if (_webPageActive) return _stopWebRecording();
     final vc = _videoController;
     try {
-      if (vc != null) fvpRecord(vc, to: null);
+      if (vc != null) await vc.stopRecord();
       // 给编码器一点时间刷新文件尾
       await Future.delayed(const Duration(milliseconds: 800));
     } catch (_) {}
@@ -3032,11 +3029,9 @@ class PlayerController extends ChangeNotifier {
     final vc = _videoController;
     if (vc == null || !vc.value.isInitialized) return null;
     try {
-      final w = vc.value.size.width.round();
-      final h = vc.value.size.height.round();
-      final rgba = await fvpSnapshot(vc, width: w, height: h);
-      if (rgba == null || w == 0 || h == 0) return null;
-      final png = await captureService.rgbaToPng(rgba, w, h);
+      // libmpv 原生截帧直接返回 PNG 字节，无需 RGBA 再编码
+      final png = await vc.snapshotPng();
+      if (png == null || png.isEmpty) return null;
       final name = _currentChannel?.name ?? 'screenshot';
       final path = await captureService.buildFilePath('screenshots', name, 'png');
       await captureService.saveBytes(path, png);
@@ -3148,26 +3143,12 @@ class PlayerController extends ChangeNotifier {
           c.removeListener(closure);
         } catch (_) {}
       }
-      // 先暂停：即使后续 dispose 在内核卡死时超时放弃，孤儿实例也
-      // 不会继续播放出声（双声音防线）。pause 本身可能挂，限时 2 秒。
-      //
-      // 关键：超时后底层 pause 仍在执行，此时绝不能再发 dispose——
-      // fvp 对同一 native 播放器的并发调用会直接崩（0xc0000409，
-      // 实测 4K 高码率台切台时 pause 超过 1 秒，随后 dispose 并发释放）
-      var paused = false;
+      // 先摘监听再释放：media_kit 的 release 串行 cancel 订阅并 dispose
+      // player，自身幂等；超时仅意味着底层仍在释放，绝不重复调用
       try {
-        await c.pause().timeout(const Duration(seconds: 2));
-        paused = true;
-      } catch (_) {}
-      if (!paused) {
-        // 内核已卡死：不再触碰该实例（交给进程回收），保证后续起播不被拖住
-        return;
-      }
-      try {
-        await c.dispose().timeout(const Duration(seconds: 3));
+        await c.release().timeout(const Duration(seconds: 5));
       } on TimeoutException {
-        // 底层释放仍在进行：不重复 dispose（并发释放同一实例会崩溃），
-        // 也不再登记重试，直接放弃该实例
+        // 底层释放仍在进行：不再登记重试，直接放弃该实例
       } catch (_) {
         // 明确失败（非超时）：登记孤儿，下次播放前再释放一次
         _orphanControllers.add(c);
@@ -3176,16 +3157,15 @@ class PlayerController extends ChangeNotifier {
   }
 
   /// dispose 明确失败的控制器：不阻塞当前流程，后续单次重试释放。
-  /// 用 Set 防重复——同一实例两次 native dispose 并发会崩溃
-  final Set<VideoPlayerController> _orphanControllers = <VideoPlayerController>{};
+  /// release 自身幂等（_disposed 守卫），重复调用不会重复释放 native
+  final Set<OmiVideoController> _orphanControllers = <OmiVideoController>{};
 
   void _retryOrphanDispose() {
     if (_orphanControllers.isEmpty) return;
-    final list = List<VideoPlayerController>.from(_orphanControllers);
+    final list = List<OmiVideoController>.from(_orphanControllers);
     _orphanControllers.clear();
     for (final c in list) {
-      // 只调一次：失败也不再放回（重复调用可能与其在途的释放并发）
-      c.dispose().timeout(const Duration(seconds: 8)).then((_) {},
+      c.release().timeout(const Duration(seconds: 8)).then((_) {},
           onError: (_) {});
     }
   }
@@ -3198,7 +3178,7 @@ class PlayerController extends ChangeNotifier {
     _autoRetryTimer?.cancel();
     _resetWebRecording();
     if (_isRecording && _videoController != null) {
-      fvpRecord(_videoController!, to: null);
+      unawaited(_videoController!.stopRecord());
     }
     _disposeVideoController();
     WakelockPlus.disable();

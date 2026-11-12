@@ -14,14 +14,15 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.6
 
-  # 视频播放 - 支持 HLS/DASH 直播流，跨平台
+  # 视频播放 - Web 端保留 video_player（HTML video 元素）
   video_player: ^2.8.6
-  video_player_android: ^2.4.16
-  video_player_avfoundation: ^2.6.1
   video_player_web: ^2.3.1
 
-  # Windows/Linux 视频播放后端（video_player 官方不支持桌面，fvp 基于 MDK 提供实现）
-  fvp: ^0.38.1
+  # Android/Windows/Linux 播放内核：media_kit (libmpv)
+  # 自带 HLS/DASH/RTSP 嗅探、HTTP 头透传与断点续传，替代 fvp(MDK)
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_video: ^1.0.5
 
   # 状态管理
   provider: ^6.1.2

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:video_player/video_player.dart';
 
 import '../services/player_controller.dart';
 
@@ -125,7 +124,8 @@ class VideoPlayerWidget extends StatelessWidget {
                   child: SizedBox(
                     width: hasSize ? w : 16,
                     height: hasSize ? h : 9,
-                    child: VideoPlayer(vc),
+                    // 门面 build()：io 走 media_kit 的 Video，web 走 VideoPlayer
+                    child: vc.build(),
                   ),
                 ),
               ),

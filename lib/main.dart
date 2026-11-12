@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
@@ -9,25 +7,21 @@ import 'package:window_manager/window_manager.dart';
 
 import 'app.dart';
 import 'services/auto_launch.dart';
-import 'services/fvp_register.dart';
 import 'services/media_capture_service.dart';
 import 'services/web_env.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 播放缓冲设置需在注册 MDK 后端前读取（仅启动时应用一次）
   // 注意：不能让 SharedPreferences 失败阻塞 runApp——平台通道一失败
   // main 直接死掉就是永久白屏（安卓实测 NoSuchMethodError 时整机白屏
   // 进不去）。失败时降级默认值，保证 App 一定能起来。
-  var bufferSeconds = 5;
   var launchAtStartup = false;
   var alwaysOnTop = true;
   var webEnabled = true;
   var prefsOk = false;
   try {
     final prefs = await SharedPreferences.getInstance();
-    bufferSeconds = prefs.getInt('settings_buffer_seconds') ?? 5;
     launchAtStartup = prefs.getBool('settings_launch_at_startup') ?? false;
     alwaysOnTop = prefs.getBool('settings_always_on_top') ?? true;
     webEnabled = prefs.getBool('settings_web_enabled') ?? true;
@@ -45,9 +39,6 @@ void main() async {
     // 创建自定义 WebView2 环境，禁用磁盘缓存 + 允许无手势自动播放
     await initWebViewEnvironment();
   }
-
-  // Windows/Linux 注册 MDK 视频播放后端（video_player 官方不支持桌面端）
-  registerFvp(bufferSeconds: bufferSeconds);
 
   // 安卓手机：强制横屏（直播/电视场景，竖屏会留黑边）
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {

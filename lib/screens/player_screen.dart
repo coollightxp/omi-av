@@ -19,6 +19,7 @@ import '../services/web_env.dart';
 import '../services/web_launch.dart';
 import '../services/win_hotkeys.dart';
 import '../services/window_drag.dart';
+import '../widgets/boot_animation.dart';
 import '../widgets/bottom_program_panel.dart';
 import '../widgets/gesture_indicator_overlay.dart';
 import '../widgets/left_channel_drawer.dart';
@@ -6305,24 +6306,32 @@ class _BootSplash extends StatelessWidget {
     final lift = MediaQuery.sizeOf(context).height * 0.045;
     final imgLift = logoW * 0.12;
     return Positioned.fill(
-      child: ColoredBox(
-        color: Colors.black,
+      child: DecoratedBox(
+        // 极深暖棕 → 纯黑的径向渐变背景，比纯黑柔和、衬托暖色粒子
+        decoration: const BoxDecoration(
+          gradient: RadialGradient(
+            center: Alignment(0, -0.25),
+            radius: 1.3,
+            colors: [Color(0xFF1C130C), Color(0xFF000000)],
+            stops: [0.0, 1.0],
+          ),
+        ),
         child: Stack(
           children: [
+            // 全屏动画层：粒子/雾团环绕 logo 公转 + 中心呼吸辉光
+            Positioned.fill(
+              child: BootAnimation(
+                logoSize: logoW,
+                centerOffset: Offset(0, -(lift + imgLift)),
+              ),
+            ),
             Center(
               child: Transform.translate(
                 offset: Offset(0, -(lift + imgLift)),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    SizedBox(
-                      width: logoW,
-                      child: Image.asset(
-                        'branding/splash.png',
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                      ),
-                    ),
+                    SizedBox(height: logoW * 0.92),
                     SizedBox(height: logoW * 0.10 + imgLift),
                     Padding(
                       // 抵消末字字距造成的视觉左偏
@@ -6355,15 +6364,20 @@ class _BootSplash extends StatelessWidget {
                     height: 22,
                     child: CircularProgressIndicator(
                       strokeWidth: 2.4,
-                      color: Colors.blueAccent,
+                      color: Color(0xFFFFB35C),
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Text(
-                    status.isEmpty ? '正在启动…' : status,
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 13,
+                  // 状态文字切换时淡入，避免生硬跳变
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 350),
+                    child: Text(
+                      status.isEmpty ? '正在启动…' : status,
+                      key: ValueKey(status),
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 13,
+                      ),
                     ),
                   ),
                 ],
