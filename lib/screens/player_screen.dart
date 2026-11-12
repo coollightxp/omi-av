@@ -6375,60 +6375,75 @@ class _BootSplash extends StatelessWidget {
             stops: [0.0, 1.0],
           ),
         ),
-        // 原版布局：中上部图标（呼吸灯）→ 大字标题 → 下方状态数据
-        child: Center(
-          child: Transform.translate(
-            offset: Offset(0, -lift),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // 呼吸灯图标
-                SizedBox(
-                  width: logoW,
-                  height: logoW,
-                  child: BootAnimation(logoSize: logoW * 0.80),
-                ),
-                SizedBox(height: logoW * 0.16),
-                Padding(
-                  // 抵消末字字距造成的视觉左偏
-                  padding: EdgeInsets.only(left: titleSize * 0.14),
-                  child: Text(
-                    '欧米视听',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: titleSize,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: titleSize * 0.14,
-                      height: 1.12,
+        // 原版布局：中上部图标（呼吸灯）+ 大字标题居中；
+        // 加载圈与状态数据贴屏幕底部（留小边距）
+        child: Stack(
+          children: [
+            Center(
+              child: Transform.translate(
+                offset: Offset(0, -lift),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 呼吸灯图标
+                    SizedBox(
+                      width: logoW,
+                      height: logoW,
+                      child: BootAnimation(logoSize: logoW * 0.80),
                     ),
-                  ),
-                ),
-                SizedBox(height: titleSize * 0.9),
-                const SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.4,
-                    color: Color(0xFFFFB35C),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                // 状态文字切换时淡入，避免生硬跳变
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 350),
-                  child: Text(
-                    status.isEmpty ? '正在启动…' : status,
-                    key: ValueKey(status),
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 13,
+                    SizedBox(height: logoW * 0.16),
+                    Padding(
+                      // 抵消末字字距造成的视觉左偏
+                      padding: EdgeInsets.only(left: titleSize * 0.14),
+                      child: Text(
+                        '欧米视听',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: titleSize,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: titleSize * 0.14,
+                          height: 1.12,
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
+            // 加载指示与状态数据：贴底（与原版一致）
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 28,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.4,
+                      color: Color(0xFFFFB35C),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  // 状态文字切换时淡入，避免生硬跳变
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 350),
+                    child: Text(
+                      status.isEmpty ? '正在启动…' : status,
+                      key: ValueKey(status),
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
