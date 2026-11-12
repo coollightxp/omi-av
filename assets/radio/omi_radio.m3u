@@ -41,7 +41,7 @@ https://piccpndali.v.myalicdn.com/audio/cctv16_2.m3u8
 https://piccpndali.v.myalicdn.com/audio/cctv17_2.m3u8
 
 # ===== 央广·国家台 =====
-#EXTINF:-1 tvg-chno="19" group-title="央广·国家台" radio="true",中国之声
+#EXTINF:-1 tvg-chno="19" group-title="央广·国家台" radio="true" tvg-logo="https://cnvod.cnr.cn/audio2017/ondemand/media/1100/20210425/1619317448858.jpg",中国之声
 https://ngcdn002.cnr.cn/live/zgzs/index.m3u8
 #EXTINF:-1 tvg-chno="20" group-title="央广·国家台" radio="true",经济之声
 https://ngcdn002.cnr.cn/live/jjzs/index.m3u8
@@ -59,15 +59,15 @@ http://sk.cri.cn/905.m3u8
 http://sk.cri.cn/hyhq.m3u8
 
 # ===== 省市台 =====
-#EXTINF:-1 tvg-chno="27" group-title="省市台" radio="true",北京新闻广播 FM100.6
+#EXTINF:-1 tvg-chno="27" group-title="省市台" radio="true" tvg-logo="https://pic.qtfm.cn/2015/0514/2015051417385422.jpg",北京新闻广播 FM100.6
 https://lhttp.qtfm.cn/live/339/64k.mp3
-#EXTINF:-1 tvg-chno="28" group-title="省市台" radio="true",北京交通广播 FM103.9
+#EXTINF:-1 tvg-chno="28" group-title="省市台" radio="true" tvg-logo="http://pic.qingting.fm/2019/0227/20190227023249.png",北京交通广播 FM103.9
 https://lhttp.qingting.fm/live/336/64k.mp3
-#EXTINF:-1 tvg-chno="29" group-title="省市台" radio="true",北京音乐广播 FM97.4
+#EXTINF:-1 tvg-chno="29" group-title="省市台" radio="true" tvg-logo="https://pic.qtfm.cn/2017/0424/20170424025444.jpeg",北京音乐广播 FM97.4
 https://lhttp.qtfm.cn/live/332/64k.mp3
-#EXTINF:-1 tvg-chno="30" group-title="省市台" radio="true",上海新闻广播 FM93.4
+#EXTINF:-1 tvg-chno="30" group-title="省市台" radio="true" tvg-logo="http://pic.qingting.fm/2015/0202/20150202170847551.jpg",上海新闻广播 FM93.4
 https://lhttp-hw.qtfm.cn/live/270/64k.mp3
-#EXTINF:-1 tvg-chno="31" group-title="省市台" radio="true",上海交通广播 FM105.7
+#EXTINF:-1 tvg-chno="31" group-title="省市台" radio="true" tvg-logo="http://pic.qingting.fm/sso/48/1641437453117_JxQnTn1vv.jpeg",上海交通广播 FM105.7
 https://lhttp-hw.qtfm.cn/live/266/64k.mp3
 #EXTINF:-1 tvg-chno="32" group-title="省市台" radio="true",上海动感101 FM101.7
 https://lhttp-hw.qtfm.cn/live/274/64k.mp3
@@ -75,7 +75,7 @@ https://lhttp-hw.qtfm.cn/live/274/64k.mp3
 https://lhttp-hw.qtfm.cn/live/273/64k.mp3
 #EXTINF:-1 tvg-chno="34" group-title="省市台" radio="true",上海长三角之声 FM89.9
 https://lhttp-hw.qtfm.cn/live/275/64k.mp3
-#EXTINF:-1 tvg-chno="35" group-title="省市台" radio="true",广东珠江经济台
+#EXTINF:-1 tvg-chno="35" group-title="省市台" radio="true" tvg-logo="https://img.gdtv.cn/image/202109/0.986862757622444235b2e2f050a9656a6OSS1630576753.png",广东珠江经济台
 https://lhttp.qtfm.cn/live/1259/64k.mp3
 #EXTINF:-1 tvg-chno="36" group-title="省市台" radio="true",广东音乐之声
 https://lhttp.qtfm.cn/live/1260/64k.mp3
@@ -93,7 +93,7 @@ https://lhttp.qtfm.cn/live/1739/64k.mp3
 https://ls.qingting.fm/live/647.m3u8
 #EXTINF:-1 tvg-chno="43" group-title="省市台" radio="true",济南故事广播
 https://lhttp.qtfm.cn/live/1672/64k.mp3
-#EXTINF:-1 tvg-chno="44" group-title="省市台" radio="true",山西故事广播
+#EXTINF:-1 tvg-chno="44" group-title="省市台" radio="true" tvg-logo="https://pic.qtfm.cn/2016/0425/20160425145725344.png",山西故事广播
 https://lhttp-hw.qtfm.cn/live/5022511/64k.mp3
 
 # ===== 音乐台 =====
@@ -107,11 +107,11 @@ http://yyt.asiafm.net:8000/asiafm
 https://lhttp.qingting.fm/live/4915/64k.mp3
 #EXTINF:-1 tvg-chno="49" group-title="音乐台" radio="true",星空电台 STAR RADIO
 https://lhttp-hw.qtfm.cn/live/5022379/64k.mp3
-#EXTINF:-1 tvg-chno="50" group-title="音乐台" radio="true",动听音乐台
+#EXTINF:-1 tvg-chno="50" group-title="音乐台" radio="true" tvg-logo="https://pic.qtfm.cn/2021/0411/20210411040015.jpeg",动听音乐台
 https://lhttp-hw.qtfm.cn/live/5022107/64k.mp3
 #EXTINF:-1 tvg-chno="51" group-title="音乐台" radio="true",891 音乐台
 https://live.fm891.net/192k.aac
-#EXTINF:-1 tvg-chno="52" group-title="音乐台" radio="true",云梦音乐台
+#EXTINF:-1 tvg-chno="52" group-title="音乐台" radio="true" tvg-logo="https://pic.qtfm.cn/2023/0717/20230717031145.png",云梦音乐台
 https://lhttp.qtfm.cn/live/20500187/64k.mp3
 #EXTINF:-1 tvg-chno="53" group-title="音乐台" radio="true",MY FM 广州
 https://lhttp.qingting.fm/live/20194/64k.mp3
@@ -119,15 +119,15 @@ https://lhttp.qingting.fm/live/20194/64k.mp3
 https://lhttp-hw.qtfm.cn/live/5022308/64k.mp3
 
 # ===== 故事·相声 =====
-#EXTINF:-1 tvg-chno="55" group-title="故事·相声" radio="true",听云相声台
+#EXTINF:-1 tvg-chno="55" group-title="故事·相声" radio="true" tvg-logo="http://pic.qtfm.cn/2015/1009/20151009094853845.jpg!200",听云相声台
 https://m.tyradio.uk/tyxs.mp3
-#EXTINF:-1 tvg-chno="56" group-title="故事·相声" radio="true",听云评书台
+#EXTINF:-1 tvg-chno="56" group-title="故事·相声" radio="true" tvg-logo="http://pic.qtfm.cn/2021/0111/upload_a4542a554db7e6d24ee477b93ebb10a7.4017072-1F1D2289-A720-442C-84B2-25A04EB61FBC!200",听云评书台
 https://m.tyradio.uk/typs.mp3
 #EXTINF:-1 tvg-chno="57" group-title="故事·相声" radio="true",安徽小说评书广播
 https://lhttp.qtfm.cn/live/1951/64k.mp3
-#EXTINF:-1 tvg-chno="58" group-title="故事·相声" radio="true",蛤蜊讲故事
+#EXTINF:-1 tvg-chno="58" group-title="故事·相声" radio="true" tvg-logo="https://upload-qn.ajmide.com/image/2025/04/07/179075ed0d91731118a2745994df85a8.jpg@350w_1l",蛤蜊讲故事
 https://rscdn.ajmide.com/r_2951/nglive_2951.m3u8
-#EXTINF:-1 tvg-chno="59" group-title="故事·相声" radio="true",悬疑电台
+#EXTINF:-1 tvg-chno="59" group-title="故事·相声" radio="true" tvg-logo="http://pic.qtfm.cn/device/77b53413f0cb42388b7b90ffc8b48acb/1600852100658_5--ln3qaH.jpeg!200",悬疑电台
 https://rscdn.ajmide.com/r_3143/nglive_3143.m3u8
-#EXTINF:-1 tvg-chno="60" group-title="故事·相声" radio="true",历史档案
+#EXTINF:-1 tvg-chno="60" group-title="故事·相声" radio="true" tvg-logo="https://upload-qn.ajmide.com/image/2023/10/23/6434dabb63ec631a5008a697918171b4.png@350w_1l",历史档案
 https://rscdn.ajmide.com/r_3179/nglive_3179.m3u8

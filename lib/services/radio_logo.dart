@@ -31,6 +31,34 @@ class RadioLogo {
     'https://nl1.api.radio-browser.info',
   ];
 
+  /// 可信图床白名单：电台/电视台官方或主流音频平台的图片服务。
+  /// 不在名单里的一律丢弃，回落到字母台标
+  static const List<String> _logoHosts = [
+    'qtfm.cn', // 蜻蜓图床（国内电台台标最全）
+    'qingting.fm',
+    'cnr.cn', // 央广
+    'radio.cn',
+    'cri.cn',
+    'cctv.com', // 央视
+    'cctvpic.com',
+    'gdtv.cn', // 广东广电
+    'ajmide.com', // 阿基米德（上海台）
+    'myalicdn.com', // 央视伴音 CDN
+    'xmcdn.com', // 喜马拉雅
+    'asiafm.net',
+  ];
+
+  static bool _trustedLogo(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
+      return false;
+    }
+    // 明确的网站图标不是台标
+    if (uri.path.toLowerCase().endsWith('favicon.ico')) return false;
+    final host = uri.host.toLowerCase();
+    return _logoHosts.any((h) => host == h || host.endsWith('.$h'));
+  }
+
   static Map<String, String>? _map;
   static Future<void>? _loading;
 
@@ -89,6 +117,10 @@ class RadioLogo {
           final name = (item['name'] ?? '').toString().trim();
           final favicon = (item['favicon'] ?? '').toString().trim();
           if (name.isEmpty || favicon.isEmpty) continue;
+          // 广播库的 favicon 是用户随手填的，大量指向网站图标
+          // （微博 appicon、sinaimg、xx.com/favicon.ico）。这类图放进
+          // 列表比字母台标脏得多，宁可不要——只认已知的电台/电视台图床
+          if (!_trustedLogo(favicon)) continue;
           final key = normalize(name);
           // 同名多台时保留点击量更高的（列表已按 clickcount 倒序）
           map.putIfAbsent(key, () => favicon);
