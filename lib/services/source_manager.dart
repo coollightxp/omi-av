@@ -12,6 +12,7 @@ import '../models/epg_program.dart';
 import '../models/epg_source.dart';
 import '../models/playlist_source.dart';
 import 'playlist_parser.dart';
+import 'radio_library.dart';
 import 'xmltv_epg_parser.dart';
 
 /// 播放列表与 EPG 源管理服务
@@ -88,6 +89,9 @@ class SourceManager {
     _currentPlaylistId = prefs.getString(_currentPlaylistKey);
     _builtinRemoved = prefs.getBool(_builtinRemovedKey) == true;
     await _ensureBuiltinRadio(prefs);
+    // 我的电台：库里有台就保证源列表里有对应条目
+    await RadioLibrary.load();
+    await ensureRadioLibrarySource();
 
     final epgStr = prefs.getString(_epgKey);
     if (epgStr != null && epgStr.isNotEmpty) {
@@ -122,6 +126,30 @@ class SourceManager {
     await prefs.setBool(_builtinRemovedKey, false);
     _builtinRemoved = false;
     await _ensureBuiltinRadio(prefs);
+  }
+
+  /// 确保「我的电台」源存在（在网上目录加了第一个台时调用）
+  Future<void> ensureRadioLibrarySource() async {
+    if (RadioLibrary.isEmpty) return;
+    if (_playlists.any((p) => p.id == PlaylistSource.radioLibraryId)) return;
+    _playlists.add(PlaylistSource(
+      id: PlaylistSource.radioLibraryId,
+      name: RadioLibrary.categoryName,
+      // 不是真实地址，只用于列表展示与「复制」提示
+      url: 'local://my-radio',
+      type: PlaylistSourceType.radioLibrary,
+      format: PlaylistFormat.m3u,
+      addedAt: DateTime.now(),
+    ));
+    await _savePlaylists();
+  }
+
+  /// 我的电台内容变化后刷新：当前源是它时重建频道缓存
+  Future<void> reloadRadioLibrary() async {
+    await ensureRadioLibrarySource();
+    if (_currentPlaylistId != PlaylistSource.radioLibraryId) return;
+    _cachedChannels = RadioLibrary.buildCategories();
+    _channelsLoaded = true;
   }
 
   /// 固定时间戳：内置源不随重启变动 addedAt，避免每次重建都改排序
@@ -208,6 +236,12 @@ class SourceManager {
     }
 
     try {
+      // 我的电台：内容在 prefs 里，直接构建分类，不读文件/网络
+      if (source.type == PlaylistSourceType.radioLibrary) {
+        _cachedChannels = RadioLibrary.buildCategories();
+        _channelsLoaded = true;
+        return _cachedChannels;
+      }
       final List<int> bytes;
       if (source.type == PlaylistSourceType.builtin) {
         // 出厂内置源随安装包发布，从 asset 读，不走网络

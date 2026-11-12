@@ -18,6 +18,7 @@ import '../models/epg_program.dart';
 import '../models/epg_source.dart';
 import '../models/player_settings.dart';
 import '../models/playlist_source.dart';
+import '../models/radio_station.dart';
 import '../models/reservation.dart';
 import 'auto_launch.dart';
 import 'cast_stream_proxy.dart';
@@ -27,6 +28,7 @@ import 'cast_log.dart';
 import 'format_hint.dart';
 import 'media/omi_video.dart';
 import 'media_capture_service.dart';
+import 'radio_library.dart';
 import 'radio_logo.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
@@ -3141,6 +3143,34 @@ class PlayerController extends ChangeNotifier {
     // 首个播放列表自动选中并加载频道，让左侧列表立即可读
     if (sourceManager.currentPlaylistId == null) {
       await selectPlaylist(source.id);
+    } else {
+      notifyListeners();
+    }
+  }
+
+  // ==================== 我的电台（在线目录） ====================
+
+  bool isStationSaved(String stationId) => RadioLibrary.contains(stationId);
+
+  /// 把在线目录里的电台加进「我的电台」
+  Future<void> addRadioStation(RadioStation station) async {
+    final added = await RadioLibrary.add(station);
+    if (!added) return;
+    await _afterRadioLibraryChanged();
+    debugPrint('[Radio] added ${station.name}');
+  }
+
+  Future<void> removeRadioStation(String stationId) async {
+    final removed = await RadioLibrary.remove(stationId);
+    if (!removed) return;
+    await _afterRadioLibraryChanged();
+  }
+
+  /// 库变化后：补源条目、必要时重载频道列表
+  Future<void> _afterRadioLibraryChanged() async {
+    await sourceManager.ensureRadioLibrarySource();
+    if (sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId) {
+      await refreshChannels();
     } else {
       notifyListeners();
     }

@@ -5,6 +5,7 @@ enum PlaylistSourceType {
   url,    // 网络地址
   local,  // 本地文件
   builtin, // 出厂内置（随安装包发布，从 asset 读取，可停用可删除）
+  radioLibrary, // 「我的电台」：在线目录搜到后加进来的台，存在本地
 }
 
 /// 播放列表文件格式
@@ -37,6 +38,9 @@ class PlaylistSource {
   /// 内置电台精选：id 固定，便于升级时识别、恢复、去重
   static const String builtinRadioId = 'omi-builtin-radio';
   static const String builtinRadioAsset = 'assets/radio/omi_radio.m3u';
+
+  /// 「我的电台」：内容来自 RadioLibrary（prefs），不落文件
+  static const String radioLibraryId = 'omi-radio-library';
 
   bool get isBuiltin => type == PlaylistSourceType.builtin;
 

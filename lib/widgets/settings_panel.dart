@@ -9,7 +9,9 @@ import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../core/theme/app_colors.dart';
 import '../models/epg_source.dart';
+import 'radio_search_dialog.dart';
 import '../models/player_settings.dart';
 import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
@@ -130,7 +132,7 @@ class _SettingsPanelState extends State<SettingsPanel>
   late TabController _tabController;
 
   /// 顶部页签的焦点节点：上下键可以落到这里，左右键在这里切页签
-  final FocusNode _tabFocus = FocusNode(debugLabel: 'settingsTabBar');
+  final FocusNode _navFocus = FocusNode(debugLabel: 'settingsTabBar');
 
   /// 设置内容根节点：判断当前焦点是否已在面板内
   final GlobalKey _panelKey = GlobalKey();
@@ -160,7 +162,7 @@ class _SettingsPanelState extends State<SettingsPanel>
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onVerticalKey);
     _tabController.removeListener(_onTabIndexChanged);
-    _tabFocus.dispose();
+    _navFocus.dispose();
     _panelFocusNode.dispose();
     _tabController.dispose();
     super.dispose();
@@ -237,7 +239,7 @@ class _SettingsPanelState extends State<SettingsPanel>
     final idx = stops.indexWhere((n) => n == focus || n.hasFocus);
     if (idx < 0) {
       // 焦点还停在面板外（刚打开时）：从页签栏进入
-      _tabFocus.requestFocus();
+      _navFocus.requestFocus();
       return true;
     }
     final target = idx + (isUp ? -1 : 1);
@@ -252,6 +254,18 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   /// 把当前焦点滚到可视区（设置内容是可滚动的长列表）。
   /// 焦点变更在微任务里生效，下一帧再取 primaryFocus。
+  /// 从分类栏进入内容区：聚焦右栏第一个可聚焦控件
+  void _focusFirstContent() {
+    for (final n in _panelFocusNode.traversalDescendants) {
+      if (n == _navFocus) continue;
+      if (n.canRequestFocus && n.context != null) {
+        n.requestFocus();
+        _scrollFocusedIntoView();
+        return;
+      }
+    }
+  }
+
   void _scrollFocusedIntoView() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -286,10 +300,13 @@ class _SettingsPanelState extends State<SettingsPanel>
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 760),
               child: Material(
-            color: Colors.black87,
-            elevation: 24,
-            borderRadius:
-                const BorderRadius.vertical(top: Radius.circular(16)),
+            color: AppColors.overlay,
+            elevation: 28,
+            shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+              side: BorderSide(color: AppColors.stroke),
+            ),
+            clipBehavior: Clip.antiAlias,
             child: SafeArea(
               top: false,
               child: Builder(builder: (context) {
@@ -348,68 +365,43 @@ class _SettingsPanelState extends State<SettingsPanel>
                         ],
                       ),
                     ),
-                    // Tab 栏：单独可获得焦点（上下键能落到这里），
-                    // 移到这里后左右键切页签
-                    Focus(
-                      focusNode: _tabFocus,
-                      onKeyEvent: (node, event) {
-                        if (event is! KeyDownEvent &&
-                            event is! KeyRepeatEvent) {
-                          return KeyEventResult.ignored;
-                        }
-                        final k = event.logicalKey;
-                        if (k != LogicalKeyboardKey.arrowLeft &&
-                            k != LogicalKeyboardKey.arrowRight) {
-                          return KeyEventResult.ignored;
-                        }
-                        final next = _tabController.index +
-                            (k == LogicalKeyboardKey.arrowLeft ? -1 : 1);
-                        if (next >= 0 && next < _tabController.length) {
-                          _tabController.animateTo(next);
-                        }
-                        // 焦点留在页签栏上，连续左右按不用重新找焦点
-                        _tabFocus.requestFocus();
-                        return KeyEventResult.handled;
-                      },
-                      child: ListenableBuilder(
-                        listenable: _tabFocus,
-                        builder: (context, child) {
-                          // 焦点在页签栏时给一圈描边，遥控器用户能看清
-                          // 焦点已经上来了，此时左右键切页
-                          return Container(
-                            decoration: _tabFocus.hasFocus
-                                ? BoxDecoration(
-                                    border: Border.all(
-                                        color: Colors.white70, width: 1),
-                                    borderRadius: BorderRadius.circular(8),
-                                  )
-                                : null,
-                            child: child,
-                          );
-                        },
-                        // 页签自身不取焦点：焦点由上面的 Focus 节点持有，
-                        // 左右键才能稳定切页
-                        child: ExcludeFocus(
-                          child: TabBar(
-                            controller: _tabController,
-                            indicatorColor: Colors.blueAccent,
-                            labelColor: Colors.blueAccent,
-                            unselectedLabelColor: Colors.white54,
-                            tabs: const [
-                              Tab(text: '播放列表'),
-                              Tab(text: 'EPG'),
-                              Tab(text: '播放器'),
-                              Tab(text: '系统'),
-                              Tab(text: '说明'),
+                    const Divider(color: AppColors.divider, height: 1),
+                    // 双栏设置中心（方案 4.1）：宽屏 = 左栏分类 + 右栏内容；
+                    // 手机窄屏 = 左栏折成顶部横滑胶囊，其余不变
+                    Expanded(
+                      child: LayoutBuilder(builder: (context, box) {
+                        final narrow = box.maxWidth < 620;
+                        final nav = _SettingsNav(
+                          index: _tabController.index,
+                          axis: narrow ? Axis.horizontal : Axis.vertical,
+                          focusNode: _navFocus,
+                          onChanged: (i) {
+                            if (i == _tabController.index) return;
+                            _tabController.index = i;
+                          },
+                          onEnterContent: _focusFirstContent,
+                        );
+                        final content = _tabPage(_tabController.index);
+                        if (narrow) {
+                          return Column(
+                            children: [
+                              nav,
+                              const Divider(color: AppColors.divider, height: 1),
+                              Expanded(child: content),
                             ],
-                          ),
-                        ),
-                      ),
+                          );
+                        }
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            nav,
+                            const VerticalDivider(
+                                width: 1, color: AppColors.divider),
+                            Expanded(child: content),
+                          ],
+                        );
+                      }),
                     ),
-                    const Divider(color: Colors.white12, height: 1),
-                    // Tab 内容：只构建当前页（TabBarView 会把另外 4 页也留在
-                    // 焦点树里，方向键会跑到看不见的控件上）
-                    Expanded(child: _tabPage(_tabController.index)),
                   ],
                       ),
                     ),
@@ -418,6 +410,170 @@ class _SettingsPanelState extends State<SettingsPanel>
               }),
             ),
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 设置中心左侧分类栏。
+///
+/// 宽屏竖排在左（图标 + 文字，选中项高亮胶囊），手机窄屏折成顶部
+/// 横滑胶囊。整栏只占一个焦点停靠点：上下（窄屏左右）改分类，
+/// 反方向键进入内容区——比让 5 个分类各自参与焦点遍历更好预测，
+/// 内容区上下移动也不会被分类项打断。
+class _SettingsNav extends StatelessWidget {
+  const _SettingsNav({
+    required this.index,
+    required this.axis,
+    required this.focusNode,
+    required this.onChanged,
+    required this.onEnterContent,
+  });
+
+  final int index;
+  final Axis axis;
+  final FocusNode focusNode;
+  final ValueChanged<int> onChanged;
+  final VoidCallback onEnterContent;
+
+  static const List<(IconData, String)> _items = [
+    (Icons.playlist_play, '节目源'),
+    (Icons.calendar_view_week, 'EPG'),
+    (Icons.tune, '播放器'),
+    (Icons.settings_suggest, '系统'),
+    (Icons.help_outline, '说明'),
+  ];
+
+  bool get _vertical => axis == Axis.vertical;
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final k = event.logicalKey;
+    final prev = _vertical
+        ? LogicalKeyboardKey.arrowUp
+        : LogicalKeyboardKey.arrowLeft;
+    final next = _vertical
+        ? LogicalKeyboardKey.arrowDown
+        : LogicalKeyboardKey.arrowRight;
+    final enter = _vertical
+        ? LogicalKeyboardKey.arrowRight
+        : LogicalKeyboardKey.arrowDown;
+
+    if (k == prev) {
+      if (index > 0) onChanged(index - 1);
+      return KeyEventResult.handled;
+    }
+    // 宽屏左栏在最左侧：向左没有去处，吞掉，避免焦点穿出设置面板
+    if (_vertical && k == LogicalKeyboardKey.arrowLeft) {
+      return KeyEventResult.handled;
+    }
+    if (k == next) {
+      if (index < _items.length - 1) onChanged(index + 1);
+      return KeyEventResult.handled;
+    }
+    if (k == enter ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.gameButtonA ||
+        k == LogicalKeyboardKey.space) {
+      onEnterContent();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final list = _vertical
+        ? ListView.builder(
+            padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+            itemCount: _items.length,
+            itemBuilder: (context, i) => _item(i, vertical: true),
+          )
+        : SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                for (int i = 0; i < _items.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 8),
+                  _item(i, vertical: false),
+                ],
+              ],
+            ),
+          );
+
+    return Focus(
+      focusNode: focusNode,
+      onKeyEvent: _onKey,
+      child: ListenableBuilder(
+        listenable: focusNode,
+        builder: (context, child) => Container(
+          width: _vertical ? 156 : null,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.18),
+            // 焦点在分类栏时给外框：遥控器用户能看清焦点上来了，
+            // 此时用上下（或窄屏左右）切分类
+            border: focusNode.hasFocus
+                ? Border.all(color: Colors.white70, width: 1)
+                : null,
+          ),
+          child: child,
+        ),
+        child: list,
+      ),
+    );
+  }
+
+  Widget _item(int i, {required bool vertical}) {
+    final selected = i == index;
+    final (icon, label) = _items[i];
+    return Padding(
+      padding: EdgeInsets.only(bottom: vertical ? 4 : 0),
+      child: Material(
+        color: selected
+            ? AppColors.accent.withValues(alpha: 0.18)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => onChanged(i),
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: vertical ? 12 : 14,
+              vertical: vertical ? 11 : 8,
+            ),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: selected ? AppColors.accent : Colors.transparent,
+                width: 1,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  size: 18,
+                  color: selected ? AppColors.accent : Colors.white54,
+                ),
+                if (vertical) const SizedBox(width: 10) else const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: selected ? Colors.white : Colors.white60,
+                    fontSize: vertical ? 14 : 13,
+                    fontWeight:
+                        selected ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -584,6 +740,34 @@ class _PlaylistTabState extends State<_PlaylistTab> {
         return ListView(
           padding: const EdgeInsets.only(bottom: 12),
           children: [
+            // 在线电台目录：不新增「添加电台源」，给一个搜索入口，
+            // 搜到哪台就加到「我的电台」（方案 12.2 第 3 条）
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+              child: Row(
+                children: [
+                  const Icon(Icons.podcasts, size: 18, color: Colors.white54),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      '电台：内置精选 + 在线搜索',
+                      style: TextStyle(color: Colors.white54, fontSize: 12.5),
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => RadioSearchDialog.show(context),
+                    icon: const Icon(Icons.travel_explore, size: 18),
+                    label: const Text('在线电台'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: AppColors.stroke),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             // 添加表单
             Padding(
               padding: const EdgeInsets.all(12),
@@ -670,23 +854,29 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   title: p.isBuiltin ? '${p.name} · 内置' : p.name,
                   subtitle: p.isBuiltin
                       ? '出厂自带 · 电视伴音 / 央广 / 省市台 / 音乐 / 故事'
-                      : p.url,
+                      : (p.type == PlaylistSourceType.radioLibrary
+                          ? '在线目录里加入的电台，随加随播'
+                          : p.url),
                   icon: p.isBuiltin
                       ? Icons.radio
-                      : (p.type == PlaylistSourceType.url
-                          ? Icons.cloud
-                          : Icons.folder),
+                      : (p.type == PlaylistSourceType.radioLibrary
+                          ? Icons.podcasts
+                          : (p.type == PlaylistSourceType.url
+                              ? Icons.cloud
+                              : Icons.folder)),
                   isCurrent: isCurrent,
                   // 行上按 OK = 选定该播放列表；左右键进入行尾按钮
                   onSelect: isCurrent
                       ? null
                       : () => controller.selectPlaylist(p.id),
                   actions: [
-                    // 内置源地址是安装包内资源：编辑/复制没有意义，不给入口
-                    if (!p.isBuiltin)
+                    // 内置源/我的电台地址都不是可编辑的字符串：不给编辑入口
+                    if (!p.isBuiltin &&
+                        p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
                           () => _editPlaylist(p)),
-                    if (!p.isBuiltin)
+                    if (!p.isBuiltin &&
+                        p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
                           () => _copyPlaylist(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
