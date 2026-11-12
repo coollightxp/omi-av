@@ -2089,7 +2089,8 @@ class PlayerController extends ChangeNotifier {
     final closure = () => _onVideoListener(c);
     c.addListener(closure);
     // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
-    unawaited(c.applyAudioFilter(kAudioPresets[_settings.audioPreset]));
+    // （'custom' 走自定义均衡器增益构建）
+    unawaited(c.applyAudioFilter(filterForPreset(_settings.audioPreset)));
     // 关键：initialize 完成前绝不能把 c 挂到 _videoController。
     // 4K 等高码率台 initialize 很慢，用户此时切台会进入
     // _disposeVideoController，对仍在初始化的实例调 pause/dispose，
@@ -2717,6 +2718,7 @@ class PlayerController extends ChangeNotifier {
   static const _kCastEndWait = 'settings_cast_end_wait_seconds';
   static const _kResumeLastChannel = 'settings_resume_last_channel';
   static const _kAudioPreset = 'settings_audio_preset';
+  static const _kAudioEqGains = 'settings_audio_eq_gains';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -2756,6 +2758,7 @@ class PlayerController extends ChangeNotifier {
         castEndWaitSeconds: _normalizeCastWait(p.getInt(_kCastEndWait) ?? 0),
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
         audioPreset: p.getString(_kAudioPreset) ?? '',
+        audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -2799,6 +2802,8 @@ class PlayerController extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setString(_kAudioPreset, _settings.audioPreset);
+      await p.setString(
+          _kAudioEqGains, jsonEncode(_settings.audioEqGains));
       await p.setBool(_kAutoPlayNext, _settings.autoPlayNext);
       await p.setDouble(_kSensitivity, _settings.gestureSensitivity);
       await p.setInt(_kAutoHide, _settings.autoHideDelay);
@@ -3005,9 +3010,80 @@ class PlayerController extends ChangeNotifier {
     if (_settings.audioPreset == preset) return;
     updateSettings(_settings.copyWith(audioPreset: preset));
     final c = _videoController;
-    if (c != null) await c.applyAudioFilter(kAudioPresets[preset]);
+    if (c != null) await c.applyAudioFilter(filterForPreset(preset));
     final label = preset.isEmpty ? '标准' : _audioPresetLabel(preset);
     OsdBus.show('声音：$label', icon: Icons.equalizer);
+  }
+
+  /// 均衡器 10 段中心频率（Hz）
+  static const List<int> kEqBands = [
+    31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000,
+  ];
+  static const List<String> kEqBandLabels = [
+    '31', '62', '125', '250', '500', '1k', '2k', '4k', '8k', '16k',
+  ];
+
+  List<double> get audioEqGains {
+    final g = _settings.audioEqGains;
+    if (g.length == kEqBands.length) return g;
+    return List<double>.filled(kEqBands.length, 0);
+  }
+
+  /// 自定义均衡器增益 → 滤镜串（全 0 段返回 null = 直通）
+  String? filterForPreset(String preset) {
+    if (preset != 'custom') return kAudioPresets[preset];
+    final gains = audioEqGains;
+    final parts = <String>[];
+    for (var i = 0; i < kEqBands.length; i++) {
+      final g = gains[i];
+      if (g.abs() < 0.05) continue;
+      parts.add('equalizer=f=${kEqBands[i]}:t=q:w=1.0:'
+          'g=${g.toStringAsFixed(1)}');
+    }
+    return parts.isEmpty ? null : parts.join(',');
+  }
+
+  /// 调整某段增益（-12~+12 dB）；当前不在自定义档时自动切过去
+  Future<void> setAudioEqGain(int band, double value) async {
+    if (band < 0 || band >= kEqBands.length) return;
+    final v = value.clamp(-12.0, 12.0);
+    final gains = [...audioEqGains];
+    gains[band] = v;
+    updateSettings(_settings.copyWith(
+      audioEqGains: gains,
+      audioPreset: 'custom',
+    ));
+    final c = _videoController;
+    if (c != null) await c.applyAudioFilter(filterForPreset('custom'));
+  }
+
+  /// 自定义均衡器一键拉平（清增益但停在自定义档）
+  Future<void> resetAudioEq() async {
+    updateSettings(_settings.copyWith(
+      audioEqGains: List<double>.filled(kEqBands.length, 0),
+      audioPreset: 'custom',
+    ));
+    final c = _videoController;
+    if (c != null) await c.applyAudioFilter(null);
+    OsdBus.show('均衡器已拉平', icon: Icons.equalizer);
+  }
+
+  /// 持久化解码：json 列表 → 10 段增益（坏数据回全 0）
+  static List<double> _decodeEqGains(String? raw) {
+    if (raw == null || raw.isEmpty) {
+      return List<double>.filled(kEqBands.length, 0);
+    }
+    try {
+      final list = (jsonDecode(raw) as List)
+          .map((e) => (e as num).toDouble())
+          .toList();
+      if (list.length != kEqBands.length) {
+        return List<double>.filled(kEqBands.length, 0);
+      }
+      return list;
+    } catch (_) {
+      return List<double>.filled(kEqBands.length, 0);
+    }
   }
 
   static String _audioPresetLabel(String key) {

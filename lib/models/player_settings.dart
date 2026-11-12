@@ -81,8 +81,13 @@ class PlayerSettings {
   final bool closeToTray;
 
   /// 声音实验室预设（方案 12.3 第二档）：'' = 标准；key 见 kAudioPresets。
-  /// 走 mpv lavfi 音频滤镜，仅内置播放器生效（网页播放器不支持）
+  /// 走 mpv lavfi 音频滤镜，仅内置播放器生效（网页播放器不支持）。
+  /// 'custom' = 自定义 10 段均衡器，增益见 [audioEqGains]
   final String audioPreset;
+
+  /// 自定义均衡器 10 段增益（dB，-12~+12），中心频率
+  /// 31/62/125/250/500/1k/2k/4k/8k/16k；空表 = 全 0（直通）
+  final List<double> audioEqGains;
 
   const PlayerSettings({
     this.autoPlayNext = true,
@@ -108,6 +113,7 @@ class PlayerSettings {
     this.resumeLastChannel = true,
     this.closeToTray = false,
     this.audioPreset = '',
+    this.audioEqGains = const <double>[],
   });
 
   PlayerSettings copyWith({
@@ -134,6 +140,7 @@ class PlayerSettings {
     bool? resumeLastChannel,
     bool? closeToTray,
     String? audioPreset,
+    List<double>? audioEqGains,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -160,6 +167,7 @@ class PlayerSettings {
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
       closeToTray: closeToTray ?? this.closeToTray,
       audioPreset: audioPreset ?? this.audioPreset,
+      audioEqGains: audioEqGains ?? this.audioEqGains,
     );
   }
 }

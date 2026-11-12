@@ -21,6 +21,7 @@ import '../services/channel_blacklist.dart';
 import '../services/channel_alias.dart';
 import '../services/scene_favorites.dart';
 import '../services/radio_recorder.dart';
+import '../services/recording_share.dart';
 import '../services/radio_library.dart';
 import '../services/web_diag.dart';
 import 'scaled_panel.dart';
@@ -1583,6 +1584,13 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
                             onPressed: () => _play(f),
                           ),
                           IconButton(
+                            tooltip: '分享',
+                            icon: const Icon(Icons.ios_share,
+                                size: 17, color: Color(0xCCFFFFFF)),
+                            onPressed: () =>
+                                RecordingShare.share(f.path, name),
+                          ),
+                          IconButton(
                             tooltip: '删除',
                             icon: const Icon(Icons.delete_outline,
                                 size: 17, color: Colors.redAccent),
@@ -1972,6 +1980,17 @@ class _PlayerSettingsTab extends StatelessWidget {
                         const TextStyle(color: Colors.white38, fontSize: 12)),
               ),
             ),
+          RadioGroup<String>(
+            groupValue: current,
+            onChanged: (v) => Navigator.pop(ctx, v),
+            child: RadioListTile<String>(
+              value: 'custom',
+              title: Text('自定义均衡器',
+                  style: const TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: Text(_eqSummary(controller.audioEqGains),
+                  style: const TextStyle(color: Colors.white38, fontSize: 12)),
+            ),
+          ),
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text('仅内置播放器生效；网页频道用站点自己的播放器，不参与',
@@ -1981,7 +2000,104 @@ class _PlayerSettingsTab extends StatelessWidget {
       ),
     );
     if (picked == null) return;
+    if (picked == 'custom') {
+      await controller.setAudioPreset('custom');
+      if (!context.mounted) return;
+      await _showEqDialog(context, controller);
+      return;
+    }
     await controller.setAudioPreset(picked);
+  }
+
+  /// 均衡器概要（拖到非 0 的段才显示）
+  static String _eqSummary(List<double> gains) {
+    final active = <String>[];
+    for (var i = 0; i < gains.length && i < PlayerController.kEqBandLabels.length; i++) {
+      final g = gains[i];
+      if (g.abs() >= 0.05) {
+        active.add('${PlayerController.kEqBandLabels[i]}'
+            '${g > 0 ? '+' : ''}${g.toStringAsFixed(0)}');
+      }
+    }
+    return active.isEmpty ? '未调整（全部直通）' : active.join('  ');
+  }
+
+  /// 自定义均衡器：10 段滑杆（31Hz~16kHz，±12dB），松手即生效
+  Future<void> _showEqDialog(
+      BuildContext context, PlayerController controller) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final gains = controller.audioEqGains;
+          return AlertDialog(
+            title: Row(
+              children: [
+                const Expanded(
+                  child: Text('自定义均衡器（10 段）',
+                      style: TextStyle(fontSize: 16)),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    await controller.resetAudioEq();
+                    setLocal(() {});
+                  },
+                  child: const Text('拉平'),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < PlayerController.kEqBands.length; i++)
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 42,
+                          child: Text(
+                            PlayerController.kEqBandLabels[i],
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(
+                                color: Colors.white54, fontSize: 12),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Slider(
+                            value: gains[i],
+                            min: -12,
+                            max: 12,
+                            divisions: 24,
+                            label:
+                                '${gains[i] > 0 ? '+' : ''}${gains[i].toStringAsFixed(1)}',
+                            onChanged: (v) async {
+                              await controller.setAudioEqGain(i, v);
+                              setLocal(() {});
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '往上调增强该频段，往下调削弱；每档 0.5dB 一格，拖动即生效',
+                    style: TextStyle(color: Colors.white24, fontSize: 11.5),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('完成'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Widget _buildQualitySelector(PlayerController controller) {
