@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/channel.dart';
-import '../services/channel_logo.dart';
+import '../core/widgets/channel_badge.dart';
 import '../services/player_controller.dart';
 
 /// 视频播放器显示组件
@@ -231,55 +231,25 @@ class _RadioStage extends StatelessWidget {
     );
   }
 
-  /// 台标：本地 asset 优先 → 在线 logo → 首字兜底（列表永不空白）
+  /// 台标：内置库 → 源内 tvg-logo → Radio Browser → 字母台标
+  /// （四级回退统一由 ChannelBadge 处理，与频道列表完全一致）
   Widget _logo(Channel ch) {
     const size = 176.0;
-    Widget fallback() => Container(
-          width: size,
-          height: size,
-          alignment: Alignment.center,
-          decoration: const BoxDecoration(
-            shape: BoxShape.circle,
-            color: Color(0x14FFFFFF),
-          ),
-          child: Text(
-            ch.name.isEmpty ? '📻' : ch.name.characters.first,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 64,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        );
-
-    Widget circle(Widget child) => Container(
-          width: size,
-          height: size,
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.white.withValues(alpha: 0.06),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
-          ),
-          child: child,
-        );
-
-    final asset = ChannelLogo.assetFor(ch);
-    if (asset.isNotEmpty) {
-      return circle(Image.asset(
-        asset,
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => fallback(),
-      ));
-    }
-    if (ch.logoUrl.isNotEmpty) {
-      return circle(Image.network(
-        ch.logoUrl,
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => fallback(),
-      ));
-    }
-    return fallback();
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+      ),
+      child: ChannelBadge(
+        channel: ch,
+        size: size - 4,
+        circular: true,
+        background: Colors.white.withValues(alpha: 0.06),
+      ),
+    );
   }
 }
 

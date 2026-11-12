@@ -4,6 +4,7 @@ import 'dart:convert';
 enum PlaylistSourceType {
   url,    // 网络地址
   local,  // 本地文件
+  builtin, // 出厂内置（随安装包发布，从 asset 读取，可停用可删除）
 }
 
 /// 播放列表文件格式
@@ -32,6 +33,22 @@ class PlaylistSource {
     required this.addedAt,
     this.lastUpdated,
   });
+
+  /// 内置电台精选：id 固定，便于升级时识别、恢复、去重
+  static const String builtinRadioId = 'omi-builtin-radio';
+  static const String builtinRadioAsset = 'assets/radio/omi_radio.m3u';
+
+  bool get isBuiltin => type == PlaylistSourceType.builtin;
+
+  /// 内置源无法编辑地址（地址是安装包内资源）
+  PlaylistSource builtinRadio() => PlaylistSource(
+        id: builtinRadioId,
+        name: '内置电台精选',
+        url: builtinRadioAsset,
+        type: PlaylistSourceType.builtin,
+        format: PlaylistFormat.m3u,
+        addedAt: DateTime.now(),
+      );
 
   PlaylistSource copyWith({
     String? id,

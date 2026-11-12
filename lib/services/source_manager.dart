@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:async';
 
 import 'package:fl_charset/fl_charset.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -20,6 +21,8 @@ class SourceManager {
   static const String _currentPlaylistKey = 'omi_current_playlist';
   static const String _epgKey = 'omi_epgs';
   static const String _currentEpgKey = 'omi_current_epg';
+  /// 用户删掉内置源后置 true，不再自动补回（设置页可手动恢复）
+  static const String _builtinRemovedKey = 'omi_builtin_radio_removed';
 
   // EPG 每日缓存：拉取后序列化到 SharedPreferences，24h 内复用，
   // 避免每次打开都联网（EPG 一天内几乎不变）。
@@ -42,6 +45,7 @@ class SourceManager {
   Map<String, String> _cachedEpgChannelIcons = {};
   bool _channelsLoaded = false;
   bool _epgLoaded = false;
+  bool _builtinRemoved = false;
 
   List<PlaylistSource> get playlists => List.unmodifiable(_playlists);
   List<EpgSource> get epgs => List.unmodifiable(_epgs);
@@ -51,6 +55,9 @@ class SourceManager {
   Map<String, List<EpgProgram>> get cachedEpg => _cachedEpg;
   bool get channelsLoaded => _channelsLoaded;
   bool get epgLoaded => _epgLoaded;
+
+  /// 内置电台源是否被用户删掉（设置页显示「恢复内置电台」用）
+  bool get builtinRadioRemoved => _builtinRemoved;
 
   PlaylistSource? get currentPlaylist {
     if (_currentPlaylistId == null) return null;
@@ -79,6 +86,8 @@ class SourceManager {
       _playlists = PlaylistSource.decodeList(playlistStr);
     }
     _currentPlaylistId = prefs.getString(_currentPlaylistKey);
+    _builtinRemoved = prefs.getBool(_builtinRemovedKey) == true;
+    await _ensureBuiltinRadio(prefs);
 
     final epgStr = prefs.getString(_epgKey);
     if (epgStr != null && epgStr.isNotEmpty) {
@@ -86,6 +95,37 @@ class SourceManager {
     }
     _currentEpgId = prefs.getString(_currentEpgKey);
   }
+
+  /// 内置电台精选：出厂自带，排在源列表首位。
+  ///
+  /// 三条规则：①用户删过就不再塞回（尊重"我不要这个源"的选择）；
+  /// ②已有同 id 的条目就跳过（升级/重启幂等）；③老版本升级上来的用户
+  /// 列表里没有它，补一条但**不抢占当前源**，避免改动正在用的电视源。
+  Future<void> _ensureBuiltinRadio(SharedPreferences prefs) async {
+    if (prefs.getBool(_builtinRemovedKey) == true) return;
+    if (_playlists.any((p) => p.id == PlaylistSource.builtinRadioId)) return;
+    final builtin = PlaylistSource(
+      id: PlaylistSource.builtinRadioId,
+      name: '内置电台精选',
+      url: PlaylistSource.builtinRadioAsset,
+      type: PlaylistSourceType.builtin,
+      format: PlaylistFormat.m3u,
+      addedAt: _builtinEpoch,
+    );
+    _playlists.insert(0, builtin);
+    await _savePlaylists();
+  }
+
+  /// 恢复被删除的内置源（设置页「恢复内置电台」）
+  Future<void> restoreBuiltinRadio() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_builtinRemovedKey, false);
+    _builtinRemoved = false;
+    await _ensureBuiltinRadio(prefs);
+  }
+
+  /// 固定时间戳：内置源不随重启变动 addedAt，避免每次重建都改排序
+  static final DateTime _builtinEpoch = DateTime(2025, 11, 1);
 
   Future<void> _savePlaylists() async {
     final prefs = await SharedPreferences.getInstance();
@@ -117,6 +157,8 @@ class SourceManager {
 
   /// 删除播放列表源
   Future<void> removePlaylist(String id) async {
+    final wasBuiltin =
+        _playlists.any((p) => p.id == id && p.isBuiltin);
     _playlists.removeWhere((p) => p.id == id);
     if (_currentPlaylistId == id) {
       _currentPlaylistId = null;
@@ -124,6 +166,12 @@ class SourceManager {
       _channelsLoaded = false;
     }
     await _savePlaylists();
+    // 内置源删掉后打标记，下次启动不再自动补回
+    if (wasBuiltin) {
+      _builtinRemoved = true;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_builtinRemovedKey, true);
+    }
   }
 
   /// 编辑播放列表源（名称/地址/类型）；地址变化后需重新加载频道
@@ -161,7 +209,13 @@ class SourceManager {
 
     try {
       final List<int> bytes;
-      if (source.type == PlaylistSourceType.local) {
+      if (source.type == PlaylistSourceType.builtin) {
+        // 出厂内置源随安装包发布，从 asset 读，不走网络
+        final data =
+            await rootBundle.load(PlaylistSource.builtinRadioAsset);
+        bytes = data.buffer
+            .asUint8List(data.offsetInBytes, data.lengthInBytes);
+      } else if (source.type == PlaylistSourceType.local) {
         bytes = await File(source.url).readAsBytes();
       } else {
         bytes = await _fetchPlaylistBytes(source.url);

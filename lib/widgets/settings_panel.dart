@@ -665,21 +665,30 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                 final isCurrent =
                     controller.sourceManager.currentPlaylistId == p.id;
                 return _SourceRow(
-                  title: p.name,
-                  subtitle: p.url,
-                  icon: p.type == PlaylistSourceType.url
-                      ? Icons.cloud
-                      : Icons.folder,
+                  // 内置源在标题上带「内置」后缀，副标题说明内容范围，
+                  // 让用户一眼看出这不是自己加的、删了还能恢复
+                  title: p.isBuiltin ? '${p.name} · 内置' : p.name,
+                  subtitle: p.isBuiltin
+                      ? '出厂自带 · 电视伴音 / 央广 / 省市台 / 音乐 / 故事'
+                      : p.url,
+                  icon: p.isBuiltin
+                      ? Icons.radio
+                      : (p.type == PlaylistSourceType.url
+                          ? Icons.cloud
+                          : Icons.folder),
                   isCurrent: isCurrent,
                   // 行上按 OK = 选定该播放列表；左右键进入行尾按钮
                   onSelect: isCurrent
                       ? null
                       : () => controller.selectPlaylist(p.id),
                   actions: [
-                    _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
-                        () => _editPlaylist(p)),
-                    _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
-                        () => _copyPlaylist(p)),
+                    // 内置源地址是安装包内资源：编辑/复制没有意义，不给入口
+                    if (!p.isBuiltin)
+                      _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
+                          () => _editPlaylist(p)),
+                    if (!p.isBuiltin)
+                      _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
+                          () => _copyPlaylist(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
                         () => controller.refreshChannels()),
                     _RowAction(Icons.delete, Colors.redAccent, '删除',
@@ -687,6 +696,19 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   ],
                 );
               }),
+            // 内置电台被删过：给一条恢复入口（删了不是永久丢）
+            if (controller.builtinRadioRemoved)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: _SourceRow(
+                  title: '恢复内置电台精选',
+                  subtitle: '重新加入出厂自带的电台源（60 个台）',
+                  icon: Icons.restore,
+                  isCurrent: false,
+                  onSelect: () => controller.restoreBuiltinRadio(),
+                  actions: const [],
+                ),
+              ),
           ],
         );
       },

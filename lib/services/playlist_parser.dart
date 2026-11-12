@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../models/channel.dart';
+import '../models/playlist_source.dart' show PlaylistFormat;
 
 /// 播放列表解析器
 /// 支持：
@@ -430,4 +431,3 @@ class PlaylistParser {
   }
 }
 
-enum PlaylistFormat { m3u, txt, unknown }

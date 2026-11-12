@@ -3,7 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/epg_program.dart';
-import '../services/channel_logo.dart';
+import '../core/widgets/channel_badge.dart';
 import '../core/theme/app_density.dart';
 import '../core/theme/app_typography.dart';
 import '../core/widgets/ghost_button.dart';
@@ -222,43 +222,29 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   Widget _buildLogo(PlayerController c, double scale) {
     final d = AppDensity.of(context);
     final size = d.logoSize;
-    Widget placeholder() => Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            color: Colors.white12,
-            borderRadius: BorderRadius.circular(scale < 1 ? 10 : 16),
-          ),
-          child: Icon(Icons.live_tv,
-              color: Colors.white54, size: scale < 1 ? 46 : 64),
-        );
-    // 本地 asset 优先（离线可用 + 匹配更强），其次在线 EPG / M3U
-    final asset = c.currentChannel == null
-        ? ''
-        : ChannelLogo.assetFor(c.currentChannel!);
-    if (asset.isNotEmpty) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(scale < 1 ? 10 : 16),
-        child: Image.asset(
-          asset,
-          width: size,
-          height: size,
-          fit: BoxFit.contain,
-          errorBuilder: (_, __, ___) => placeholder(),
-        ),
-      );
-    }
-    final logo = c.currentLogo;
-    if (logo.isEmpty) return placeholder();
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(scale < 1 ? 10 : 16),
-      child: Image.network(
-        logo,
+    final ch = c.currentChannel;
+    if (ch == null) {
+      // 无频道（网页态/空态）：占位图标
+      return Container(
         width: size,
         height: size,
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => placeholder(),
-      ),
+        decoration: BoxDecoration(
+          color: Colors.white12,
+          borderRadius: BorderRadius.circular(scale < 1 ? 10 : 16),
+        ),
+        child: Icon(Icons.live_tv,
+            color: Colors.white54, size: scale < 1 ? 46 : 64),
+      );
+    }
+    // 台标四级回退统一走 ChannelBadge（内置库 → 源 logo →
+    // EPG 匹配 logo → Radio Browser → 字母台标）。
+    // 面板固定用圆角方形：它和视频信息栏同一行，圆形会显得突兀
+    return ChannelBadge(
+      channel: ch,
+      size: size,
+      circular: false,
+      background: Colors.white10,
+      extraLogoUrls: [c.currentLogo],
     );
   }
 

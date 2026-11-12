@@ -93,3 +93,5 @@ flutter:
     - branding/web/Icon-192.png
     # 内置频道台标（节目源没给 tvg-logo 时按频道名匹配）
     - assets/logos/
+    # 出厂内置电台精选（电视伴音 / 央广 / 省市台 / 音乐 / 故事）
+    - assets/radio/

@@ -27,6 +27,7 @@ import 'cast_log.dart';
 import 'format_hint.dart';
 import 'media/omi_video.dart';
 import 'media_capture_service.dart';
+import 'radio_logo.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
 import 'source_manager.dart';
@@ -248,6 +249,9 @@ class PlayerController extends ChangeNotifier {
     _isTv = await isTvDevice();
     _boot('正在加载节目源…');
     await sourceManager.loadFromPrefs();
+    // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
+    // 不 await：台标只是锦上添花，绝不能拖慢启动
+    unawaited(RadioLogo.ensure());
     await reservationManager.init(_onReservationTriggered);
 
     // 启动网络监控：开机启动时可能网络未就绪，需要检测并重试
@@ -261,6 +265,14 @@ class PlayerController extends ChangeNotifier {
         notifyListeners();
       }
     });
+
+    // 一个源都没有时（新装/刚删光）：把内置电台精选设为当前源，
+    // 让首启就有内容，而不是一进来面对空列表
+    if (sourceManager.currentPlaylist == null &&
+        sourceManager.playlists
+            .any((p) => p.id == PlaylistSource.builtinRadioId)) {
+      await sourceManager.selectPlaylist(PlaylistSource.builtinRadioId);
+    }
 
     // 如果有选中的播放列表，加载频道；否则保持空列表，等用户添加
     if (sourceManager.currentPlaylist != null) {
@@ -3133,6 +3145,18 @@ class PlayerController extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  /// 恢复被删除的内置电台源
+  Future<void> restoreBuiltinRadio() async {
+    await sourceManager.restoreBuiltinRadio();
+    if (sourceManager.currentPlaylistId == null) {
+      await selectPlaylist(PlaylistSource.builtinRadioId);
+    } else {
+      notifyListeners();
+    }
+  }
+
+  bool get builtinRadioRemoved => sourceManager.builtinRadioRemoved;
 
   Future<void> removePlaylist(String id) async {
     await sourceManager.removePlaylist(id);

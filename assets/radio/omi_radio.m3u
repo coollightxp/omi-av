@@ -1,0 +1,133 @@
+#EXTM3U
+# Omi 内置电台精选（电视伴音 + 国家台 + 省市台 + 音乐 + 故事）
+# 生成于 2025-11，全部流已逐个探测可用；如某台失效，可在设置里整体停用本内置源
+
+# ===== 电视伴音 =====
+#EXTINF:-1 tvg-chno="1" group-title="电视伴音" radio="true" tvg-name="CCTV1",CCTV-1 综合
+https://piccpndali.v.myalicdn.com/audio/cctv1_2.m3u8
+#EXTINF:-1 tvg-chno="2" group-title="电视伴音" radio="true" tvg-name="CCTV2",CCTV-2 财经
+https://piccpndali.v.myalicdn.com/audio/cctv2_2.m3u8
+#EXTINF:-1 tvg-chno="3" group-title="电视伴音" radio="true" tvg-name="CCTV3",CCTV-3 综艺
+https://piccpndali.v.myalicdn.com/audio/cctv3_2.m3u8
+#EXTINF:-1 tvg-chno="4" group-title="电视伴音" radio="true" tvg-name="CCTV4",CCTV-4 中文国际
+https://piccpndali.v.myalicdn.com/audio/cctv4_2.m3u8
+#EXTINF:-1 tvg-chno="5" group-title="电视伴音" radio="true" tvg-name="CCTV5",CCTV-5 体育
+https://piccpndali.v.myalicdn.com/audio/cctv5_2.m3u8
+#EXTINF:-1 tvg-chno="6" group-title="电视伴音" radio="true" tvg-name="CCTV5+",CCTV-5+ 体育赛事
+https://piccpndali.v.myalicdn.com/audio/cctv5plus_2.m3u8
+#EXTINF:-1 tvg-chno="7" group-title="电视伴音" radio="true" tvg-name="CCTV6",CCTV-6 电影
+https://piccpndali.v.myalicdn.com/audio/cctv6_2.m3u8
+#EXTINF:-1 tvg-chno="8" group-title="电视伴音" radio="true" tvg-name="CCTV7",CCTV-7 国防军事
+https://piccpndali.v.myalicdn.com/audio/cctv7_2.m3u8
+#EXTINF:-1 tvg-chno="9" group-title="电视伴音" radio="true" tvg-name="CCTV8",CCTV-8 电视剧
+https://piccpndali.v.myalicdn.com/audio/cctv8_2.m3u8
+#EXTINF:-1 tvg-chno="10" group-title="电视伴音" radio="true" tvg-name="CCTV9",CCTV-9 纪录
+https://piccpndali.v.myalicdn.com/audio/cctv9_2.m3u8
+#EXTINF:-1 tvg-chno="11" group-title="电视伴音" radio="true" tvg-name="CCTV10",CCTV-10 科教
+https://piccpndali.v.myalicdn.com/audio/cctv10_2.m3u8
+#EXTINF:-1 tvg-chno="12" group-title="电视伴音" radio="true" tvg-name="CCTV11",CCTV-11 戏曲
+https://piccpndali.v.myalicdn.com/audio/cctv11_2.m3u8
+#EXTINF:-1 tvg-chno="13" group-title="电视伴音" radio="true" tvg-name="CCTV12",CCTV-12 社会与法
+https://piccpndali.v.myalicdn.com/audio/cctv12_2.m3u8
+#EXTINF:-1 tvg-chno="14" group-title="电视伴音" radio="true" tvg-name="CCTV13",CCTV-13 新闻
+https://piccpndali.v.myalicdn.com/audio/cctv13_2.m3u8
+#EXTINF:-1 tvg-chno="15" group-title="电视伴音" radio="true" tvg-name="CCTV14",CCTV-14 少儿
+https://piccpndali.v.myalicdn.com/audio/cctv14_2.m3u8
+#EXTINF:-1 tvg-chno="16" group-title="电视伴音" radio="true" tvg-name="CCTV15",CCTV-15 音乐
+https://piccpndali.v.myalicdn.com/audio/cctv15_2.m3u8
+#EXTINF:-1 tvg-chno="17" group-title="电视伴音" radio="true" tvg-name="CCTV16",CCTV-16 奥林匹克
+https://piccpndali.v.myalicdn.com/audio/cctv16_2.m3u8
+#EXTINF:-1 tvg-chno="18" group-title="电视伴音" radio="true" tvg-name="CCTV17",CCTV-17 农业农村
+https://piccpndali.v.myalicdn.com/audio/cctv17_2.m3u8
+
+# ===== 央广·国家台 =====
+#EXTINF:-1 tvg-chno="19" group-title="央广·国家台" radio="true",中国之声
+https://ngcdn002.cnr.cn/live/zgzs/index.m3u8
+#EXTINF:-1 tvg-chno="20" group-title="央广·国家台" radio="true",经济之声
+https://ngcdn002.cnr.cn/live/jjzs/index.m3u8
+#EXTINF:-1 tvg-chno="21" group-title="央广·国家台" radio="true",音乐之声
+https://ngcdn002.cnr.cn/live/yyzs/index.m3u8
+#EXTINF:-1 tvg-chno="22" group-title="央广·国家台" radio="true",文艺之声
+https://ngcdn002.cnr.cn/live/wyzs/index.m3u8
+#EXTINF:-1 tvg-chno="23" group-title="央广·国家台" radio="true",都市之声
+https://ngcdn002.cnr.cn/live/dszs/index.m3u8
+#EXTINF:-1 tvg-chno="24" group-title="央广·国家台" radio="true",经典音乐广播
+http://satellitepull.cnr.cn/live/wxdszs/playlist.m3u8
+#EXTINF:-1 tvg-chno="25" group-title="央广·国家台" radio="true",环球资讯广播
+http://sk.cri.cn/905.m3u8
+#EXTINF:-1 tvg-chno="26" group-title="央广·国家台" radio="true",CRI 华语环球
+http://sk.cri.cn/hyhq.m3u8
+
+# ===== 省市台 =====
+#EXTINF:-1 tvg-chno="27" group-title="省市台" radio="true",北京新闻广播 FM100.6
+https://lhttp.qtfm.cn/live/339/64k.mp3
+#EXTINF:-1 tvg-chno="28" group-title="省市台" radio="true",北京交通广播 FM103.9
+https://lhttp.qingting.fm/live/336/64k.mp3
+#EXTINF:-1 tvg-chno="29" group-title="省市台" radio="true",北京音乐广播 FM97.4
+https://lhttp.qtfm.cn/live/332/64k.mp3
+#EXTINF:-1 tvg-chno="30" group-title="省市台" radio="true",上海新闻广播 FM93.4
+https://lhttp-hw.qtfm.cn/live/270/64k.mp3
+#EXTINF:-1 tvg-chno="31" group-title="省市台" radio="true",上海交通广播 FM105.7
+https://lhttp-hw.qtfm.cn/live/266/64k.mp3
+#EXTINF:-1 tvg-chno="32" group-title="省市台" radio="true",上海动感101 FM101.7
+https://lhttp-hw.qtfm.cn/live/274/64k.mp3
+#EXTINF:-1 tvg-chno="33" group-title="省市台" radio="true",上海经典金曲 FM103.7
+https://lhttp-hw.qtfm.cn/live/273/64k.mp3
+#EXTINF:-1 tvg-chno="34" group-title="省市台" radio="true",上海长三角之声 FM89.9
+https://lhttp-hw.qtfm.cn/live/275/64k.mp3
+#EXTINF:-1 tvg-chno="35" group-title="省市台" radio="true",广东珠江经济台
+https://lhttp.qtfm.cn/live/1259/64k.mp3
+#EXTINF:-1 tvg-chno="36" group-title="省市台" radio="true",广东音乐之声
+https://lhttp.qtfm.cn/live/1260/64k.mp3
+#EXTINF:-1 tvg-chno="37" group-title="省市台" radio="true",广东交通之声
+https://lhttp.qtfm.cn/live/1262/64k.mp3
+#EXTINF:-1 tvg-chno="38" group-title="省市台" radio="true",深圳飞扬971 FM97.1
+https://lhttp.qtfm.cn/live/1271/64k.mp3
+#EXTINF:-1 tvg-chno="39" group-title="省市台" radio="true",杭州西湖之声
+https://lhttp.qtfm.cn/live/1163/64k.mp3
+#EXTINF:-1 tvg-chno="40" group-title="省市台" radio="true",苏州都市音乐广播
+https://lhttp.qingting.fm/live/2803/64k.mp3
+#EXTINF:-1 tvg-chno="41" group-title="省市台" radio="true",厦门音乐广播
+https://lhttp.qtfm.cn/live/1739/64k.mp3
+#EXTINF:-1 tvg-chno="42" group-title="省市台" radio="true",重庆音乐广播
+https://ls.qingting.fm/live/647.m3u8
+#EXTINF:-1 tvg-chno="43" group-title="省市台" radio="true",济南故事广播
+https://lhttp.qtfm.cn/live/1672/64k.mp3
+#EXTINF:-1 tvg-chno="44" group-title="省市台" radio="true",山西故事广播
+https://lhttp-hw.qtfm.cn/live/5022511/64k.mp3
+
+# ===== 音乐台 =====
+#EXTINF:-1 tvg-chno="45" group-title="音乐台" radio="true",AsiaFM 亚洲音乐台
+https://lhttp.qingting.fm/live/4581/64k.mp3
+#EXTINF:-1 tvg-chno="46" group-title="音乐台" radio="true",AsiaFM 亚洲经典台
+https://lhttp.qingting.fm/live/5021912/64k.mp3
+#EXTINF:-1 tvg-chno="47" group-title="音乐台" radio="true",AsiaFM 亚洲粤语台
+http://yyt.asiafm.net:8000/asiafm
+#EXTINF:-1 tvg-chno="48" group-title="音乐台" radio="true",清晨音乐台
+https://lhttp.qingting.fm/live/4915/64k.mp3
+#EXTINF:-1 tvg-chno="49" group-title="音乐台" radio="true",星空电台 STAR RADIO
+https://lhttp-hw.qtfm.cn/live/5022379/64k.mp3
+#EXTINF:-1 tvg-chno="50" group-title="音乐台" radio="true",动听音乐台
+https://lhttp-hw.qtfm.cn/live/5022107/64k.mp3
+#EXTINF:-1 tvg-chno="51" group-title="音乐台" radio="true",891 音乐台
+https://live.fm891.net/192k.aac
+#EXTINF:-1 tvg-chno="52" group-title="音乐台" radio="true",云梦音乐台
+https://lhttp.qtfm.cn/live/20500187/64k.mp3
+#EXTINF:-1 tvg-chno="53" group-title="音乐台" radio="true",MY FM 广州
+https://lhttp.qingting.fm/live/20194/64k.mp3
+#EXTINF:-1 tvg-chno="54" group-title="音乐台" radio="true",古典音乐台
+https://lhttp-hw.qtfm.cn/live/5022308/64k.mp3
+
+# ===== 故事·相声 =====
+#EXTINF:-1 tvg-chno="55" group-title="故事·相声" radio="true",听云相声台
+https://m.tyradio.uk/tyxs.mp3
+#EXTINF:-1 tvg-chno="56" group-title="故事·相声" radio="true",听云评书台
+https://m.tyradio.uk/typs.mp3
+#EXTINF:-1 tvg-chno="57" group-title="故事·相声" radio="true",安徽小说评书广播
+https://lhttp.qtfm.cn/live/1951/64k.mp3
+#EXTINF:-1 tvg-chno="58" group-title="故事·相声" radio="true",蛤蜊讲故事
+https://rscdn.ajmide.com/r_2951/nglive_2951.m3u8
+#EXTINF:-1 tvg-chno="59" group-title="故事·相声" radio="true",悬疑电台
+https://rscdn.ajmide.com/r_3143/nglive_3143.m3u8
+#EXTINF:-1 tvg-chno="60" group-title="故事·相声" radio="true",历史档案
+https://rscdn.ajmide.com/r_3179/nglive_3179.m3u8

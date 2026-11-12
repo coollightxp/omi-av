@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/channel.dart';
-import '../services/channel_logo.dart';
+import '../core/widgets/channel_badge.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
 import '../core/theme/app_typography.dart';
@@ -738,32 +738,6 @@ class _ChannelTile extends StatelessWidget {
     this.keyboardSelected = false,
   });
 
-  /// 列表台标：本地 asset 优先（匹配更强，且离线可用）；
-  /// 本地没有才用在线 EPG icon / M3U tvg-logo；都没有显示默认图标
-  Widget _buildLogo() {
-    Widget fallback() => const Icon(Icons.tv, color: Colors.white70, size: 18);
-    // 1. 内置 asset（最稳，匹配逻辑含完整名、英数核心、tvg-name 三路）
-    final asset = ChannelLogo.assetFor(channel);
-    if (asset.isNotEmpty) {
-      return Image.asset(
-        asset,
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => fallback(),
-      );
-    }
-    // 2. 在线图标：EPG icon 优先（与节目单用同一 matchChannelId 匹配），
-    //    其次播放源 M3U tvg-logo
-    final url = channel.logoUrl;
-    if (url.isNotEmpty) {
-      return Image.network(
-        url,
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => fallback(),
-      );
-    }
-    return fallback();
-  }
-
   @override
   Widget build(BuildContext context) {
     final t = AppTypography.of(context);
@@ -807,16 +781,8 @@ class _ChannelTile extends StatelessWidget {
                 ),
               ),
             ),
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: isSelected ? Colors.blueAccent : Colors.white10,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: _buildLogo(),
-            ),
+            // 台标：内置库 → tvg-logo → Radio Browser → 字母台标
+            ChannelBadge(channel: channel, size: 36),
             const SizedBox(width: 9),
             Expanded(
               child: Column(
