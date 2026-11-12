@@ -1,4 +1,4 @@
-name: Build OMPlayer
+name: Build Omi
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     # fvp 通过 FVP_DEPS_URL 覆盖默认 nightly 下载地址
     env:
       FVP_DEPS_URL: https://github.com/wang-bin/mdk-sdk/releases/download/v0.36.0
-      OMPLAYER_KEYSTORE: /home/runner/.android/omplayer.keystore
+      OMI_KEYSTORE: /home/runner/.android/omi.keystore
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,7 +38,7 @@ jobs:
           cache: true
 
       - name: Create Android project files
-        run: flutter create . --platforms=android --project-name omplayer
+        run: flutter create . --platforms=android --project-name omi
 
       - name: Apply app icon (视频取景框)
         run: |
@@ -55,10 +55,10 @@ jobs:
           sed -i 's|<application|<application android:usesCleartextTraffic="true"|' $MANIFEST
           # 单实例：从图标再次启动时回到已有任务而不是新开进程
           sed -i 's|<activity |<activity android:launchMode="singleTask" |' $MANIFEST
-          # 桌面图标/应用列表显示名：欧米直播（flutter create 默认用工程名 omplayer）
-          sed -i 's|android:label="omplayer"|android:label="欧米直播"|' $MANIFEST
-          grep -q 'android:label="欧米直播"' $MANIFEST \
-            || echo "::warning::Android app label patch failed, launcher name may stay omplayer"
+          # 桌面图标/应用列表显示名：欧米视听（flutter create 默认用工程名 omi）
+          sed -i 's|android:label="omi"|android:label="欧米视听"|' $MANIFEST
+          grep -q 'android:label="欧米视听"' $MANIFEST \
+            || echo "::warning::Android app label patch failed, launcher name may stay omi"
           # 显式声明网络权限（video_player 会合并，但显式更稳）
           grep -q "android.permission.INTERNET" $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' $MANIFEST
           # 画中画：给 MainActivity 声明 supportsPictureInPicture
@@ -107,7 +107,7 @@ jobs:
           import io.flutter.plugin.common.MethodChannel
 
           class MainActivity : FlutterActivity() {
-              private val channelName = "omplayer/pip"
+              private val channelName = "omi/pip"
               // 切后台自动画中画：Dart 侧播放状态变化时同步（见 setAutoPip）
               private var autoPipArmed = false
 
@@ -203,13 +203,13 @@ jobs:
         id: ks-cache
         uses: actions/cache@v4
         with:
-          path: /home/runner/.android/omplayer.keystore
-          key: omplayer-keystore-v4-${{ runner.os }}
+          path: /home/runner/.android/omi.keystore
+          key: omi-keystore-v4-${{ runner.os }}
 
       - name: Ensure stable keystore (validate secret; regenerate when corrupt)
         run: |
           set -e
-          KS="$HOME/.android/omplayer.keystore"
+          KS="$HOME/.android/omi.keystore"
           mkdir -p "$HOME/.android"
           validate_ks() {
             keytool -list -keystore "$KS" -storepass android \
@@ -235,7 +235,7 @@ jobs:
                 -keystore "$KS" \
                 -storepass android -alias androiddebugkey -keypass android \
                 -keyalg RSA -keysize 2048 -validity 10000 \
-                -dname "CN=OMPlayer,O=OMPlayer,C=CN"
+                -dname "CN=Omi,O=Omi,C=CN"
               # 输出新 base64：请更新 GitHub Secret，之后所有版本签名固定
               echo "=== DEBUG_KEYSTORE_BASE64 (用此整行更新 GitHub Secret) ==="
               base64 -w 0 "$KS"
@@ -254,13 +254,13 @@ jobs:
       - name: Install Gradle init script (explicit release signing)
         run: |
           mkdir -p "$HOME/.gradle/init.d"
-          cat > "$HOME/.gradle/init.d/omplayer-signing.gradle" <<'GRADLE'
+          cat > "$HOME/.gradle/init.d/omi-signing.gradle" <<'GRADLE'
           allprojects {
               afterEvaluate { p ->
                   if (p.plugins.hasPlugin('com.android.application')) {
-                      def ksPath = System.getenv('OMPLAYER_KEYSTORE')
+                      def ksPath = System.getenv('OMI_KEYSTORE')
                       if (ksPath == null) {
-                          throw new GradleException('OMPLAYER_KEYSTORE env is not set')
+                          throw new GradleException('OMI_KEYSTORE env is not set')
                       }
                       def ksFile = new File(ksPath)
                       if (!ksFile.isFile()) {
@@ -268,7 +268,7 @@ jobs:
                       }
                       def android = p.extensions.getByName('android')
                       def scs = android.signingConfigs
-                      def sc = scs.findByName('omplayerStable') ?: scs.create('omplayerStable')
+                      def sc = scs.findByName('omiStable') ?: scs.create('omiStable')
                       sc.storeFile = ksFile
                       sc.storePassword = 'android'
                       sc.keyAlias = 'androiddebugkey'
@@ -287,7 +287,7 @@ jobs:
           cd build/app/outputs/flutter-apk
           for abi in armeabi-v7a arm64-v8a x86_64; do
             if [ -f "app-$abi-release.apk" ]; then
-              mv "app-$abi-release.apk" "OMPlayer-android-$abi.apk"
+              mv "app-$abi-release.apk" "Omi-android-$abi.apk"
             fi
           done
 
@@ -299,7 +299,7 @@ jobs:
             | sort -V | tail -1)
           if [ -n "$APKSIGNER" ]; then
             "$APKSIGNER" verify --print-certs \
-              build/app/outputs/flutter-apk/OMPlayer-android-arm64-v8a.apk \
+              build/app/outputs/flutter-apk/Omi-android-arm64-v8a.apk \
               | grep -E 'signer|Certificate' | head -5
           else
             echo "apksigner not found, skipped"
@@ -315,7 +315,7 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: build/app/outputs/flutter-apk/OMPlayer-android-*.apk
+          files: build/app/outputs/flutter-apk/Omi-android-*.apk
 
   # ==================== Web ====================
   build-web:
@@ -333,7 +333,7 @@ jobs:
           cache: true
 
       - name: Create Web project files
-        run: flutter create . --platforms=web --project-name omplayer
+        run: flutter create . --platforms=web --project-name omi
 
       - name: Apply app icon (视频取景框)
         run: |
@@ -352,7 +352,7 @@ jobs:
       - name: Zip Web build
         run: |
           cd build/web
-          zip -r ../../OMPlayer-web.zip .
+          zip -r ../../Omi-web.zip .
 
       - name: Upload Web artifact
         uses: actions/upload-artifact@v4
@@ -364,7 +364,7 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: OMPlayer-web.zip
+          files: Omi-web.zip
 
   # ==================== Windows Desktop ====================
   build-windows:
@@ -386,7 +386,7 @@ jobs:
           cache: true
 
       - name: Create Windows project files
-        run: flutter create . --platforms=windows --project-name omplayer
+        run: flutter create . --platforms=windows --project-name omi
 
       - name: Apply app icon (视频取景框)
         shell: pwsh
@@ -411,9 +411,9 @@ jobs:
           $f = 'windows/runner/main.cpp'
           $t = [System.IO.File]::ReadAllText($f)
           $inject1 = @(
-            '// ===== OMPlayer injected: single instance + one-shot NumLock restore =====',
+            '// ===== Omi injected: single instance + one-shot NumLock restore =====',
             'static BOOL g_om_numlock_was_on = FALSE;',
-            'static const wchar_t* kOmSingleInstanceMutex = L"Local\\OMPlayer_SingleInstance";',
+            'static const wchar_t* kOmSingleInstanceMutex = L"Local\\Omi_SingleInstance";',
             '// 一次性回调：触发后立刻 KillTimer，之后永不干预 NumLock，',
             '// 避免后台轮询读到滞后状态而反复翻转、污染全局键盘状态',
             'static VOID CALLBACK OMNumLockRestore(HWND hwnd, UINT, UINT_PTR id, DWORD) {',
@@ -424,14 +424,14 @@ jobs:
             '    ::keybd_event(VK_NUMLOCK, 0x45, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);',
             '  }',
             '}',
-            '// ===== OMPlayer injected: startup cursor-count repair =====',
+            '// ===== Omi injected: startup cursor-count repair =====',
             '// 历史版本退出时未恢复 ShowCursor 计数，会把整个桌面的光标',
             '// 显示计数留在负数（表现为鼠标指针/拖曳异常，只能重启恢复）。',
             '// 启动时把计数拉回 >= 0（正常可见状态），无需用户重启系统。',
             'static void OMRepairCursorCount() {',
             '  while (::ShowCursor(TRUE) < 0) {}',
             '}',
-            '// ===== OMPlayer injected: WebView2 cache cleanup on startup =====',
+            '// ===== Omi injected: WebView2 cache cleanup on startup =====',
             '// 启动时清空纯缓存目录（Cache/Code Cache/GPUCache/Service Worker），',
             '// 文件夹臃肿会拖慢 WebView2 启动；保留 Cookies/Local Storage 登录态',
             '#include <filesystem>',
@@ -454,25 +454,25 @@ jobs:
             'int APIENTRY wWinMain('
           ) -join "`r`n"
           $inject2 = @(
-            '  // OMPlayer: 允许内嵌 WebView2 无用户手势自动播放（带声音）。',
+            '  // Omi: 允许内嵌 WebView2 无用户手势自动播放（带声音）。',
             '  // 必须在任何 WebView2 环境创建前设置，进程级生效；',
             '  // disk-cache-size 256MB，加速二次加载',
             '  ::SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",',
             '      L"--autoplay-policy=no-user-gesture-required --disk-cache-size=268435456");',
             '',
-            '  // OMPlayer: 在任何 WebView2 环境创建前清理磁盘缓存',
+            '  // Omi: 在任何 WebView2 环境创建前清理磁盘缓存',
             '  OMClearWebView2Cache();',
             '',
-            '  // OMPlayer: 修复上次异常退出残留的光标隐藏计数（无需重启系统）',
+            '  // Omi: 修复上次异常退出残留的光标隐藏计数（无需重启系统）',
             '  OMRepairCursorCount();',
             '',
             '  ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);',
             '',
-            '  // OMPlayer: allow only one running instance',
+            '  // Omi: allow only one running instance',
             '  HANDLE om_mutex = ::CreateMutexW(nullptr, TRUE, kOmSingleInstanceMutex);',
             '  (void)om_mutex; // hold for process lifetime; silences C4189 under /WX',
             '  if (::GetLastError() == ERROR_ALREADY_EXISTS) {',
-            '    HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", L"omplayer");',
+            '    HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", L"omi");',
             '    if (existing != nullptr) {',
             '      ::ShowWindow(existing, SW_RESTORE);',
             '      ::SetForegroundWindow(existing);',
@@ -486,7 +486,7 @@ jobs:
           $inject3 = @(
             '  window.SetQuitOnClose(true);',
             '',
-            '  // OMPlayer: 引擎初始化后 3 秒一次性恢复 NumLock 到启动前',
+            '  // Omi: 引擎初始化后 3 秒一次性恢复 NumLock 到启动前',
             '  // 状态，回调内自行 KillTimer，之后不再干预用户按键',
             '  ::SetTimer(nullptr, 0x4F4D, 3000, OMNumLockRestore);'
           ) -join "`r`n"
@@ -500,7 +500,7 @@ jobs:
           $t = $t.Replace($a2, $inject2)
           $t = $t.Replace($a3, $inject3)
           [System.IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($false)))
-          Get-Content $f | Select-String 'OMPlayer' | ForEach-Object { $_.Line.Trim() }
+          Get-Content $f | Select-String 'Omi' | ForEach-Object { $_.Line.Trim() }
 
           # ===== flutter_window.cpp：数字键低级键盘钩子 + MethodChannel =====
           $fw = 'windows/runner/flutter_window.cpp'
@@ -512,7 +512,7 @@ jobs:
           }
           $wInc = @(
             '#include "flutter/generated_plugin_registrant.h"',
-            '// ===== OMPlayer injected: low-level hotkeys + idle cursor hide =====',
+            '// ===== Omi injected: low-level hotkeys + idle cursor hide =====',
             '// WebView2 is a separate HWND: once it has keyboard focus Flutter',
             '// never receives WM_KEYDOWN, so hotkeys die. WH_KEYBOARD_LL forwards',
             '// digits and control keys to Dart while this process is foreground.',
@@ -591,7 +591,7 @@ jobs:
             '    } else if (m[0] == 0x51) {  // "Q": quit requested by Dart',
             '      // Windows 10 1607 等老系统上，引擎/插件析构会在',
             '      // flutter_windows.dll 内抛 0xc0000005，表现为退出时',
-            '      // "omplayer.exe 已停止工作"。这里先恢复光标/卸载钩子，',
+            '      // "omi.exe 已停止工作"。这里先恢复光标/卸载钩子，',
             '      // 再由 runner 直接结束进程，跳过会崩溃的析构链。',
             '      OMExitCleanup();',
             '      ::TerminateProcess(::GetCurrentProcess(), 0);',
@@ -665,7 +665,7 @@ jobs:
             '          if (is_down) {',
             '            const uint8_t msg = static_cast<uint8_t>(0x30 + digit);',
             '            ::FlutterDesktopMessengerSend(g_om_messenger,',
-            '                "omplayer/win_hotkeys", &msg, 1);',
+            '                "omi/win_hotkeys", &msg, 1);',
             '          }',
             '        } else {',
             '          // "k:xxx" keydown, "u:xxx" keyup',
@@ -674,7 +674,7 @@ jobs:
             '                                    action);',
             '          if (n > 0) {',
             '            ::FlutterDesktopMessengerSend(g_om_messenger,',
-            '                "omplayer/win_hotkeys",',
+            '                "omi/win_hotkeys",',
             '                reinterpret_cast<const uint8_t*>(buf),',
             '                static_cast<size_t>(n));',
             '          }',
@@ -731,16 +731,16 @@ jobs:
           ) -join "`r`n"
           $wReg = @(
             'RegisterPlugins(flutter_controller_->engine());',
-            '  // OMPlayer: hotkey channel (Dart side: omplayer/win_hotkeys)',
+            '  // Omi: hotkey channel (Dart side: omi/win_hotkeys)',
             '  // 3.44+: GetRegistrarForPlugin returns the C registrar ref; use the',
             '  // C messenger API directly (C++ MethodChannel impl is not shipped).',
             '  auto om_registrar =',
             '      flutter_controller_->engine()->GetRegistrarForPlugin(',
-            '          "OMPlayerHotkeys");',
+            '          "OmiHotkeys");',
             '  g_om_messenger = ::FlutterDesktopPluginRegistrarGetMessenger(',
             '      om_registrar);',
             '  ::FlutterDesktopMessengerSetCallback(g_om_messenger,',
-            '      "omplayer/win_hotkeys", &OMMessengerCallback, nullptr);',
+            '      "omi/win_hotkeys", &OMMessengerCallback, nullptr);',
             '  g_om_kb_hook = ::SetWindowsHookExW(WH_KEYBOARD_LL,',
             '      &OMLowLevelKeyboardProc, ::GetModuleHandleW(nullptr), 0);',
             '  // 不再安装 WH_MOUSE_LL：全局鼠标钩子会拖累系统拖放，改为定时器轮询',
@@ -799,19 +799,19 @@ jobs:
         run: flutter build windows --release
 
       - name: Zip Windows build
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath OMPlayer-windows.zip
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath Omi-windows.zip
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: OMPlayer-windows.zip
+          path: Omi-windows.zip
 
       - name: Upload to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: OMPlayer-windows.zip
+          files: Omi-windows.zip
 
   # ==================== Linux Desktop ====================
   build-linux:
@@ -840,7 +840,7 @@ jobs:
           sudo apt-get install -y ninja-build libgtk-3-dev libasound2-dev pkg-config libwebkit2gtk-4.0-dev libsoup-3.0-dev
 
       - name: Create Linux project files
-        run: flutter create . --platforms=linux --project-name omplayer
+        run: flutter create . --platforms=linux --project-name omi
 
       - name: Install dependencies
         run: flutter pub get
@@ -851,16 +851,16 @@ jobs:
       - name: Zip Linux build
         run: |
           cd build/linux/x64/release/bundle
-          zip -r ${{ github.workspace }}/OMPlayer-linux.zip .
+          zip -r ${{ github.workspace }}/Omi-linux.zip .
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-build
-          path: OMPlayer-linux.zip
+          path: Omi-linux.zip
 
       - name: Upload to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: OMPlayer-linux.zip
+          files: Omi-linux.zip

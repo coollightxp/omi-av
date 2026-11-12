@@ -442,7 +442,7 @@ class PlayerController extends ChangeNotifier {
   bool get dlnaRunning => _dlnaRunning;
   String get dlnaEndpoint => _dlnaEndpoint;
 
-  /// 启动 DLNA 接收服务：设备名 = OMPlayer + 机器唯一标识
+  /// 启动 DLNA 接收服务：设备名 = Omi + 机器唯一标识
   Future<void> _startDlna() async {
     if (dlnaService.isRunning) {
       // 已运行（用户刚重新打开开关）：只刷新状态展示
@@ -2177,7 +2177,7 @@ class PlayerController extends ChangeNotifier {
   static const _kAutoReloadStall = 'settings_auto_reload_stall';
   static const _kRetryTimes = 'settings_retry_times';
   static const _kCastEndWait = 'settings_cast_end_wait_seconds';
-  static const _kFavoriteChannelIds = 'omplayer_favorite_channel_ids';
+  static const _kFavoriteChannelIds = 'omi_favorite_channel_ids';
 
   Future<void> _loadSettings() async {
     try {

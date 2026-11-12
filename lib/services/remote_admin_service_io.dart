@@ -173,7 +173,7 @@ const _adminHtml = r'''<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="format-detection" content="telephone=no">
-<title>欧米直播 · 直播源管理</title>
+<title>欧米视听 · 直播源管理</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 html{-webkit-text-size-adjust:100%}
@@ -372,9 +372,9 @@ input:focus{border-color:#3b82f6}
 <body>
 <div class="top">
   <div class="brand">
-    <img class="logo" src="/logo.png" alt="欧米直播">
+    <img class="logo" src="/logo.png" alt="欧米视听">
     <div class="titles">
-      <h1>欧米直播</h1>
+      <h1>欧米视听</h1>
       <div class="sub">直播源管理 · <b id="host"></b> · 自动保存</div>
     </div>
   </div>
@@ -411,7 +411,7 @@ input:focus{border-color:#3b82f6}
 <div class="toast" id="toast"></div>
 <script>
 var hostEl=document.getElementById('host');
-hostEl.textContent=location.host||'OMPlayer';
+hostEl.textContent=location.host||'Omi';
 var state={playlists:[],epgs:[],currentPlaylistId:null,currentEpgId:null,settings:{}};
 var tab='pl', editing=null, editType='url';
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -479,7 +479,7 @@ function settingDefs(){
     ['dlnaEnabled','DLNA 投屏接收','允许手机或其它设备投屏到本机',false],
     ['startFullscreen','启动即全屏','程序启动后直接进入全屏',true],
     ['alwaysOnTop','窗口置顶','保持播放器窗口始终在最前',true],
-    ['launchAtStartup','开机自启动','登录系统后自动启动欧米直播',true]
+    ['launchAtStartup','开机自启动','登录系统后自动启动欧米视听',true]
   ];
 }
 function renderHelp(){

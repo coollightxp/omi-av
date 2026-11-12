@@ -7,8 +7,8 @@ import '../models/reservation.dart';
 /// 节目预约管理服务
 /// 负责：预约的增删改查、持久化、定时触发（自动切换/录制）
 class ReservationManager {
-  static const String _reservationsKey = 'omplayer_reservations';
-  static const String _triggeredKey = 'omplayer_reservations_triggered';
+  static const String _reservationsKey = 'omi_reservations';
+  static const String _triggeredKey = 'omi_reservations_triggered';
 
   List<ProgramReservation> _reservations = [];
   Timer? _checkTimer;

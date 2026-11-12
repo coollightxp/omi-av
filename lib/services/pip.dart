@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 /// （MainActivity + AudioPlaybackService，AndroidManifest 开启
 /// supportsPictureInPicture / 前台服务权限）。其他平台没有该通道，
 /// 调用会抛 MissingPluginException，这里统一吞掉并返回 false。
-const MethodChannel _channel = MethodChannel('omplayer/pip');
+const MethodChannel _channel = MethodChannel('omi/pip');
 
 void Function(bool active)? _pipCb;
 void Function(String cmd)? _audioCb;

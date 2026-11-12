@@ -16,16 +16,16 @@ import 'xmltv_epg_parser.dart';
 /// 播放列表与 EPG 源管理服务
 /// 负责：源的增删改查、本地持久化、网络拉取与解析
 class SourceManager {
-  static const String _playlistKey = 'omplayer_playlists';
-  static const String _currentPlaylistKey = 'omplayer_current_playlist';
-  static const String _epgKey = 'omplayer_epgs';
-  static const String _currentEpgKey = 'omplayer_current_epg';
+  static const String _playlistKey = 'omi_playlists';
+  static const String _currentPlaylistKey = 'omi_current_playlist';
+  static const String _epgKey = 'omi_epgs';
+  static const String _currentEpgKey = 'omi_current_epg';
 
   // EPG 每日缓存：拉取后序列化到 SharedPreferences，24h 内复用，
   // 避免每次打开都联网（EPG 一天内几乎不变）。
-  // 缓存 key = omplayer_epg_cache_${epgId} / omplayer_epg_cache_time_${epgId}
-  static String _cacheKey(String id) => 'omplayer_epg_cache_$id';
-  static String _cacheTimeKey(String id) => 'omplayer_epg_cache_time_$id';
+  // 缓存 key = omi_epg_cache_${epgId} / omi_epg_cache_time_${epgId}
+  static String _cacheKey(String id) => 'omi_epg_cache_$id';
+  static String _cacheTimeKey(String id) => 'omi_epg_cache_time_$id';
   static const Duration _epgCacheTtl = Duration(hours: 24);
 
   List<PlaylistSource> _playlists = [];

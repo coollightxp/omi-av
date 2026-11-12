@@ -1205,7 +1205,7 @@ class _SystemSettingsTab extends StatelessWidget {
                     color: Colors.white70),
                 title: const Text('开机启动',
                     style: TextStyle(color: Colors.white, fontSize: 15)),
-                subtitle: const Text('开机后自动启动 OMPlayer',
+                subtitle: const Text('开机后自动启动 Omi',
                     style: TextStyle(color: Colors.white54, fontSize: 12)),
                 value: s.launchAtStartup,
                 onChanged: (v) => controller

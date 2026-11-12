@@ -222,7 +222,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// Windows：请求 runner 恢复光标/卸载钩子后直接结束进程。
   /// Windows 10 1607 等老系统上，引擎与插件析构会在 flutter_windows.dll
-  /// 内抛 0xc0000005，事件查看器表现为退出时"omplayer.exe 已停止工作"。
+  /// 内抛 0xc0000005，事件查看器表现为退出时"omi.exe 已停止工作"。
   /// 这里在释放 WebView2 之后走快速退出，跳过会崩溃的析构链；runner 若是
   /// 旧版本没有该指令，等待超时后仍按正常流程关闭窗口。
   Future<void> _windowsFastQuit() async {
@@ -1000,7 +1000,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         const Text(
-                          '欧米直播',
+                          '欧米视听',
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 20,
@@ -2492,7 +2492,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   final Set<String> _nativeHeld = <String>{};
 
   /// 原生钩子转发的动作键（网页持有焦点时 HardwareKeyboard 收不到，
-  /// 由 WH_KEYBOARD_LL 经 omplayer/win_hotkeys 通道送达）。
+  /// 由 WH_KEYBOARD_LL 经 omi/win_hotkeys 通道送达）。
   /// isDown=true 按下边沿、false 抬起边沿，与 Flutter 路径共用
   /// 同一套短按/长按/面板导航逻辑。
   void _onNativeAction(String action, bool isDown) {
@@ -6328,7 +6328,7 @@ class _BootSplash extends StatelessWidget {
                       // 抵消末字字距造成的视觉左偏
                       padding: EdgeInsets.only(left: titleSize * 0.14),
                       child: Text(
-                        '欧米直播',
+                        '欧米视听',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white,
