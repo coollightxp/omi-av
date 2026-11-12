@@ -16,7 +16,10 @@ class BuiltinRadioIndex {
   BuiltinRadioIndex._();
 
   static final Set<String> _urls = {};
+  /// 原样（去空格/标点、小写）台名
   static final Set<String> _names = {};
+  /// 再去掉「FM」「广播」的宽松形式，只用于 ≥4 字的模糊比对
+  static final Set<String> _namesLoose = {};
   static bool _loaded = false;
   static bool _loading = false;
 
@@ -44,7 +47,11 @@ class BuiltinRadioIndex {
           final comma = t.indexOf(',');
           if (comma > 0) {
             final n = _normName(t.substring(comma + 1));
-            if (n.isNotEmpty) _names.add(n);
+            if (n.isNotEmpty) {
+              _names.add(n);
+              final loose = _loose(n);
+              if (loose.length >= 4) _namesLoose.add(loose);
+            }
           }
         }
         continue;
@@ -60,12 +67,13 @@ class BuiltinRadioIndex {
       final n = _normName(name);
       if (n.isEmpty) return false;
       if (_names.contains(n)) return true;
-      // 「中国之声」vs「中国之声 FM」这类：短的一方至少 4 个字才认可，
-      // 避免「新闻」「音乐」这种泛词互相误判
-      if (n.length >= 4) {
-        for (final b in _names) {
-          if (b.length >= 4 && (b.contains(n) || n.contains(b))) return true;
-        }
+      // 「中国之声」vs「中国之声 FM」这类：先去掉 FM/广播 再比，
+      // 但至少 4 个字才认可，避免「音乐」「新闻」这种泛词互相误判
+      final loose = _loose(n);
+      if (loose.length < 4) return false;
+      if (_namesLoose.contains(loose)) return true;
+      for (final b in _namesLoose) {
+        if (b.contains(loose) || loose.contains(b)) return true;
       }
     }
     return false;
@@ -84,8 +92,10 @@ class BuiltinRadioIndex {
   static String _normName(String s) {
     var t = s.toLowerCase();
     t = t.replaceAll(RegExp(r'[\s\-_·・.,，。、:：()（）\[\]【】"“”]'), '');
-    // 「中国之声FM」「FM98.7 交通广播」这类后缀/前缀不影响是不是同一个台
-    t = t.replaceAll('fm', '').replaceAll('广播', '');
     return t.trim();
   }
+
+  /// 「中国之声FM」「FM98.7 交通广播」这类后缀/前缀不影响是不是同一个台
+  static String _loose(String normalized) =>
+      normalized.replaceAll('fm', '').replaceAll('广播', '').trim();
 }
