@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/widgets/channel_badge.dart';
+import '../models/channel.dart';
 import '../models/epg_program.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
@@ -339,6 +341,13 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   Widget _buildEpgList() {
     return Consumer<PlayerController>(
       builder: (context, controller, _) {
+        // 电台：XMLTV 基本没有电台条目，走三级降级（方案 13.2）——
+        // 有 ICY 就显示"正在播 + 本次已播"，都没有也给台标与状态，
+        // 永不弹空面板
+        final ch = controller.currentChannel;
+        if (ch != null && ch.isRadio) {
+          return _buildRadioView(context, controller, ch);
+        }
         final epg = _todayPrograms(controller);
         if (epg.isEmpty) {
           return const Center(
@@ -393,6 +402,147 @@ class RightEpgPanelState extends State<RightEpgPanel> {
         if (widget.isOpen) _maybeScrollToNow(epg);
         return list;
       },
+    );
+  }
+
+  /// 电台版节目面板：
+  /// ① 有 ICY 元数据 → 正在播 + 本次已播列表
+  /// ② 没有 → 台标 + 台名 + 「该电台暂无节目表」+ 正在收听状态
+  Widget _buildRadioView(
+      BuildContext context, PlayerController c, Channel ch) {
+    final tracks = c.radioTracks;
+    final now = tracks.isNotEmpty ? tracks.first : '';
+    final group = ch.groupTitle.isEmpty ? '音频直播' : ch.groupTitle;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      children: [
+        Row(
+          children: [
+            ChannelBadge(channel: ch, size: 46, circular: true),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    ch.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    group,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textTertiary,
+                      fontSize: 11.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        if (now.isEmpty)
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.04),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.stroke),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  c.isPlaying ? '正在收听' : '已暂停',
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  '该电台暂无节目表\n不少电台只发纯音频，不提供曲目信息',
+                  style: TextStyle(
+                    color: AppColors.textTertiary,
+                    fontSize: 11.5,
+                    height: 1.5,
+                  ),
+                ),
+              ],
+            ),
+          )
+        else ...[
+          const Text(
+            '正在播',
+            style: TextStyle(
+              color: AppColors.textTertiary,
+              fontSize: 11,
+              letterSpacing: 1.5,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            now,
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 15,
+              height: 1.4,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (tracks.length > 1) ...[
+            const SizedBox(height: 20),
+            const Divider(height: 1, color: AppColors.divider),
+            const SizedBox(height: 12),
+            const Text(
+              '本次已播',
+              style: TextStyle(
+                color: AppColors.textTertiary,
+                fontSize: 11,
+                letterSpacing: 1.5,
+              ),
+            ),
+            const SizedBox(height: 6),
+            for (final t in tracks.skip(1).take(12))
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(top: 5),
+                      child: Icon(Icons.circle,
+                          size: 4, color: AppColors.textTertiary),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        t,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ],
+      ],
     );
   }
 

@@ -16,6 +16,7 @@ import '../models/player_settings.dart';
 import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
 import '../services/player_controller.dart';
+import '../services/channel_blacklist.dart';
 import '../services/radio_library.dart';
 import '../services/web_diag.dart';
 import 'scaled_panel.dart';
@@ -1134,6 +1135,8 @@ class _PlayerSettingsTab extends StatelessWidget {
                   .updateSettings(s.copyWith(resumeLastChannel: v)),
               activeColor: Colors.blueAccent,
             ),
+            // 换台跳过：关键词命中台名/分组名即跳过（列表里仍可见可点播）
+            const _BlacklistRow(),
             _buildSlider(
               icon: Icons.touch_app,
               title: '手势灵敏度',
@@ -2308,4 +2311,168 @@ InputDecoration _inputDecoration(String hint,
         ? null
         : _PasteIconButton(pasteTarget),
   );
+}
+
+/// 换台跳过入口：自己管加载与刷新（关键词增删后要更新副标题）
+class _BlacklistRow extends StatefulWidget {
+  const _BlacklistRow();
+
+  @override
+  State<_BlacklistRow> createState() => _BlacklistRowState();
+}
+
+class _BlacklistRowState extends State<_BlacklistRow> {
+  @override
+  void initState() {
+    super.initState();
+    ChannelBlacklist.ensure().then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _open() async {
+    await ChannelBlacklist.ensure();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierColor: AppColors.scrim,
+      builder: (_) => const _BlacklistDialog(),
+    );
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final keys = ChannelBlacklist.keywords;
+    return ListTile(
+      leading: const Icon(Icons.block, color: Colors.white70),
+      title: const Text('换台跳过',
+          style: TextStyle(color: Colors.white, fontSize: 15)),
+      subtitle: Text(
+        keys.isEmpty
+            ? '未设置：上下换台会依次停在每个频道'
+            : '已跳过 ${keys.length} 个关键词：${keys.join('、')}',
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(color: Colors.white54, fontSize: 12),
+      ),
+      trailing: const Icon(Icons.chevron_right,
+          color: Colors.white38, size: 20),
+      onTap: _open,
+    );
+  }
+}
+
+/// 换台跳过的关键词管理（方案 12.3 第一档）
+class _BlacklistDialog extends StatefulWidget {
+  const _BlacklistDialog();
+
+  @override
+  State<_BlacklistDialog> createState() => _BlacklistDialogState();
+}
+
+class _BlacklistDialogState extends State<_BlacklistDialog> {
+  final TextEditingController _ctl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _add() async {
+    final k = _ctl.text.trim();
+    if (k.isEmpty) return;
+    await ChannelBlacklist.add(k);
+    _ctl.clear();
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final keys = ChannelBlacklist.keywords;
+    return AlertDialog(
+      backgroundColor: AppColors.overlay,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: AppColors.stroke),
+      ),
+      title: const Text('换台跳过',
+          style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '命中关键词的频道/电台，上下换台时自动跳过。'
+              '列表里仍然可见，手动点播不受影响。',
+              style: TextStyle(
+                  color: AppColors.textTertiary, fontSize: 12, height: 1.5),
+            ),
+            const SizedBox(height: 12),
+            if (keys.isEmpty)
+              const Text('还没有屏蔽词',
+                  style: TextStyle(
+                      color: AppColors.textTertiary, fontSize: 12.5))
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final k in keys)
+                    Chip(
+                      label: Text(k,
+                          style: const TextStyle(
+                              color: AppColors.textPrimary, fontSize: 12)),
+                      backgroundColor: Colors.white.withValues(alpha: 0.06),
+                      side: const BorderSide(color: AppColors.stroke),
+                      deleteIconColor: AppColors.textTertiary,
+                      onDeleted: () async {
+                        await ChannelBlacklist.remove(k);
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                ],
+              ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _ctl,
+              style: const TextStyle(
+                  color: AppColors.textPrimary, fontSize: 13.5),
+              onSubmitted: (_) => _add(),
+              decoration: InputDecoration(
+                hintText: '关键词，如「购物」「测试」「戏曲」',
+                hintStyle: const TextStyle(
+                    color: AppColors.textTertiary, fontSize: 12.5),
+                isDense: true,
+                filled: true,
+                fillColor: Colors.white.withValues(alpha: 0.05),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: AppColors.stroke),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: AppColors.stroke),
+                ),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.add_circle_outline,
+                      size: 18, color: AppColors.textSecondary),
+                  onPressed: _add,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
 }

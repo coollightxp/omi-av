@@ -29,6 +29,7 @@ import 'format_hint.dart';
 import 'media/omi_video.dart';
 import 'media_capture_service.dart';
 import 'radio_library.dart';
+import 'channel_blacklist.dart';
 import 'radio_catalog.dart';
 import 'radio_logo.dart';
 import 'remote_admin_service.dart';
@@ -188,6 +189,12 @@ class PlayerController extends ChangeNotifier {
   int? _lastTickSecond;
   String? _lastProgramTitle;
 
+  /// 本次收听已经播过的曲目（新的在前，最多 20 条）。
+  /// 电台没有 XMLTV 时的第二级降级：节目单面板至少能显示"刚播了什么"。
+  final List<String> _radioTracks = <String>[];
+  List<String> get radioTracks => List.unmodifiable(_radioTracks);
+  String _lastMediaTitle = '';
+
   // ---------- 待机态：投屏等待 / 待选台（方案 3.7、第九节） ----------
 
   bool _castWaiting = false;
@@ -303,6 +310,8 @@ class PlayerController extends ChangeNotifier {
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
     // 不 await：台标只是锦上添花，绝不能拖慢启动
     unawaited(RadioLogo.ensure());
+    // 黑名单只影响换台跳过，几毫秒的事，但不阻塞启动
+    unawaited(ChannelBlacklist.ensure());
     // 电台目录（内置 + 我的电台）也给左侧「电台」标签备好，
     // 同样不 await：它只影响抽屉里那一列，不影响起播
     unawaited(ensureRadioCatalog());
@@ -1168,6 +1177,11 @@ class PlayerController extends ChangeNotifier {
   Future<void> playChannel(Channel channel) async {
     // 手动切台 = 放弃等待投屏
     _clearCastWait();
+    // 新频道 = 新收听会话：清空上一台的曲目栈
+    if (_currentChannel?.id != channel.id) {
+      _radioTracks.clear();
+      _lastMediaTitle = '';
+    }
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
@@ -1798,13 +1812,24 @@ class PlayerController extends ChangeNotifier {
 
   /// 查询相邻频道（不触发播放）。
   /// 供换台防抖预览：OSD 立即显示目标频道，停顿后 playChannel 真正切流
-  Channel? adjacentChannel(int delta) {
-    final all = flatChannels;
+  Channel? adjacentChannel(int delta) => _stepChannel(delta);
+
+  /// 同域内按偏移取下一台，跳过黑名单。
+  /// OSD 预览（adjacentChannel）与实际换台（playAdjacentChannel）共用这一份，
+  /// 否则会出现"预览显示 A、切过去是 B"。
+  Channel? _stepChannel(int delta) {
+    final all = _switchDomainChannels;
     if (all.isEmpty) return null;
     if (_currentChannel == null) return all.first;
     final idx = all.indexWhere((c) => c.id == _currentChannel!.id);
     if (idx < 0) return all.first;
-    return all[(idx + delta + all.length) % all.length];
+    var i = idx;
+    // 最多绕一圈：全部被屏蔽时停在原地，不能死循环
+    for (var n = 0; n < all.length; n++) {
+      i = (i + delta + all.length) % all.length;
+      if (!ChannelBlacklist.blocks(all[i])) return all[i];
+    }
+    return all[idx];
   }
 
   /// 数字选台部分匹配：返回序号以 [buffer] 开头的第一个频道。
@@ -1834,19 +1859,8 @@ class PlayerController extends ChangeNotifier {
 
   /// 按偏移量切换频道（同域内跨分类、循环）
   Future<void> playAdjacentChannel(int delta) async {
-    final all = _switchDomainChannels;
-    if (all.isEmpty) return;
-    if (_currentChannel == null) {
-      await playChannel(all.first);
-      return;
-    }
-    final idx = all.indexWhere((c) => c.id == _currentChannel!.id);
-    if (idx < 0) {
-      await playChannel(all.first);
-      return;
-    }
-    final next = (idx + delta + all.length) % all.length;
-    await playChannel(all[next]);
+    final target = _stepChannel(delta);
+    if (target != null) await playChannel(target);
   }
 
   // ==================== 频道序号（数字选台） ====================
@@ -2118,6 +2132,17 @@ class PlayerController extends ChangeNotifier {
     // 只处理当前 controller 的事件，旧实例的迟到事件一律忽略
     if (!identical(self, _videoController)) return;
     final v = self.value;
+    // ICY 曲目变化：记进"本次已播"，供电台版节目单面板（方案 13.2）
+    final track = v.mediaTitle.trim();
+    if (track.isNotEmpty && track != _lastMediaTitle) {
+      _lastMediaTitle = track;
+      if (_currentChannel?.isRadio ?? false) {
+        _radioTracks.remove(track);
+        _radioTracks.insert(0, track);
+        if (_radioTracks.length > 20) _radioTracks.removeLast();
+        notifyListeners();
+      }
+    }
     if (v.hasError) {
       if (_isCasting) {
         // 投屏只有一个源，出错基本意味着流真的断了（直播间关播/CDN 掐流）。
