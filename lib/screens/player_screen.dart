@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../core/theme/app_colors.dart';
+import '../core/widgets/standby_shell.dart';
 import '../models/channel.dart';
 import '../services/osd_bus.dart';
 import '../services/pip.dart';
@@ -527,6 +528,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           // 任何鼠标/触摸活动都恢复显示鼠标，并把快捷键焦点收回根节点
           onPointerDown: (_) {
             _pokeCursor();
+            // 待选台画面：点一下就开列表（触屏设备没有方向键）
+            if (context.read<PlayerController>().awaitingChannelPick) {
+              _openStandbyChannelList();
+            }
             // 面板可能在静止光标下滑出（无 hover 事件），
             // 用户开始点击时保持面板不自动隐藏
             if (_leftDrawerOpen || _rightEpgOpen) {
@@ -764,6 +769,34 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       },
                     ),
 
+                  // 待机壳：投屏等待 / 待选台（方案 3.7、第九节）
+                  // 盖住视频层，但让下面的抽屉/面板仍能覆盖它
+                  if (!mini && (controller.castWaiting ||
+                      controller.awaitingChannelPick))
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: controller.awaitingChannelPick
+                            ? _openStandbyChannelList
+                            : null,
+                        child: controller.castWaiting
+                            ? StandbyShell(
+                                icon: Icons.cast,
+                                topBadge: '投屏',
+                                title: '正在等待投屏',
+                                subtitle: controller.castWaitRemain > 0
+                                    ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
+                                    : '发送端连播可直接接上',
+                                hint: '双击返回键  返回直播',
+                              )
+                            : const StandbyShell(
+                                icon: Icons.live_tv,
+                                title: '请选择频道',
+                                subtitle: '按 OK 或方向键打开频道列表',
+                              ),
+                      ),
+                    ),
+
                   // 左侧频道抽屉（小窗里不渲染，下同）
                   if (!mini)
                     LeftChannelDrawer(
@@ -950,13 +983,26 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       _winHotkeys.setCapture(true);
       return;
     }
+    if (c.castWaiting) {
+      // 等待投屏画面：两次返回（≤2 秒）直接回直播，单击只提示
+      final now = DateTime.now();
+      if (_castExitArmAt != null &&
+          now.difference(_castExitArmAt!) < const Duration(seconds: 2)) {
+        _castExitArmAt = null;
+        await c.cancelCastWaitAndRestore();
+      } else {
+        _castExitArmAt = now;
+        OsdBus.show('再按一次返回直播', icon: Icons.live_tv);
+      }
+      return;
+    }
     if (c.isCasting) {
       // 投屏中按返回/右键：第一次只提示，2 秒内再按才真正断开，防误触
       final now = DateTime.now();
       if (_castExitArmAt != null &&
           now.difference(_castExitArmAt!) < const Duration(seconds: 2)) {
         _castExitArmAt = null;
-        await c.stopCastAndRestore();
+        await c.stopCastAndRestore(userInitiated: true);
       } else {
         _castExitArmAt = now;
         OsdBus.show('再按一次退出投屏', icon: Icons.cast_connected);
@@ -1743,6 +1789,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (_okHeld) return;
     _okHeld = true;
     _okLongFired = false;
+    // 待选台：OK 打开频道列表，不再触发长按面板
+    if (_standbyListIntercept()) {
+      _okDownInPanel = true;
+      return;
+    }
     if (_navPanelOpen) {
       _okDownInPanel = true;
       _panelKey('ok', true);
@@ -1807,6 +1858,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _arrowDown = true;
     _arrowLongFired = false;
     _arrowLongTimer?.cancel();
+    if (_standbyListIntercept()) return;
     if (_navPanelOpen) {
       _panelKey(isLeft ? 'left' : 'right', true);
       return;
@@ -1858,6 +1910,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// ↑/↓ 按下边沿：侧边面板打开时面板内移动；底部控制面板打开时忽略
   /// （按钮只有一行，避免误触切台）；其余情况切台
   void _verticalKey(bool isUp) {
+    if (_standbyListIntercept()) return;
     if (_navPanelOpen) {
       _panelKey(isUp ? 'up' : 'down', true);
       return;
@@ -1873,6 +1926,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _menuHeld = true;
     _menuLongFired = false;
     _menuLongTimer?.cancel();
+    if (_standbyListIntercept()) return;
     _menuLongTimer = Timer(const Duration(milliseconds: 500), () {
       _menuLongFired = true;
       final c = context.read<PlayerController>();
@@ -2525,6 +2579,27 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'nextChannel':
         _requestTune(controller, 1);
     }
+  }
+
+  /// 待机倒计时：「4:32」
+  String _fmtWaitLeft(int seconds) {
+    final m = seconds ~/ 60;
+    final sec = seconds % 60;
+    return '$m:${sec.toString().padLeft(2, '0')}';
+  }
+
+  /// 待选台画面里按 OK/方向键/点屏幕：收起待机壳并打开频道列表
+  void _openStandbyChannelList() {
+    final c = context.read<PlayerController>();
+    c.dismissAwaitingChannelPick();
+    if (mounted) setState(() => _leftDrawerOpen = true);
+  }
+
+  /// 待选台拦截：返回 true 表示这次按键已被待机画面消费
+  bool _standbyListIntercept() {
+    if (!context.read<PlayerController>().awaitingChannelPick) return false;
+    _openStandbyChannelList();
+    return true;
   }
 
   /// 换台防抖：OSD 立即显示目标频道，停顿 450ms 后才真正切流。

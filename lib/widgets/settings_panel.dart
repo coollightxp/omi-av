@@ -1122,6 +1122,18 @@ class _PlayerSettingsTab extends StatelessWidget {
                   .updateSettings(s.copyWith(autoPlayNext: v)),
               activeColor: Colors.blueAccent,
             ),
+            SwitchListTile(
+              secondary: const Icon(Icons.restore, color: Colors.white70),
+              title: const Text('启动时恢复上次频道',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: const Text(
+                  '关闭后启动停在「请选择频道」，不发起任何网络请求',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              value: s.resumeLastChannel,
+              onChanged: (v) => controller
+                  .updateSettings(s.copyWith(resumeLastChannel: v)),
+              activeColor: Colors.blueAccent,
+            ),
             _buildSlider(
               icon: Icons.touch_app,
               title: '手势灵敏度',
@@ -1580,12 +1592,13 @@ class _SystemSettingsTab extends StatelessWidget {
               leading: Icon(Icons.playlist_play,
                   color: s.dlnaEnabled ? Colors.white70 : Colors.white24),
               enabled: s.dlnaEnabled,
-              title: Text('投屏播完后',
+              title: Text('投屏结束后',
                   style: TextStyle(
                       color: s.dlnaEnabled ? Colors.white : Colors.white38,
                       fontSize: 15)),
-              subtitle: Text('等待期间发送端连播（下一集）可直接继续；'
-                  '「一直等」则不返回直播，直到新投屏或手动切台',
+              subtitle: Text('播完/发送端停止后先进「正在等待投屏」：'
+                  '等待期间连播（下一集）可直接接上；'
+                  '「一直等」则停在等待画面，直到新投屏或双击返回',
                   style: TextStyle(
                       color:
                           s.dlnaEnabled ? Colors.white54 : Colors.white24,
@@ -1597,9 +1610,10 @@ class _SystemSettingsTab extends StatelessWidget {
                 ),
                 segments: const [
                   ButtonSegment(value: 0, label: Text('立即')),
-                  ButtonSegment(value: 5, label: Text('5秒')),
-                  ButtonSegment(value: 30, label: Text('30秒')),
-                  ButtonSegment(value: -1, label: Text('一直等')),
+                  ButtonSegment(value: 60, label: Text('1分')),
+                  ButtonSegment(value: 300, label: Text('5分')),
+                  ButtonSegment(value: 600, label: Text('10分')),
+                  ButtonSegment(value: -1, label: Text('一直')),
                 ],
                 selected: {s.castEndWaitSeconds},
                 onSelectionChanged: s.dlnaEnabled

@@ -188,6 +188,35 @@ class PlayerController extends ChangeNotifier {
   int? _lastTickSecond;
   String? _lastProgramTitle;
 
+  // ---------- 待机态：投屏等待 / 待选台（方案 3.7、第九节） ----------
+
+  bool _castWaiting = false;
+
+  /// 投屏刚结束、正在等待新投屏（全屏「正在等待投屏」画面）
+  bool get castWaiting => _castWaiting;
+
+  /// 剩余秒数；-1 表示「一直等待」
+  int _castWaitRemain = 0;
+  int get castWaitRemain => _castWaitRemain;
+
+  Timer? _castWaitTimer;
+
+  /// 等待期间要先记住"该回到哪个台"，超时/双击返回时用它
+  Channel? _pendingRestoreChannel;
+
+  bool _awaitingChannelPick = false;
+
+  /// 启动时未自动播放（设置里关了「恢复上次频道」），
+  /// 界面显示「请选择频道」待选台画面
+  bool get awaitingChannelPick => _awaitingChannelPick;
+
+  /// 用户按 OK/方向键/点屏幕：收起待选台（随后由界面打开频道列表）
+  void dismissAwaitingChannelPick() {
+    if (!_awaitingChannelPick) return;
+    _awaitingChannelPick = false;
+    notifyListeners();
+  }
+
   PlayerState get state => _state;
   Channel? get currentChannel => _currentChannel;
   double get volume => _volume;
@@ -338,9 +367,16 @@ class PlayerController extends ChangeNotifier {
     }
     _initSystemValues();
 
-    // 频道加载完毕后，恢复上次退出时播放的频道
-    _boot('正在恢复上次播放的频道…');
-    await restoreLastChannel();
+    // 频道加载完毕后，恢复上次退出时播放的频道。
+    // 设置里关掉「启动时恢复上次频道」→ 停在待选台画面，
+    // 不发任何网络请求（待选台壳由播放页渲染）
+    if (_settings.resumeLastChannel) {
+      _boot('正在恢复上次播放的频道…');
+      await restoreLastChannel();
+    } else {
+      _awaitingChannelPick = true;
+      _state = PlayerState.idle;
+    }
 
     // 启动初始化完成：撤掉启动画面。
     // 最短展示 2.6 秒：既有初始化耗时则如实展示（不额外拖慢），
@@ -422,6 +458,12 @@ class PlayerController extends ChangeNotifier {
 
   static const _kLastChannel = 'last_channel_v1';
 
+  /// 电台域单独记忆（方案 12.6 双域独立记忆）：
+  /// 电视、电台各存各的，另存"上次所在域"；启动恢复的是
+  /// 上次所在域 + 该域上次频道，不是永远回电视
+  static const _kLastRadioChannel = 'last_radio_channel_v1';
+  static const _kLastDomain = 'last_domain_v1';
+
   /// 播放成功后记录当前频道，供下次启动恢复
   Future<void> _saveLastChannel({Channel? channel}) async {
     // 投屏会话不记录：投屏链接是临时的（如手机推来的抖音直播），
@@ -443,8 +485,22 @@ class PlayerController extends ChangeNotifier {
         'sourceIndex': _sourceIndex,
         'userAgent': ch.userAgent,
       };
-      await p.setString(_kLastChannel, jsonEncode(data));
+      await p.setString(
+        ch.isRadio ? _kLastRadioChannel : _kLastChannel,
+        jsonEncode(data),
+      );
+      await p.setString(_kLastDomain, ch.isRadio ? 'radio' : 'tv');
     } catch (_) {}
+  }
+
+  /// 在电台目录（内置精选 + 我的电台）里按 id 找频道
+  Channel? _findInRadioCatalog(String id) {
+    for (final cat in _radioCategories) {
+      for (final ch in cat.channels) {
+        if (ch.id == id) return ch;
+      }
+    }
+    return null;
   }
 
   /// 启动时恢复上次播放的频道：优先在当前播放列表中精确匹配，
@@ -452,7 +508,13 @@ class PlayerController extends ChangeNotifier {
   Future<void> restoreLastChannel() async {
     try {
       final p = await SharedPreferences.getInstance();
-      final str = p.getString(_kLastChannel);
+      // 上次在哪个域就在哪个域恢复；该域没记录时回落到另一个域
+      final lastDomain = p.getString(_kLastDomain) ?? 'tv';
+      final isRadio = lastDomain == 'radio';
+      var str = p.getString(isRadio ? _kLastRadioChannel : _kLastChannel);
+      if (str == null || str.isEmpty) {
+        str = p.getString(isRadio ? _kLastChannel : _kLastRadioChannel);
+      }
       if (str == null || str.isEmpty) return;
       final Map<String, dynamic> data =
           jsonDecode(str) as Map<String, dynamic>;
@@ -466,10 +528,16 @@ class PlayerController extends ChangeNotifier {
       final name = data['name'] as String? ?? '';
       final srcIdx = (data['sourceIndex'] as int?) ?? 0;
 
-      // 1) 在已加载分类中按频道 ID 精确查找
+      // 1) 在已加载分类中按频道 ID 精确查找。
+      //    电台要先确保跨源目录已建好（启动时它是后台异步加载的）
       Channel? target;
       if (id.isNotEmpty) {
-        target = _findChannelById(id);
+        if (isRadio && !_radioCatalogLoaded) {
+          await ensureRadioCatalog();
+        }
+        target = isRadio ? _findInRadioCatalog(id) : _findChannelById(id);
+        // 域判断失效（比如源被删/改名）：两个域都找一遍
+        target ??= _findChannelById(id) ?? _findInRadioCatalog(id);
       }
       // 2) 没找到则用记录的地址列表 + 元数据构造临时频道
       target ??= Channel(
@@ -721,7 +789,7 @@ class PlayerController extends ChangeNotifier {
       }
       int castEndWait = cur.castEndWaitSeconds;
       final ce = rawSettings['castEndWaitSeconds'];
-      if (ce is num && const {-1, 0, 5, 30}.contains(ce.toInt())) {
+      if (ce is num && const {-1, 0, 60, 300, 600}.contains(ce.toInt())) {
         castEndWait = ce.toInt();
       }
       final startFullscreen = rb('startFullscreen') ?? cur.startFullscreen;
@@ -776,6 +844,8 @@ class PlayerController extends ChangeNotifier {
 
   /// 播放投屏推送的 URL（记录投屏前频道用于断开恢复）
   Future<void> playCastUrl(String url, String title) async {
+    // 正在等待画面里来了新投屏：直接接上
+    _clearCastWait();
     // 紧接 Stop 到达的新投屏：取消挂起的"恢复上次频道"和"播完兜底"
     _castRestoreTimer?.cancel();
     _castRestoreTimer = null;
@@ -834,7 +904,7 @@ class PlayerController extends ChangeNotifier {
   /// 发送端换片信令通常是 Stop→(几十毫秒)→SetAVTransportURI→Play，
   /// 立即恢复会让"恢复直播"与"新投屏"两路 initialize 并发，迟到的直播流
   /// 初始化会覆盖点播（进度条消失、假重试、有声无画的根因）。
-  Future<void> stopCastAndRestore() async {
+  Future<void> stopCastAndRestore({bool userInitiated = false}) async {
     if (!_isCasting) return;
     // 恢复延迟已在途：保持原 timer，不取消/重置。
     // 看门狗或重复点击若不断重置这个 timer，会导致几十秒无法真正断开
@@ -843,12 +913,15 @@ class PlayerController extends ChangeNotifier {
     _castEndedTimer = null;
     _castRestoreTimer = Timer(const Duration(milliseconds: 800), () {
       _castRestoreTimer = null;
-      _doStopCastAndRestore();
+      _doStopCastAndRestore(userInitiated: userInitiated);
     });
   }
 
-  /// 投屏端断开/停止后的实际恢复逻辑
-  Future<void> _doStopCastAndRestore() async {
+  /// 投屏端断开/停止后的实际恢复逻辑。
+  ///
+  /// [userInitiated] 为用户主动断开（返回键两次 / 点断开按钮）：
+  /// 手动断开是明确意图，直接回直播，不再进入等待画面。
+  Future<void> _doStopCastAndRestore({bool userInitiated = false}) async {
     if (!_isCasting) return;
     _isCasting = false;
     _watchPosMs = -1;
@@ -860,6 +933,17 @@ class PlayerController extends ChangeNotifier {
     dlnaService.kickCastClients();
     final restore = _preCastChannel;
     _preCastChannel = null;
+    // 方案 3.7：投屏结束后按设置进「正在等待投屏」，给发送端连播
+    // （电视剧下一集）留窗口；0=马上返回，-1=一直等
+    final wait = _settings.castEndWaitSeconds;
+    if (!userInitiated && (wait < 0 || wait > 0)) {
+      _pendingRestoreChannel = restore;
+      await _disposeVideoController();
+      WakelockPlus.disable();
+      _state = PlayerState.idle;
+      _enterCastWait(wait);
+      return;
+    }
     if (restore != null) {
       await playChannel(restore);
     } else {
@@ -868,6 +952,60 @@ class PlayerController extends ChangeNotifier {
       _state = PlayerState.idle;
       notifyListeners();
     }
+  }
+
+  /// 进入「正在等待投屏」。seconds<0 = 一直等待。
+  void _enterCastWait(int seconds) {
+    _castWaitTimer?.cancel();
+    _castWaiting = true;
+    _castWaitRemain = seconds;
+    if (seconds > 0) {
+      _castWaitTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!_castWaiting) {
+          t.cancel();
+          return;
+        }
+        _castWaitRemain--;
+        if (_castWaitRemain <= 0) {
+          t.cancel();
+          _castWaitTimer = null;
+          _exitCastWait();
+        } else {
+          notifyListeners();
+        }
+      });
+    }
+    notifyListeners();
+  }
+
+  /// 退出等待并回到投屏前的频道（超时、双击返回都走这里）
+  Future<void> _exitCastWait() async {
+    _castWaitTimer?.cancel();
+    _castWaitTimer = null;
+    if (!_castWaiting) return;
+    _castWaiting = false;
+    _castWaitRemain = 0;
+    final restore = _pendingRestoreChannel;
+    _pendingRestoreChannel = null;
+    if (restore != null) {
+      await playChannel(restore);
+    } else {
+      _state = PlayerState.idle;
+      notifyListeners();
+    }
+  }
+
+  /// 界面用：等待画面双击返回 → 立刻回直播
+  Future<void> cancelCastWaitAndRestore() => _exitCastWait();
+
+  /// 新投屏进来：清掉等待态（不恢复旧频道，由 playCastUrl 接管）
+  void _clearCastWait() {
+    if (!_castWaiting) return;
+    _castWaitTimer?.cancel();
+    _castWaitTimer = null;
+    _castWaiting = false;
+    _castWaitRemain = 0;
+    _pendingRestoreChannel = null;
   }
 
   /// 预约触发回调 - 自动切换/录制
@@ -1025,6 +1163,8 @@ class PlayerController extends ChangeNotifier {
 
   /// 播放指定频道（从第一个源开始，失败自动尝试下一个源）
   Future<void> playChannel(Channel channel) async {
+    // 手动切台 = 放弃等待投屏
+    _clearCastWait();
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
@@ -2319,7 +2459,18 @@ class PlayerController extends ChangeNotifier {
   static const _kAutoReloadStall = 'settings_auto_reload_stall';
   static const _kRetryTimes = 'settings_retry_times';
   static const _kCastEndWait = 'settings_cast_end_wait_seconds';
+  static const _kResumeLastChannel = 'settings_resume_last_channel';
   static const _kFavoriteChannelIds = 'omi_favorite_channel_ids';
+
+  /// 投屏结束后等待档位只认五档：0 / 60 / 300 / 600 / -1。
+  /// 老版本存过 5、30 秒，统一归到"马上返回"（0），避免出现
+  /// 界面里没有对应选项的野值。
+  static int _normalizeCastWait(int v) {
+    if (v < 0) return -1;
+    if (v == 0) return 0;
+    if (v == 60 || v == 300 || v == 600) return v;
+    return 0;
+  }
 
   Future<void> _loadSettings() async {
     try {
@@ -2344,7 +2495,8 @@ class PlayerController extends ChangeNotifier {
         webEnabled: p.getBool(_kWebEnabled) ?? true,
         autoReloadStall: p.getBool(_kAutoReloadStall) ?? true,
         retryTimes: p.getInt(_kRetryTimes) ?? 3,
-        castEndWaitSeconds: p.getInt(_kCastEndWait) ?? 5,
+        castEndWaitSeconds: _normalizeCastWait(p.getInt(_kCastEndWait) ?? 0),
+        resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
       );
       _favoriteChannelIds
         ..clear()
@@ -2402,6 +2554,7 @@ class PlayerController extends ChangeNotifier {
       await p.setBool(_kAutoReloadStall, _settings.autoReloadStall);
       await p.setInt(_kRetryTimes, _settings.retryTimes);
       await p.setInt(_kCastEndWait, _settings.castEndWaitSeconds);
+      await p.setBool(_kResumeLastChannel, _settings.resumeLastChannel);
     } catch (_) {}
   }
 
@@ -3446,6 +3599,7 @@ class PlayerController extends ChangeNotifier {
     _tickTimer?.cancel();
     _castRestoreTimer?.cancel();
     _castEndedTimer?.cancel();
+    _castWaitTimer?.cancel();
     _autoRetryTimer?.cancel();
     _resetWebRecording();
     if (_isRecording && _videoController != null) {

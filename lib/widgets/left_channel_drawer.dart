@@ -268,7 +268,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       switch (action) {
         case 'left':
           // 第一级按左键 = 切换 电视/电台（右键留给"进入分类"）
-          if (!isDown) break;
+          _switchTab(1 - _mediaTab);
+        case 'menu':
+          // 方案 12.6：列表打开时菜单键空闲，用作一键切域
           _switchTab(1 - _mediaTab);
         case 'up':
           setState(() => _kbCategoryIndex =

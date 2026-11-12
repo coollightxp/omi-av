@@ -63,10 +63,17 @@ class PlayerSettings {
   /// 判定链接失效，不再自动重试（手动切台或点重试会清零重新计数）
   final int retryTimes;
 
-  /// 投屏点播播完后的处理（秒）：0=立即返回直播；5/30=等待该时长，
-  /// 期间发送端连播（电视剧下一集）可继续；超时未等到新投屏才返回直播；
-  /// -1=一直等待，直到新投屏到来或手动切台/断开
+  /// 投屏结束后（播完或发送端停止）的处理（秒）：
+  /// 0=立即返回直播；60/300/600=进入「正在等待投屏」，期间发送端连播
+  /// （电视剧下一集）可直接接上；超时未等到新投屏才返回直播；
+  /// -1=一直等待，直到新投屏到来或用户双击返回/手动切台。
+  /// 方案 3.7 五档。
   final int castEndWaitSeconds;
+
+  /// 启动时恢复上次频道（默认开）。
+  /// 关闭后启动进入「待选台」画面，不发起任何网络请求，
+  /// 按 OK/方向键/点屏幕才打开频道列表。方案第九节。
+  final bool resumeLastChannel;
 
   const PlayerSettings({
     this.autoPlayNext = true,
@@ -88,7 +95,8 @@ class PlayerSettings {
     this.webEnabled = true,
     this.autoReloadStall = true,
     this.retryTimes = 3,
-    this.castEndWaitSeconds = 5,
+    this.castEndWaitSeconds = 0,
+    this.resumeLastChannel = true,
   });
 
   PlayerSettings copyWith({
@@ -112,6 +120,7 @@ class PlayerSettings {
     bool? autoReloadStall,
     int? retryTimes,
     int? castEndWaitSeconds,
+    bool? resumeLastChannel,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -135,6 +144,7 @@ class PlayerSettings {
       autoReloadStall: autoReloadStall ?? this.autoReloadStall,
       retryTimes: retryTimes ?? this.retryTimes,
       castEndWaitSeconds: castEndWaitSeconds ?? this.castEndWaitSeconds,
+      resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
     );
   }
 }

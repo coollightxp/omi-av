@@ -534,12 +534,12 @@ function renderSettings(){
     +'<div class="seg" style="margin-top:10px">'
     +[3,5,10].map(function(v){return '<button class="'+(rt===v?'on':'')+'" onclick="setChoice(\'retryTimes\','+v+')">'+v+' 次</button>'}).join('')
     +'</div></div>';
-  // 投屏点播播完后：立即回直播 / 等 N 秒连播 / 一直等待
-  var ce=typeof s.castEndWaitSeconds==='number'?s.castEndWaitSeconds:5;
-  var ceOpts=[[0,'立即'],[5,'5 秒'],[30,'30 秒'],[-1,'一直等']];
+  // 投屏结束后：立即回直播 / 等待 1·5·10 分钟连播 / 一直等待（五档）
+  var ce=typeof s.castEndWaitSeconds==='number'?s.castEndWaitSeconds:0;
+  var ceOpts=[[0,'立即'],[60,'1 分钟'],[300,'5 分钟'],[600,'10 分钟'],[-1,'一直等']];
   html+='<div class="sw-row col"><div class="sw-text">'
-    +'<div class="sw-title">投屏播完后</div>'
-    +'<div class="sw-sub">等待期间发送端连播（下一集）可直接继续；「一直等」不返回直播</div></div>'
+    +'<div class="sw-title">投屏结束后</div>'
+    +'<div class="sw-sub">等待期间发送端连播（下一集）可直接继续；「一直等」停在等待画面</div></div>'
     +'<div class="seg" style="margin-top:10px">'
     +ceOpts.map(function(o){return '<button class="'+(ce===o[0]?'on':'')+'" onclick="setChoice(\'castEndWaitSeconds\','+o[0]+')">'+o[1]+'</button>'}).join('')
     +'</div></div>';
