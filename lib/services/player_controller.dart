@@ -2104,8 +2104,10 @@ class PlayerController extends ChangeNotifier {
       headers: headers.isEmpty ? null : headers,
       formatHint: formatHint,
       bufferSeconds: bufSecs,
-      // 电台：让 mpv 走 showwaves 出真实波形纹理（失败会自动退回）
-      radioSpectrum: channel.isRadio,
+      // 电台：默认不抢 vo（lavfi-complex 出纹理在部分流上会黑屏/不动，
+      // 见设置「真波形纹理(实验)」）；电平表始终挂，波形跟真实响度走
+      radioSpectrum: channel.isRadio && _settings.spectrumTexture,
+      audioMeter: channel.isRadio,
     );
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
@@ -2748,6 +2750,7 @@ class PlayerController extends ChangeNotifier {
   static const _kResumeLastChannel = 'settings_resume_last_channel';
   static const _kAudioPreset = 'settings_audio_preset';
   static const _kAudioEqGains = 'settings_audio_eq_gains';
+  static const _kSpectrumTexture = 'settings_spectrum_texture';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -2788,6 +2791,7 @@ class PlayerController extends ChangeNotifier {
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
         audioPreset: p.getString(_kAudioPreset) ?? '',
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
+        spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -2833,6 +2837,7 @@ class PlayerController extends ChangeNotifier {
       await p.setString(_kAudioPreset, _settings.audioPreset);
       await p.setString(
           _kAudioEqGains, jsonEncode(_settings.audioEqGains));
+      await p.setBool(_kSpectrumTexture, _settings.spectrumTexture);
       await p.setBool(_kAutoPlayNext, _settings.autoPlayNext);
       await p.setDouble(_kSensitivity, _settings.gestureSensitivity);
       await p.setInt(_kAutoHide, _settings.autoHideDelay);
@@ -3032,6 +3037,23 @@ class PlayerController extends ChangeNotifier {
   // ==================== 声音实验室（方案 12.3 第二档） ====================
 
   String get audioPreset => _settings.audioPreset;
+
+  /// 当前播放内核的实时电平（0~1，-1 = 取不到）。
+  /// 波形组件直接订阅这个 notifier：每 90ms 更新一次，不走
+  /// ChangeNotifier，避免为了一条波形把整棵播放树重建。
+  ValueListenable<double>? get audioLevel => _videoController?.audioLevel;
+
+  /// 真波形纹理（实验）：mpv lavfi-complex → vo 出图
+  bool get spectrumTexture => _settings.spectrumTexture;
+
+  Future<void> setSpectrumTexture(bool on) async {
+    if (_settings.spectrumTexture == on) return;
+    updateSettings(_settings.copyWith(spectrumTexture: on));
+    OsdBus.show(
+      on ? '真波形纹理：开（下次换台生效）' : '真波形纹理：关',
+      icon: Icons.graphic_eq,
+    );
+  }
 
   /// 切换声音实验室预设（'' = 标准）：mpv lavfi 音频滤镜。
   /// 只影响内置播放器；换台重建控制器后自动重挂（见播放控制器创建处）

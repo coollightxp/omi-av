@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
@@ -22,6 +23,8 @@ class AudioWave extends StatefulWidget {
   const AudioWave({
     super.key,
     required this.active,
+    this.level,
+    this.fillWidth = false,
     this.bars = 27,
     this.height = 50,
     this.barWidth = 3.2,
@@ -31,6 +34,15 @@ class AudioWave extends StatefulWidget {
 
   /// 是否正在播放（false 时整条波压平为静止基线）
   final bool active;
+
+  /// 真实电平 0~1（-1 表示不可知）。
+  /// 有值时整体起伏跟着**真实声音**走，静音/暂停立刻落平；
+  /// 无值时退化为按播放态模拟（老行为）。
+  final ValueListenable<double>? level;
+
+  /// 撑满父级可用宽度（柱数自适应），电台大屏波形用
+  final bool fillWidth;
+
   final int bars;
   final double height;
   final double barWidth;
@@ -65,12 +77,11 @@ class _AudioWaveState extends State<AudioWave>
   @override
   void initState() {
     super.initState();
-    _bars = _buildBars();
+    _bars = _buildBars(widget.bars);
     if (widget.active) _start();
   }
 
-  List<_Bar> _buildBars() {
-    final n = widget.bars;
+  List<_Bar> _buildBars(int n) {
     return List<_Bar>.generate(n, (i) {
       final f = n == 1 ? 0.5 : i / (n - 1);
       // 中间高两侧低，像一条被"压住"的声波，不是死板的等宽柱
@@ -79,6 +90,26 @@ class _AudioWaveState extends State<AudioWave>
       final speed = 0.35 + _rnd.nextDouble() * 1.10;
       final offset = _rnd.nextDouble() * math.pi * 2;
       return _Bar(env, speed, offset);
+    });
+  }
+
+  /// 柱数按可用宽度重排（窗口拉伸时波形跟着变长，而不是留白）。
+  /// 已有柱子复用，只有新增的才分配随机相位 —— 拉窗口时不会整排跳一下。
+  void _resizeBars(int n) {
+    if (_bars.length == n) return;
+    if (n < _bars.length) {
+      _bars = _bars.sublist(0, n);
+      return;
+    }
+    final old = _bars;
+    _bars = List<_Bar>.generate(n, (i) {
+      if (i < old.length) return old[i];
+      final f = n == 1 ? 0.5 : i / (n - 1);
+      return _Bar(
+        0.32 + 0.68 * math.sin(math.pi * f),
+        0.35 + _rnd.nextDouble() * 1.10,
+        _rnd.nextDouble() * math.pi * 2,
+      );
     });
   }
 
@@ -94,8 +125,22 @@ class _AudioWaveState extends State<AudioWave>
     _last = elapsed;
     final step = raw.clamp(0.001, 0.05);
 
-    final goal = widget.active ? 1.0 : 0.0;
-    _energy += (goal - _energy) * (step * 3.4).clamp(0.0, 1.0);
+    // 真实电平（dBFS→0~1，由内核每 90ms 取一次）；-1 = 拿不到
+    final real = widget.level?.value ?? -1.0;
+    final hasReal = real >= 0;
+
+    // 目标能量：暂停一律归零；能拿到真实电平就跟它走，否则按播放态模拟
+    final double goal;
+    if (!widget.active) {
+      goal = 0;
+    } else if (hasReal) {
+      goal = real.clamp(0.0, 1.0);
+    } else {
+      goal = 1;
+    }
+    // 真实模式下 RMS 抖动大：涨要快、落要慢，才像电平表
+    final energyK = (hasReal && goal < _energy) ? 4.2 : 9.0;
+    _energy += (goal - _energy) * (step * energyK).clamp(0.0, 1.0);
 
     for (final b in _bars) {
       b.phase += step * b.speed * 2 * math.pi;
@@ -103,7 +148,14 @@ class _AudioWaveState extends State<AudioWave>
       final w = 0.5 +
           0.32 * math.sin(b.phase) +
           0.18 * math.sin(b.phase * 1.73 + b.offset);
-      final target = b.env * (0.10 + 0.90 * w.clamp(0.0, 1.0)) * _energy;
+      final wobble = w.clamp(0.0, 1.0);
+      final double target;
+      if (hasReal) {
+        // 高度由真实响度决定，柱间差异只负责"频谱感"
+        target = b.env * (0.16 + 0.84 * _energy) * (0.55 + 0.45 * wobble);
+      } else {
+        target = b.env * (0.10 + 0.90 * wobble) * _energy;
+      }
       // 上升快、回落慢：电平表手感
       final k = target > b.level ? 14.0 : 5.0;
       b.level += (target - b.level) * (step * k).clamp(0.0, 1.0);
@@ -136,24 +188,47 @@ class _AudioWaveState extends State<AudioWave>
 
   @override
   Widget build(BuildContext context) {
-    final width =
-        widget.bars * widget.barWidth + (widget.bars - 1) * widget.gap;
-    return SizedBox(
-      width: width,
-      height: widget.height,
-      child: ValueListenableBuilder<int>(
-        valueListenable: _frame,
-        builder: (context, _, __) => CustomPaint(
-          painter: _WavePainter(
-            levels: [for (final b in _bars) b.level],
-            barWidth: widget.barWidth,
-            gap: widget.gap,
-            color: widget.color,
-          ),
-        ),
-      ),
+    if (!widget.fillWidth) {
+      final width =
+          widget.bars * widget.barWidth + (widget.bars - 1) * widget.gap;
+      return SizedBox(
+        width: width,
+        height: widget.height,
+        child: _paintArea(Size(width, widget.height)),
+      );
+    }
+    // 撑满可用宽度：按约束反算柱数，窗口越宽波形越长（只在 paint 阶段
+    // 多画几根柱，不重建整树）
+    return LayoutBuilder(
+      builder: (context, c) {
+        final w = c.maxWidth.isFinite && c.maxWidth > 0
+            ? c.maxWidth
+            : widget.bars * (widget.barWidth + widget.gap);
+        final n = ((w + widget.gap) / (widget.barWidth + widget.gap))
+            .floor()
+            .clamp(6, 160);
+        _resizeBars(n);
+        return _paintArea(Size(w, widget.height));
+      },
     );
   }
+
+  Widget _paintArea(Size size) => SizedBox(
+        width: size.width,
+        height: size.height,
+        child: ValueListenableBuilder<int>(
+          valueListenable: _frame,
+          builder: (context, _, __) => CustomPaint(
+            size: size,
+            painter: _WavePainter(
+              levels: [for (final b in _bars) b.level],
+              barWidth: widget.barWidth,
+              gap: widget.gap,
+              color: widget.color,
+            ),
+          ),
+        ),
+      );
 }
 
 class _WavePainter extends CustomPainter {
@@ -206,6 +281,7 @@ class AudioBars extends StatelessWidget {
   const AudioBars({
     super.key,
     required this.active,
+    this.level,
     this.color = AppColors.wave,
     this.height = 12,
     this.bars = 3,
@@ -214,6 +290,7 @@ class AudioBars extends StatelessWidget {
   });
 
   final bool active;
+  final ValueListenable<double>? level;
   final Color color;
   final double height;
   final int bars;
@@ -224,6 +301,7 @@ class AudioBars extends StatelessWidget {
   Widget build(BuildContext context) {
     return AudioWave(
       active: active,
+      level: level,
       bars: bars,
       height: height,
       barWidth: barWidth,

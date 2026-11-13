@@ -89,6 +89,12 @@ class PlayerSettings {
   /// 31/62/125/250/500/1k/2k/4k/8k/16k；空表 = 全 0（直通）
   final List<double> audioEqGains;
 
+  /// 电台「真波形纹理」实验开关（默认关）。
+  /// 开着时让 mpv 用 lavfi-complex 把音频画成视频帧贴出来（真实波形，
+  /// 但会占 vo，部分流的滤镜链建不起来）；关着走 Flutter 侧电平波形，
+  /// 稳定且不黑屏。绝大多数用户不需要开。
+  final bool spectrumTexture;
+
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -114,6 +120,7 @@ class PlayerSettings {
     this.closeToTray = false,
     this.audioPreset = '',
     this.audioEqGains = const <double>[],
+    this.spectrumTexture = false,
   });
 
   PlayerSettings copyWith({
@@ -141,6 +148,7 @@ class PlayerSettings {
     bool? closeToTray,
     String? audioPreset,
     List<double>? audioEqGains,
+    bool? spectrumTexture,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -168,6 +176,7 @@ class PlayerSettings {
       closeToTray: closeToTray ?? this.closeToTray,
       audioPreset: audioPreset ?? this.audioPreset,
       audioEqGains: audioEqGains ?? this.audioEqGains,
+      spectrumTexture: spectrumTexture ?? this.spectrumTexture,
     );
   }
 }

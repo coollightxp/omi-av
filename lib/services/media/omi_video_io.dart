@@ -20,9 +20,11 @@ class OmiVideoController extends ChangeNotifier {
     String? formatHint,
     int bufferSeconds = 5,
     bool radioSpectrum = false,
+    bool audioMeter = false,
   }) : _url = url,
        _headers = headers,
-       _radioSpectrum = radioSpectrum {
+       _radioSpectrum = radioSpectrum,
+       _audioMeter = audioMeter {
     MediaKit.ensureInitialized();
     final bytes = (bufferSeconds.clamp(3, 120)) * 1024 * 1024;
     _player = Player(
@@ -40,12 +42,29 @@ class OmiVideoController extends ChangeNotifier {
   final Uri _url;
   final Map<String, String>? _headers;
   final bool _radioSpectrum;
+
+  /// 是否挂音频电平表（电台「会动的波形」用）。
+  /// 走 mpv 的 af-metadata 读 astats 的 RMS，是**真实电平**，
+  /// 不依赖 vo/showwaves，纯音频流也能拿到。
+  final bool _audioMeter;
+
+  /// 实时电平 0~1（-1 未知）。波形组件直接订阅，不走 ChangeNotifier，
+  /// 免得每次取样都重建整棵播放树。
+  final ValueNotifier<double> audioLevel = ValueNotifier<double>(-1);
+
   late final Player _player;
   late final VideoController _video;
   final List<StreamSubscription<dynamic>> _subs = [];
 
   OmiVideoValue _value = const OmiVideoValue();
   bool _disposed = false;
+
+  Timer? _meterTimer;
+  String? _meterKey; // 首次探测成功后缓存，避免每次试三个键
+  String? _lastAudioFilter; // 记住用户滤镜，initialize 后再挂一次
+  int _meterLogCount = 0;
+  int _meterMiss = 0;
+  bool _meterDead = false; // af-metadata 拿不到：波形退回模拟
 
   OmiVideoValue get value => _value;
 
@@ -147,6 +166,91 @@ class OmiVideoController extends ChangeNotifier {
         if (_disposed) return;
         if (_value.hasError) unawaited(_dropSpectrumFilter());
       });
+    }
+    // 电平表要等 mpv 起来才能挂（af 在 _create 之前设大概率丢）；
+    // 同理，均衡器预设也在这里补挂一次，避免首个滤镜调用打在空内核上
+    if (_audioMeter ||
+        (_lastAudioFilter ?? '').trim().isNotEmpty) {
+      await applyAudioFilter(_lastAudioFilter);
+      if (_audioMeter) _startMeter();
+    }
+  }
+
+  // ==================== 音频电平表 ====================
+  // mpv 的 `af-metadata/<label>/<key>` 只读属性会带出 astats 的帧级统计，
+  // 取 Overall.RMS_level（dBFS）。这样纯音频流也能拿到"现在有多响"，
+  // 不需要 vo，也不需要自己做 FFT —— 波形就能跟着真实声音起伏。
+  static const _meterLabel = 'omi_lv';
+
+  /// astats 挂上后 metadata 的键名，mpv 各版本前缀不同，逐个试
+  static const _meterKeys = <String>[
+    'lavfi.astats.Overall.RMS_level',
+    'Overall.RMS_level',
+    'lavfi.astats.Overall.Peak_level',
+    'Overall.Peak_level',
+  ];
+
+  void _startMeter() {
+    if (_disposed || !_audioMeter) return;
+    _meterTimer?.cancel();
+    // 90ms ≈ 11Hz：够顺滑，开销也就是每秒 11 次原生属性读
+    _meterTimer = Timer.periodic(
+      const Duration(milliseconds: 90),
+      (_) => unawaited(_pullLevel()),
+    );
+  }
+
+  Future<void> _pullLevel() async {
+    if (_disposed || _meterDead) return;
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    try {
+      String db = '';
+      if (_meterKey != null) {
+        db = (await platform.getProperty(
+          'af-metadata/$_meterLabel/$_meterKey',
+        ))
+            .trim();
+      } else {
+        for (final k in _meterKeys) {
+          final v = (await platform.getProperty(
+            'af-metadata/$_meterLabel/$k',
+          ))
+              .trim();
+          if (v.isNotEmpty) {
+            _meterKey = k;
+            db = v;
+            break;
+          }
+        }
+      }
+      if (db.isEmpty) {
+        // 起播前几秒本来就没数据，给足 5 秒再判死
+        if (++_meterMiss > 60) {
+          _meterDead = true;
+          _meterTimer?.cancel();
+          audioLevel.value = -1; // -1 = 未知 → 波形切回模拟（必定会动）
+          debugPrint('[OmiVideo] af-metadata 不可用，波形退回模拟');
+        }
+        return;
+      }
+      _meterMiss = 0;
+      if (_meterLogCount < 3) {
+        _meterLogCount++;
+        debugPrint('[OmiVideo] meter key=$_meterKey raw="$db"');
+      }
+      // mpv 偶尔给 "-inf" / "nan"，都按静音处理
+      final parsed = double.tryParse(db);
+      final level = (parsed == null || !parsed.isFinite)
+          ? 0.0
+          : ((parsed + 58.0) / 58.0).clamp(0.0, 1.0);
+      // 只在明显变化时推，避免每 90ms 抖一次
+      if ((level - audioLevel.value).abs() > 0.012 ||
+          (level == 0 && audioLevel.value != 0)) {
+        audioLevel.value = level;
+      }
+    } catch (_) {
+      // 属性不可读（旧内核/滤镜未挂上）：保持上一个值，波形自己会衰减
     }
   }
 
@@ -258,14 +362,28 @@ class OmiVideoController extends ChangeNotifier {
   /// 应用音频滤镜（声音实验室，方案 12.3 第二档）。
   /// [lavfi] 为 lavfi 滤镜串（不含外层 lavfi=[] 包装）；null/空清除。
   /// 换台会重建控制器，调用方需在新建控制器后重新应用。
+  ///
+  /// 电台还挂在电平表（[_audioMeter]）时，astats 会串在**同一条链**上：
+  /// `@omi_lv:lavfi=[<用户预设>,astats=…]`。mpv 的 af-metadata 只认带
+  /// label 的滤镜，所以整条链打一个 label。
   Future<void> applyAudioFilter(String? lavfi) async {
+    _lastAudioFilter = lavfi;
+    final user = (lavfi ?? '').trim();
+    final parts = <String>[
+      if (user.isNotEmpty) user,
+      if (_audioMeter) 'astats=metadata=1:reset=1:measure_perchannel=none',
+    ];
     try {
       final platform = _player.platform;
       if (platform is NativePlayer) {
-        if (lavfi == null || lavfi.trim().isEmpty) {
+        if (parts.isEmpty) {
           await platform.command(['af', 'clear']);
         } else {
-          await platform.command(['af', 'set', 'lavfi=[${lavfi.trim()}]']);
+          await platform.command([
+            'af',
+            'set',
+            '@$_meterLabel:lavfi=[${parts.join(',')}]',
+          ]);
         }
       }
     } catch (_) {}
@@ -277,6 +395,11 @@ class OmiVideoController extends ChangeNotifier {
     if (_disposed) return;
     _disposed = true;
     _spectrumGuard?.cancel();
+    _meterTimer?.cancel();
+    _meterTimer = null;
+    // 注意：不 dispose audioLevel。切换内核时旧 controller 可能还被
+    // 上一帧的波形读一次，dispose 掉会抛 used-after-dispose；
+    // 它只是个 double 容器，随 controller 一起被 GC 即可。
     for (final s in _subs) {
       await s.cancel();
     }

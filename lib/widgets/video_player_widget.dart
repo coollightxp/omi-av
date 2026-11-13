@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -212,7 +213,10 @@ class _RadioStage extends StatelessWidget {
                     ),
                     // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
                     const SizedBox(width: 10),
-                    _AudioTag(playing: controller.isPlaying),
+                    _AudioTag(
+                      playing: controller.isPlaying,
+                      level: controller.audioLevel,
+                    ),
                     // 定时关闭实时倒计时（每秒走字，到点自动暂停）
                     ValueListenableBuilder<Duration?>(
                       valueListenable: controller.sleepCountdown,
@@ -329,10 +333,13 @@ class _RadioStage extends StatelessWidget {
     );
   }
 
-  /// 波形区：真实频谱纹理 → 缓动波形 两级回退
+  /// 波形区：默认 Flutter 侧电平波形（真实响度驱动，必定可见可动）；
+  /// 只有开了「真波形纹理(实验)」且 mpv 真出帧（尺寸非 0）才贴纹理。
+  /// 早期版本无条件优先纹理，结果 lavfi-complex 在部分流上建不起来，
+  /// 看到的是一块不动的黑底 —— 用户反馈"波形没起作用"就是这个。
   Widget _wave() {
     final vc = controller.videoController;
-    if (vc == null) return _fallbackWave();
+    if (vc == null || !controller.spectrumTexture) return _fallbackWave();
     return AnimatedBuilder(
       animation: vc,
       builder: (context, _) {
@@ -353,10 +360,12 @@ class _RadioStage extends StatelessWidget {
 
   Widget _fallbackWave() => AudioWave(
         active: controller.isPlaying,
+        level: controller.audioLevel,
+        fillWidth: true,
         height: 56,
         bars: 45,
-        barWidth: 3.2,
-        gap: 6.4,
+        barWidth: 3.4,
+        gap: 6.2,
       );
 
   /// 当前曲目/节目的取值顺序：ICY 实时曲目 → EPG 当前节目 → 空。
@@ -397,9 +406,10 @@ class _RadioStage extends StatelessWidget {
 /// 和底部面板的「音频直播」徽章是同一个语义，两处都出现
 /// 是刻意的——用户可能只看大屏，也可能只看面板。
 class _AudioTag extends StatelessWidget {
-  const _AudioTag({required this.playing});
+  const _AudioTag({required this.playing, this.level});
 
   final bool playing;
+  final ValueListenable<double>? level;
 
   @override
   Widget build(BuildContext context) {
@@ -426,7 +436,12 @@ class _AudioTag extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           AudioBars(
-              active: playing, height: 10, bars: 3, barWidth: 2.2, gap: 2.0),
+              active: playing,
+              level: level,
+              height: 10,
+              bars: 3,
+              barWidth: 2.2,
+              gap: 2.0),
         ],
       ),
     );

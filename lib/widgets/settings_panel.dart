@@ -719,6 +719,66 @@ class _PlaylistTabState extends State<_PlaylistTab> {
     OsdBus.show('地址已复制', icon: Icons.copy);
   }
 
+  /// 源诊断：把服务器响应摊开看（UA 分流 / 跳转 / 解析结果）
+  Future<void> _diagnoseSource(PlaylistSource p) async {
+    if (!mounted) return;
+    final controller = context.read<PlayerController>();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF15171C),
+        title: const Text('源诊断', style: TextStyle(color: Colors.white)),
+        content: SizedBox(
+          width: 520,
+          height: 320,
+          child: FutureBuilder<List<String>>(
+            future: controller.sourceManager
+                .diagnoseSource(p.url)
+                .timeout(const Duration(seconds: 70)),
+            builder: (ctx, snap) {
+              if (snap.connectionState != ConnectionState.done) {
+                return const Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(strokeWidth: 2),
+                      SizedBox(height: 14),
+                      Text('正在用三种客户端标识逐个探测…',
+                          style: TextStyle(color: Colors.white70)),
+                    ],
+                  ),
+                );
+              }
+              if (snap.hasError) {
+                return Text('诊断失败：${snap.error}',
+                    style: const TextStyle(color: Colors.redAccent));
+              }
+              final lines = snap.data ?? const <String>[];
+              return SingleChildScrollView(
+                child: SelectableText(
+                  lines.join('\n'),
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12.5,
+                    height: 1.6,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<PlayerController>(
@@ -843,6 +903,9 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
                           () => _copyPlaylist(p)),
+                    if (p.type == PlaylistSourceType.url)
+                      _RowAction(Icons.network_check, Colors.tealAccent, '诊断地址',
+                          () => _diagnoseSource(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
                         () => controller.refreshChannels()),
                     _RowAction(Icons.delete, Colors.redAccent, '删除',
@@ -1781,6 +1844,18 @@ class _PlayerSettingsTab extends StatelessWidget {
               ),
               trailing: const Icon(Icons.chevron_right, color: Colors.white38),
               onTap: () => _showAudioPresetDialog(context, controller),
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.graphic_eq, color: Colors.white70),
+              title: const Text('电台真波形纹理（实验）',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: const Text(
+                  '默认关：波形由实时电平驱动，稳定可见。开启后让 mpv 直接输出'
+                  '波形画面，部分流可能黑屏，换台生效',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              value: s.spectrumTexture,
+              onChanged: (v) => controller.setSpectrumTexture(v),
+              activeColor: Colors.blueAccent,
             ),
             SwitchListTile(
               secondary: const Icon(Icons.skip_next, color: Colors.white70),

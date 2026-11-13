@@ -315,7 +315,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
               _metaText(info.channelName, Colors.white70),
             // 电台：脉冲小条 + 「音频直播」，替代分辨率/线路这类视频信息
             if (isRadio)
-              _audioBadge(c.isPlaying)
+              _audioBadge(c)
             else if (c.webPageActive) ...[
               // 网页频道：左边显示所选线路的分辨率（线路一 1080P → 1080P）
               _badge(c.webQualityLabel),
@@ -378,7 +378,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   }
 
   /// 「音频直播」徽章：跳动的四根小条 + 文案，暂停时条压平、文案改「已暂停」
-  Widget _audioBadge(bool playing) {
+  Widget _audioBadge(PlayerController controller) {
+    final playing = controller.isPlaying;
     final t = AppTypography.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -391,7 +392,12 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         mainAxisSize: MainAxisSize.min,
         children: [
           AudioBars(
-              active: playing, height: 11, bars: 4, barWidth: 2.2, gap: 2.2),
+              active: playing,
+              level: controller.audioLevel,
+              height: 11,
+              bars: 4,
+              barWidth: 2.2,
+              gap: 2.2),
           const SizedBox(width: 6),
           Text(
             playing ? '音频直播' : '已暂停',

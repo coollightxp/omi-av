@@ -298,10 +298,28 @@ class SourceManager {
   /// 国内盒子生态源（DIYP/影视仓）面向 okhttp 客户端，浏览器 UA 反而会被
   /// 广告劫持页拦截；个别源又只认浏览器。策略：先用 okhttp，
   /// 若返回内容是 HTML 广告页则换浏览器 UA 重试一次。
+  ///
+  /// 实测存在**按 UA 分流**的源（302 到不同地址）：`okhttp*` 给真源，
+  /// 其它（含 Dart/浏览器/空）一律跳到推广落地页。所以按 okhttp → 浏览器
+  /// → VLC 三级依次试；拿到 HTML 也先留着当兜底（影视仓类的聚合分享页
+  /// 本来就是 HTML，不能直接判死）。
   static const _uaBox = 'okhttp/3.15';
   static const _uaBrowser =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  static const _uaVlc = 'VLC/3.0.18 LibVLC/3.0.18';
+
+  static bool _looksLikeHtmlBytes(List<int> bytes) {
+    final text = utf8
+        .decode(bytes.take(400).toList(), allowMalformed: true)
+        .trimLeft()
+        .toLowerCase();
+    return text.startsWith('<!doctype html') ||
+        text.startsWith('<html') ||
+        text.startsWith('<!--') ||
+        text.startsWith('<head') ||
+        text.startsWith('<meta');
+  }
 
   Future<List<int>> _fetchPlaylistBytes(String url,
       {Duration timeout = const Duration(seconds: 60)}) async {
@@ -318,15 +336,96 @@ class SourceManager {
       return resp.bodyBytes;
     }
 
-    final first = await get(_uaBox);
-    final text = _decodePlaylistBytes(first).trimLeft().toLowerCase();
-    final looksLikeHtml = text.startsWith('<!doctype html') ||
-        text.startsWith('<html') ||
-        (text.startsWith('<!--') && text.contains('<script'));
-    if (looksLikeHtml) {
-      return get(_uaBrowser);
+    List<int>? htmlFallback;
+    Object? lastError;
+    for (final ua in const [_uaBox, _uaBrowser, _uaVlc]) {
+      try {
+        final bytes = await get(ua);
+        if (!_looksLikeHtmlBytes(bytes)) return bytes;
+        htmlFallback ??= bytes;
+      } catch (e) {
+        lastError = e;
+      }
     }
-    return first;
+    if (htmlFallback != null) return htmlFallback;
+    throw Exception('源不可用，三种客户端标识都被拒绝（$lastError）');
+  }
+
+  /// 源诊断：把"服务器到底怎么响应、最后给了什么、能解出几个台"
+  /// 摊开给用户看。按 UA 分流/跳到广告页/编码不对 这类问题一眼可辨，
+  /// 不必再靠猜。
+  Future<List<String>> diagnoseSource(String url) async {
+    final lines = <String>[];
+    final target = url.trim();
+    if (target.isEmpty) return ['地址为空'];
+    lines.add('地址：$target');
+
+    for (final entry in const {
+      'okhttp': _uaBox,
+      '浏览器': _uaBrowser,
+      'VLC': _uaVlc,
+    }.entries) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 12)
+        ..userAgent = entry.value;
+      try {
+        var current = Uri.parse(target);
+        final hops = <String>[];
+        int code = 0;
+        var redirects = 0;
+        for (var i = 0; i < 6; i++) {
+          final req = await client.getUrl(current);
+          req.headers.set('User-Agent', entry.value);
+          req.followRedirects = false;
+          final resp = await req.close().timeout(const Duration(seconds: 15));
+          code = resp.statusCode;
+          if (code >= 300 && code < 400) {
+            final loc = resp.headers.value('location') ?? '';
+            await resp.drain<void>();
+            if (loc.isEmpty) break;
+            current = current.resolve(loc);
+            redirects++;
+            hops.add('→$current');
+            continue;
+          }
+          final bytes = await resp
+              .fold<List<int>>(<int>[], (a, b) => a..addAll(b))
+              .timeout(const Duration(seconds: 20));
+          final html = _looksLikeHtmlBytes(bytes);
+          final text = _decodePlaylistBytes(bytes);
+          String parsed = '';
+          try {
+            final cats = await _resolveContent(text, current.toString(), 1, {});
+            final n = cats.fold<int>(0, (s, c) => s + c.channels.length);
+            final names = cats
+                .expand((c) => c.channels)
+                .take(3)
+                .map((c) => c.name)
+                .join('、');
+            parsed = '解析出 $n 个频道${names.isEmpty ? '' : '（$names…）'}';
+          } catch (e) {
+            parsed = '解析失败：$e';
+          }
+          lines.add('[${entry.key}] HTTP $code'
+              '${redirects > 0 ? ' · $redirects 次跳转${hops.join('')}' : ''}'
+              ' · ${bytes.length} 字节'
+              '${html ? ' · HTML 页面' : ''}');
+          lines.add('    $parsed');
+          break;
+        }
+        if (redirects >= 6 || code == 0) {
+          lines.add('[${entry.key}] 跳转过多或连接失败：${hops.join('')}');
+        }
+      } catch (e) {
+        lines.add('[${entry.key}] 请求失败：$e');
+      } finally {
+        client.close(force: true);
+      }
+    }
+    lines.add('');
+    lines.add('提示：若只有 okhttp 有结果，说明该源按 UA 分流，'
+        '正常播放时会自动用它；若结果全是 HTML/0 频道，该地址本身没有直播源。');
+    return lines;
   }
 
   /// 播放列表编码自动识别：

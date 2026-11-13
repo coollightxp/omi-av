@@ -14,7 +14,10 @@ class OmiVideoController extends ChangeNotifier {
     String? formatHint,
     int bufferSeconds = 5,
     bool radioSpectrum = false,
+    bool audioMeter = false,
   });
+
+  final ValueNotifier<double> audioLevel = ValueNotifier<double>(-1);
 
   OmiVideoValue get value => const OmiVideoValue();
 

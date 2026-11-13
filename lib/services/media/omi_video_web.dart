@@ -19,6 +19,7 @@ class OmiVideoController extends ChangeNotifier {
     String? formatHint,
     int bufferSeconds = 5,
     bool radioSpectrum = false,
+    bool audioMeter = false,
   }) {
     VideoFormat? fmt;
     if (formatHint == 'hls') fmt = VideoFormat.hls;
@@ -35,6 +36,10 @@ class OmiVideoController extends ChangeNotifier {
   late final VideoPlayerController _vc;
   OmiVideoValue _value = const OmiVideoValue();
   bool _disposed = false;
+
+  /// Web 端拿不到 PCM（video 元素不暴露 AnalyserNode 的跨域流），
+  /// 电平恒为 -1，波形退回播放态模拟。
+  final ValueNotifier<double> audioLevel = ValueNotifier<double>(-1);
 
   OmiVideoValue get value => _value;
 
@@ -94,6 +99,7 @@ class OmiVideoController extends ChangeNotifier {
     if (_disposed) return;
     _disposed = true;
     _vc.removeListener(_sync);
+    // audioLevel 不 dispose：切换内核时可能还有一帧在读（见 io 实现同注释）
     try {
       await _vc.dispose();
     } catch (_) {}
