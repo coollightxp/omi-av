@@ -73,23 +73,6 @@ class _KbAction {
 }
 
 class BottomProgramPanelState extends State<BottomProgramPanel> {
-  /// 关闭后是否还留在控件树里（见 SettingsPanel 同名字段的说明：
-  /// opacity 层在老显卡上会合成出白块，且收起后仍吃鼠标/点击）
-  bool _render = false;
-  Timer? _unmountTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _render = widget.isVisible;
-  }
-
-  @override
-  void dispose() {
-    _unmountTimer?.cancel();
-    super.dispose();
-  }
-
   /// 遥控器当前高亮的按钮 id（null = 无高亮）。
   /// 用 id 而非索引：播放状态变化会让按钮顺序/可用性变化（如投屏按钮），
   /// 高亮不会因此错位。
@@ -105,19 +88,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   @override
   void didUpdateWidget(BottomProgramPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 展开/收起时同步「是否留在控件树里」：收起动画走完后整块摘掉，
-    // 避免长期留着一个 opacity 层（老显卡上会合成出白块）和一块
-    // 透明的点击挡板
-    if (widget.isVisible != oldWidget.isVisible) {
-      _unmountTimer?.cancel();
-      if (widget.isVisible) {
-        _render = true;
-      } else {
-        _unmountTimer = Timer(const Duration(milliseconds: 320), () {
-          if (mounted) setState(() => _render = false);
-        });
-      }
-    }
     // 面板每次被呼出时，默认高亮「播放/暂停」（不可用时取第一个可用按钮）
     if (widget.isVisible && !oldWidget.isVisible) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -173,43 +143,38 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     final scale = panelScaleOf(context) < 1.0 ? 0.72 : 1.0;
     // 用户多次反馈手机面板要尽量宽：窄屏完全贴边（0 边距）
     final hPad = screenW > 1200 ? 72.0 : (screenW > 900 ? 40.0 : 0.0);
-    // 收起后彻底不在树上：不留 opacity 层、不留透明挡板
-    if (!_render) return const SizedBox.shrink();
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 250),
-      curve: Curves.easeOutCubic,
+    // 始终返回 Positioned（Stack 的 child 类型保持稳定），显隐只换内容。
+    //
+    // 旧写法是「收起时返回 SizedBox.shrink()、展开时返回 AnimatedPositioned」，
+    // 同一个 child 在「带 ParentData / 不带 ParentData」之间反复切换，再叠加
+    // 250ms 位移动画，部分 Windows 机器上会让这一整帧的布局结果丢失——
+    // 表现出来就是「点一下画面，整个窗口变成一整块白，底部面板内容完全
+    // 看不见」，3 秒后随面板自动隐藏又恢复正常。这里把结构固定下来，
+    // 不做位移/透明度动画，也不用投影（模糊层同样会放大这个问题）。
+    final double bottomPad = screenW > 900 ? 16 : 8;
+    return Positioned(
       left: hPad,
       right: hPad,
-      // 收起位移要大于面板自身高度（面板约 300），否则底部会露出一条
-      bottom: widget.isVisible ? (screenW > 900 ? 16 : 8) : -600,
-      child: IgnorePointer(
-        ignoring: !widget.isVisible,
-        child: MouseRegion(
-          onEnter: (_) => widget.onHoverEnter?.call(),
-          onExit: (_) => widget.onHoverExit?.call(),
-          onHover: (_) => widget.onHoverMove?.call(),
-          child: ScaledPanel(
-            alignment: Alignment.bottomCenter,
-            scale: 1.0,
-            // RepaintBoundary：面板整块缓存成独立图层，老显卡局部重绘
-            // 不再可能出现"整块没画出来露白底"（设置面板 v2.0.10 同款毛病，
-            // 用户实测的白框几何/行为/外观都与底部面板完全一致）
-            child: RepaintBoundary(
-              child: Container(
-                decoration: BoxDecoration(
-                  // 不透明表面色 + 独立图层，双保险
-                  color: AppColors.overlaySolid,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppColors.stroke),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.45),
-                      blurRadius: 24,
-                      offset: const Offset(0, 8),
+      bottom: bottomPad,
+      child: !widget.isVisible
+          ? const SizedBox.shrink()
+          : IgnorePointer(
+              ignoring: false,
+              child: MouseRegion(
+                onEnter: (_) => widget.onHoverEnter?.call(),
+                onExit: (_) => widget.onHoverExit?.call(),
+                onHover: (_) => widget.onHoverMove?.call(),
+                child: ScaledPanel(
+                  alignment: Alignment.bottomCenter,
+                  scale: 1.0,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      // 纯不透明表面色，不带任何透明度/投影
+                      color: AppColors.overlaySolid,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: AppColors.stroke),
                     ),
-                  ],
-                ),
-                child: SafeArea(
+                    child: SafeArea(
                   top: false,
                   child: Padding(
                     // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
@@ -246,7 +211,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             ),
           ),
         ),
-      ),
     );
   }
 
