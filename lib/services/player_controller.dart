@@ -1506,6 +1506,12 @@ class PlayerController extends ChangeNotifier {
   Future<void> playChannel(Channel channel) async {
     // 手动切台 = 放弃等待投屏
     _clearCastWait();
+    // 电台不需要小窗（只有带画面的直播才值得置顶小窗）。从视频小窗切到
+    // 电台时顺手还原主窗口——否则小窗里只剩一块电台底图，Windows 上
+    // 还会因为原生小窗切换露一帧白底，看着像个大白框
+    if (channel.isRadio && _miniWindow && isDesktop) {
+      await toggleMiniWindow();
+    }
     // 新频道 = 新收听会话：清空上一台的曲目栈
     if (_currentChannel?.id != channel.id) {
       _radioTracks.clear();
@@ -1555,6 +1561,11 @@ class PlayerController extends ChangeNotifier {
     _webPageForeground = false;
     _currentChannel = channel;
     _sourceIndex = 0;
+    // 立刻通知界面把网页控件摘掉。这里下面要等 2.5 秒让 WebView2 销毁
+    // 完成（否则和 mpv 初始化抢 COM 会崩），如果这中间不刷新界面，
+    // 旧的网页视图会一直挂在最上层、露出 WebView2 的白底——用户看到的
+    // 就是「进电台后冒出一个大白框，随便按个键（触发重绘）又没了」。
+    notifyListeners();
     // 网页→流方向同样要等 WebView2 销毁完成：网页播不出去往外退时，
     // 紧跟着就建 mpv 内核，与 WebView2 的 COM 释放竞争会撞出
     // 0xc0000005（页面加载失败状态下销毁更容易崩）。进入方向早有

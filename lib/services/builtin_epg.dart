@@ -178,6 +178,15 @@ class BuiltinEpg {
       final name = (info['channelName'] ?? slug).toString();
       buf.writeln('  <channel id="${_esc(slug)}">');
       buf.writeln('    <display-name>${_esc(name)}</display-name>');
+      // 别名：清单里央视频那批台名是「CCTV6」「CCTV-5+」这种纯英数写法，
+      // 而央视接口给的是「CCTV-6 电影」。把台号的各种写法都写成
+      // display-name，播放器匹配时第 2 步（完整名精确）就能直接命中，
+      // 不必依赖字母数字核心的模糊匹配
+      for (final alias in _aliases(slug)) {
+        if (alias != name) {
+          buf.writeln('    <display-name>${_esc(alias)}</display-name>');
+        }
+      }
       buf.writeln('  </channel>');
     }
 
@@ -210,6 +219,17 @@ class BuiltinEpg {
     String two(int v) => v.toString().padLeft(2, '0');
     return '${t.year}${two(t.month)}${two(t.day)}'
         '${two(t.hour)}${two(t.minute)}${two(t.second)} +0800';
+  }
+
+  /// 台号别名：cctv4 → [CCTV-4, CCTV4]，cctv5plus → [CCTV-5+, CCTV5+,
+  /// CCTV5PLUS]；cctveurope 这类非数字台返回空（没有通用别名）
+  static List<String> _aliases(String slug) {
+    final m = RegExp(r'^cctv(\d+)(plus)?$').firstMatch(slug.toLowerCase());
+    if (m == null) return const [];
+    final n = m.group(1)!;
+    final plus = m.group(2) != null;
+    if (plus) return ['CCTV-$n+', 'CCTV$n+', 'CCTV${n}PLUS'];
+    return ['CCTV-$n', 'CCTV$n'];
   }
 
   static String _esc(String s) => s

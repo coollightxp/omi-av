@@ -181,10 +181,18 @@ class XmltvEpgParser {
   static final _normRe = RegExp(r'[\s\-_（）()\[\].·、,，+]');
   static String norm(String s) => s.toLowerCase().replaceAll(_normRe, '');
 
-  /// 提取名称中的英文字母与数字（含 +/- 后缀），其他汉字全去掉。
-  /// 例 "cctv1综合频道" → "cctv1"，"CCTV-1 综合" → "cctv1"，
-  /// "湖南卫视" → ""（没英数，返回空串，不参与此路径匹配）。
-  /// 用于 EPG 里的 "CCTV-1" 匹配播放列表里的 "cctv1综合频道" 这种场景。
+  /// 提取名称中的英文字母与数字，其他汉字与分隔符全去掉。
+  ///
+  /// 关键规则（EPG 里同一条频道各家写法不一致，全在这里对齐）：
+  /// * `-`、`_`、空格、全角括号等一律丢掉 → "CCTV-1" / "CCTV1" / "cctv_1"
+  ///   全部归一成 "cctv1"
+  /// * `+` 写成 "plus" → "CCTV-5+" / "CCTV5PLUS" 归一成 "cctv5plus"，
+  ///   不能简单丢掉：丢掉会让 CCTV5+ 被当成 CCTV5，节目单串台
+  /// * 只有英数没有汉字也照常返回（"cctv4" → "cctv4"）
+  ///
+  /// 例："cctv1综合频道"→"cctv1"，"CCTV-1 综合"→"cctv1"，
+  /// "CCTV4 中文国际"→"cctv4"，"CCTV-5+ 体育赛事"→"cctv5plus"，
+  /// "湖南卫视"→""（没英数，返回空串，不参与此路径匹配）。
   static String lettersAndDigitsOnly(String s) {
     final sb = StringBuffer();
     bool sawLetter = false;
@@ -197,9 +205,10 @@ class XmltvEpgParser {
         sb.write(lo);
         if (lo.codeUnitAt(0) >= 97 && lo.codeUnitAt(0) <= 122) sawLetter = true;
         if (ch.codeUnitAt(0) >= 48 && ch.codeUnitAt(0) <= 57) sawDigit = true;
-      } else if ((ch == '+' || ch == '-') && sb.isNotEmpty) {
-        sb.write(ch);
+      } else if (ch == '+' && sb.isNotEmpty) {
+        sb.write('plus');
       }
+      // `-` / `_` / 空格等分隔符直接跳过：CCTV-4 与 CCTV4 必须视为同一个台
     }
     // 只有纯字母或纯数字也没意义（"体育"→空；"5"→也太泛），
     // 至少含一个字母 + 一个数字才启用这条路径（典型 CCTV/卫视编号）
@@ -226,9 +235,17 @@ class XmltvEpgParser {
     Map<String, List<EpgProgram>> epgData,
     Map<String, List<String>> channelNames,
   ) {
-    // 1. tvg-id 精确匹配
-    if (channel.tvgId.isNotEmpty && epgData.containsKey(channel.tvgId)) {
-      return channel.tvgId;
+    // 1. tvg-id 匹配：先精确，再按「去分隔符 + 小写 + +→plus」归一化比较
+    //    （EPG 里常见 id 写 cctv4 / CCTV4 / cctv-4 / cctv4.tk，台名却是
+    //    "CCTV4 中文国际"，只靠精确比较永远对不上）
+    if (channel.tvgId.isNotEmpty) {
+      if (epgData.containsKey(channel.tvgId)) return channel.tvgId;
+      final key = lettersAndDigitsOnly(channel.tvgId);
+      if (key.isNotEmpty) {
+        for (final id in epgData.keys) {
+          if (lettersAndDigitsOnly(id) == key) return id;
+        }
+      }
     }
 
     final wantFull = <String>{

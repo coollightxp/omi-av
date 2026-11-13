@@ -61,14 +61,47 @@ class BuiltinCatalog {
     return list;
   }
 
+  /// 接口单次最多带约 12 个频道，超过就直接回
+  /// `{"errcode":"1001","msg":"params error"}`（实测 15 个必失败）。
+  /// 之前一次把 20 个 slug 全塞进去，等于一次都没成功——这就是
+  /// 「内置节目单一条节目都没有」的根因。
+  static const int _epgBatch = 10;
+
   /// 取节目单原始数据（同时带 channelName，用来给频道起名）
   ///
   /// [ymd] 形如 20261113；接口只提供「今天 / 明天」两天。
+  /// 内部按 [_epgBatch] 分批请求并合并；某一批失败时逐个补偿一次，
+  /// 单个频道取不到不影响其它频道。
   static Future<Map<String, dynamic>> fetchEpgRaw(
     List<String> slugs,
     String ymd,
   ) async {
     if (slugs.isEmpty) return <String, dynamic>{};
+    final merged = <String, dynamic>{};
+    for (var i = 0; i < slugs.length; i += _epgBatch) {
+      final batch = slugs.sublist(
+          i, i + _epgBatch > slugs.length ? slugs.length : i + _epgBatch);
+      try {
+        merged.addAll(await _fetchEpgBatch(batch, ymd));
+      } catch (e) {
+        // 整批失败：逐个再试，坏 slug 不连累同批的好台
+        debugPrint('[BuiltinCatalog] 批次失败 ${batch.join(",")}: $e');
+        for (final one in batch) {
+          try {
+            merged.addAll(await _fetchEpgBatch([one], ymd));
+          } catch (_) {
+            // 这个台今天没有节目单，跳过
+          }
+        }
+      }
+    }
+    return merged;
+  }
+
+  static Future<Map<String, dynamic>> _fetchEpgBatch(
+    List<String> slugs,
+    String ymd,
+  ) async {
     final uri = Uri.parse(
         '$epgApi?c=${slugs.join(',')}&serviceId=tvcctv&d=$ymd');
     final resp = await http
@@ -80,7 +113,10 @@ class BuiltinCatalog {
     final decoded = jsonDecode(utf8.decode(resp.bodyBytes, allowMalformed: true));
     if (decoded is! Map) throw Exception('返回格式不对');
     final data = decoded['data'];
-    return data is Map ? data.cast<String, dynamic>() : <String, dynamic>{};
+    if (data is! Map) {
+      throw Exception('接口返回 ${decoded['msg'] ?? decoded['errcode'] ?? '空数据'}');
+    }
+    return data.cast<String, dynamic>();
   }
 
   // ==================== 组装 ====================

@@ -563,7 +563,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                   : '';
               return Stack(
                 children: [
-                  // 最底层：网页频道控件。网页在后台缓冲时也存在于此，
+                  // 最底层铺满纯黑：显卡纹理/MDK 直出层被释放、网页视图
+                  // 卸载、或某帧还没画完时，露出来的是窗口的白色背景——
+                  // 用户看到的就是「进电台后冒出一个大白框，随便按个键
+                  // 又没了」。垫一层黑底后这些空档一律是黑的。
+                  const Positioned.fill(
+                    child: ColoredBox(color: Colors.black),
+                  ),
+                  // 网页频道控件。网页在后台缓冲时也存在于此，
                   // 被上方黑屏占位盖住；起播后黑屏移走，网页显露到全屏
                   if (webUrl.isNotEmpty)
                     Positioned.fill(
@@ -6903,15 +6910,11 @@ class SleepFinalCard extends StatelessWidget {
           right: 0,
           top: 0,
           bottom: 0,
-          // 整层穿透：卡片只做提示，绝不能挡住双击全屏/单击呼面板——
-          // 最后 60 秒用户还想继续操作画面；只有「继续观看」按钮自己可点
-          child: IgnorePointer(
-            ignoring: true,
-            child: Align(
-              alignment: const Alignment(0, -0.42),
-              child: IgnorePointer(
-                ignoring: false,
-                child: Container(
+          // 只占卡片本身那块：Align 只管定位，空白区域不参与命中测试，
+          // 双击全屏/单击呼面板照常穿透；卡片里的按钮则可点
+          child: Align(
+            alignment: const Alignment(0, -0.42),
+            child: Container(
               padding:
                   const EdgeInsets.symmetric(horizontal: 26, vertical: 20),
               decoration: BoxDecoration(
@@ -6972,8 +6975,6 @@ class SleepFinalCard extends StatelessWidget {
                 ],
               ),
             ),
-            ),
-          ),
           ),
         );
       },
