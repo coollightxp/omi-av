@@ -19,6 +19,12 @@ class RemoteAdminHooks {
   final Future<void> Function(String playlistId)? selectPlaylist;
   final Future<void> Function()? restoreBuiltinRadio;
 
+  /// 重新抓一次内置节目单（央视网），返回提示文案
+  final Future<String> Function()? updateBuiltinEpg;
+
+  /// 内置节目单状态：{count, at}
+  final Future<Map<String, dynamic>> Function()? builtinEpgInfo;
+
   const RemoteAdminHooks({
     required this.getSnapshot,
     required this.applySnapshot,
@@ -29,6 +35,8 @@ class RemoteAdminHooks {
     this.playRadio,
     this.selectPlaylist,
     this.restoreBuiltinRadio,
+    this.updateBuiltinEpg,
+    this.builtinEpgInfo,
   });
 }
 

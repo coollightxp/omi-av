@@ -16,7 +16,9 @@ import 'radio_search_dialog.dart';
 import '../models/player_settings.dart';
 import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
+import '../services/builtin_epg.dart';
 import '../services/player_controller.dart';
+import '../services/source_manager.dart';
 import '../services/channel_blacklist.dart';
 import '../services/channel_alias.dart';
 import '../services/scene_favorites.dart';
@@ -272,8 +274,10 @@ class _SettingsPanelState extends State<SettingsPanel>
               // RepaintBoundary + 不透明底色：局部重绘漏洞的兜底
               child: RepaintBoundary(
                 child: Material(
+            // elevation 的阴影环在 Windows 局部重绘时容易留一圈白边
+            // （老毛病），改成 0，靠描边 + 底色差把面板立起来
             color: AppColors.overlaySolid,
-            elevation: 28,
+            elevation: 0,
             shape: const RoundedRectangleBorder(
               borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
               side: BorderSide(color: AppColors.stroke),
@@ -890,7 +894,12 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   title: p.isBuiltin && !p.name.contains('内置')
                       ? '${p.name} · 内置'
                       : p.name,
-                  subtitle: p.url,
+                  // 内置源不给看 assets 路径（对用户没有意义），给介绍文案；
+                  // 只有用户自己加的源才显示真实地址
+                  subtitle: p.isBuiltin
+                      ? '出厂自带 · 央视网 + 央视频免费直播页 · '
+                          '随安装包发布，只能设为当前或整源移除'
+                      : p.url,
                   icon: p.type == PlaylistSourceType.url
                       ? Icons.cloud
                       : Icons.folder,
@@ -905,11 +914,13 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
                           () => _editPlaylist(p)),
+                    // 内置源的地址是 assets 路径，复制出来没有意义，不提供
                     if (!p.isBuiltin &&
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
                           () => _copyPlaylist(p)),
-                    if (p.type == PlaylistSourceType.url)
+                    if (!p.isBuiltin &&
+                        p.type == PlaylistSourceType.url)
                       _RowAction(Icons.network_check, Colors.tealAccent, '诊断地址',
                           () => _diagnoseSource(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
@@ -920,7 +931,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                 );
               }),
             const Divider(height: 24, color: Colors.white12),
-            const _BuiltinCctvSection(),
+            _BuiltinUpdateSection(_BuiltinUpdateSection.cctv),
           ],
         );
       },
@@ -1044,6 +1055,9 @@ class _RadioSourcesTab extends StatelessWidget {
                   actions: const [],
                 ),
               ),
+            // 内置电台清单更新区：与直播源页的「内置央视频道」同款
+            const Divider(height: 24, color: Colors.white12),
+            _BuiltinUpdateSection(_BuiltinUpdateSection.radio),
             // ===== 方案 12.3 第一档：场景收藏 / 电台别名 / 录音库 =====
             // 默认收起：展开才构建列表，切到本页签首屏只画三行标题——
             // 以前这三块常驻展开，几十行控件 + 文件 stat 全量构建，
@@ -1801,20 +1815,33 @@ class _EpgTabState extends State<_EpgTab> {
                 final e = epgs[index];
                 final isCurrent =
                     controller.sourceManager.currentEpgId == e.id;
+                // 内置节目单：地址是 local://（App 自己抓的），不给编辑/复制
+                final builtin = e.url == BuiltinEpg.localUrl;
                 return _SourceRow(
-                  title: e.name,
-                  subtitle: e.url,
-                  icon: Icons.menu_book,
+                  title: builtin && !e.name.contains('内置')
+                      ? '${e.name} · 内置'
+                      : e.name,
+                  subtitle: builtin
+                      ? '每天从央视网获取今天+明天，不走第三方 EPG 站点'
+                      : e.url,
+                  icon: builtin ? Icons.live_tv : Icons.menu_book,
                   isCurrent: isCurrent,
                   onSelect:
                       isCurrent ? null : () => controller.selectEpg(e.id),
                   actions: [
-                    _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
-                        () => _editEpg(e)),
-                    _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
-                        () => _copyEpg(e)),
-                    _RowAction(Icons.refresh, Colors.amber, '刷新',
-                        () => controller.refreshEpg()),
+                    if (!builtin)
+                      _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
+                          () => _editEpg(e)),
+                    if (!builtin)
+                      _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
+                          () => _copyEpg(e)),
+                    _RowAction(
+                        Icons.refresh,
+                        Colors.amber,
+                        builtin ? '立即更新节目单' : '刷新',
+                        () => builtin
+                            ? controller.updateBuiltinEpg()
+                            : controller.refreshEpg()),
                     _RowAction(Icons.delete, Colors.redAccent, '删除',
                         () => controller.removeEpg(e.id)),
                   ],
@@ -3496,19 +3523,75 @@ class _BlacklistDialogState extends State<_BlacklistDialog> {
   }
 }
 
-/// 内置央视频道 · 更新区（直播源页底部）
-///
-/// 网页型频道（webview://）的页面地址长期有效，会变的是「有哪些台」。
-/// 所以清单支持远程更新：出厂 asset 兜底 → 到期后台拉远程 m3u →
-/// 存本地缓存。这里只做展示与手动触发，真正的定时在启动时跑。
-class _BuiltinCctvSection extends StatefulWidget {
-  const _BuiltinCctvSection();
-
-  @override
-  State<_BuiltinCctvSection> createState() => _BuiltinCctvSectionState();
+class _BuiltinListConfig {
+  final IconData icon;
+  final String title;
+  final String desc;
+  final String sourceId;
+  final Future<int> Function(SourceManager sm) loadDays;
+  final Future<DateTime?> Function(SourceManager sm) loadAt;
+  final Future<int> Function(SourceManager sm) loadCount;
+  final Future<void> Function(SourceManager sm, int days) saveDays;
+  final Future<(bool, String)> Function(SourceManager sm) update;
+  final Future<void> Function(SourceManager sm)? restore;
+  final String restoreLabel;
+  const _BuiltinListConfig({
+    required this.icon,
+    required this.title,
+    required this.desc,
+    required this.sourceId,
+    required this.loadDays,
+    required this.loadAt,
+    required this.loadCount,
+    required this.saveDays,
+    required this.update,
+    this.restore,
+    this.restoreLabel = '',
+  });
 }
 
-class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
+/// 内置清单（央视频道 / 电台精选）· 更新区。
+///
+/// 网页型频道（webview://）的页面地址长期有效，会变的是「有哪些台」；
+/// 电台同理。所以出厂清单支持远程更新：出厂 asset 兜底 → 到期后台拉
+/// 远程 m3u → 存本地缓存。这里只做展示与手动触发，真正的定时在启动时跑。
+class _BuiltinUpdateSection extends StatefulWidget {
+  final _BuiltinListConfig config;
+  const _BuiltinUpdateSection(this.config);
+
+  static final cctv = _BuiltinListConfig(
+    icon: Icons.live_tv,
+    title: '内置央视频道',
+    desc: '央视网 + 央视频免费直播页，走内置网页播放，不解析流地址，'
+        '不会因签名过期失效；站点改版或新增频道时更新清单即可。',
+    sourceId: PlaylistSource.builtinCctvId,
+    loadDays: (sm) => sm.getBuiltinCctvIntervalDays(),
+    loadAt: (sm) => sm.getBuiltinCctvFetchedAt(),
+    loadCount: (sm) => sm.builtinCctvChannelCount(),
+    saveDays: (sm, d) => sm.setBuiltinCctvIntervalDays(d),
+    update: (sm) => sm.updateBuiltinCctv(force: true),
+    restore: (sm) => sm.restoreBuiltinCctv(),
+    restoreLabel: '恢复「内置央视频道」源',
+  );
+
+  static final radio = _BuiltinListConfig(
+    icon: Icons.radio,
+    title: '内置电台精选',
+    desc: '电视伴音 / 央广 / 省市台 / 音乐 / 故事，出厂 asset 兜底；'
+        '电台频率调整或新增台时更新清单即可，正在收听会自动换用新清单。',
+    sourceId: PlaylistSource.builtinRadioId,
+    loadDays: (sm) => sm.getBuiltinRadioIntervalDays(),
+    loadAt: (sm) => sm.getBuiltinRadioFetchedAt(),
+    loadCount: (sm) => sm.builtinRadioStationCount(),
+    saveDays: (sm, d) => sm.setBuiltinRadioIntervalDays(d),
+    update: (sm) => sm.updateBuiltinRadio(force: true),
+  );
+
+  @override
+  State<_BuiltinUpdateSection> createState() => _BuiltinUpdateSectionState();
+}
+
+class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
   int _days = 7;
   DateTime? _at;
   int _count = 0;
@@ -3521,11 +3604,11 @@ class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
   }
 
   Future<void> _load() async {
-    final c = context.read<PlayerController>();
-    final sm = c.sourceManager;
-    final days = await sm.getBuiltinCctvIntervalDays();
-    final at = await sm.getBuiltinCctvFetchedAt();
-    final count = await sm.builtinCctvChannelCount();
+    final sm = context.read<PlayerController>().sourceManager;
+    final cfg = widget.config;
+    final days = await cfg.loadDays(sm);
+    final at = await cfg.loadAt(sm);
+    final count = await cfg.loadCount(sm);
     if (!mounted) return;
     setState(() {
       _days = days;
@@ -3546,15 +3629,14 @@ class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
     if (_busy) return;
     setState(() => _busy = true);
     final c = context.read<PlayerController>();
-    final (ok, msg) = await c.sourceManager.updateBuiltinCctv(force: true);
+    final (ok, msg) = await widget.config.update(c.sourceManager);
     if (!mounted) return;
     setState(() => _busy = false);
     await _load();
     OsdBus.show(msg, icon: ok ? Icons.check_circle : Icons.error_outline);
     if (ok) {
       // 正在用这个源就把列表刷新掉
-      if (c.sourceManager.currentPlaylistId ==
-          PlaylistSource.builtinCctvId) {
+      if (c.sourceManager.currentPlaylistId == widget.config.sourceId) {
         await c.refreshChannels();
       }
     }
@@ -3563,8 +3645,9 @@ class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
   @override
   Widget build(BuildContext context) {
     final c = context.watch<PlayerController>();
-    final hasSource = c.sourceManager.playlists
-        .any((p) => p.id == PlaylistSource.builtinCctvId);
+    final cfg = widget.config;
+    final hasSource =
+        c.sourceManager.playlists.any((p) => p.id == cfg.sourceId);
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 18),
       child: Column(
@@ -3572,10 +3655,10 @@ class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
         children: [
           Row(
             children: [
-              const Icon(Icons.live_tv, size: 16, color: Colors.white60),
+              Icon(cfg.icon, size: 16, color: Colors.white60),
               const SizedBox(width: 8),
-              const Text('内置央视频道',
-                  style: TextStyle(
+              Text(cfg.title,
+                  style: const TextStyle(
                       color: Colors.white,
                       fontSize: 14,
                       fontWeight: FontWeight.w600)),
@@ -3586,10 +3669,9 @@ class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
             ],
           ),
           const SizedBox(height: 6),
-          const Text(
-            '央视网 + 央视频免费直播页，走内置网页播放，不解析流地址，'
-            '不会因签名过期失效；站点改版或新增频道时更新清单即可。',
-            style: TextStyle(color: Colors.white38, fontSize: 11.5, height: 1.5),
+          Text(
+            cfg.desc,
+            style: const TextStyle(color: Colors.white38, fontSize: 11.5, height: 1.5),
           ),
           const SizedBox(height: 10),
           Row(
@@ -3619,7 +3701,7 @@ class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
                 ],
                 onChanged: (v) async {
                   if (v == null) return;
-                  await c.sourceManager.setBuiltinCctvIntervalDays(v);
+                  await cfg.saveDays(c.sourceManager, v);
                   if (!mounted) return;
                   setState(() => _days = v);
                 },
@@ -3638,18 +3720,18 @@ class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
               ),
             ],
           ),
-          if (!hasSource)
+          if (!hasSource && cfg.restore != null)
             Align(
               alignment: Alignment.centerLeft,
               child: TextButton.icon(
                 onPressed: () async {
-                  await c.sourceManager.restoreBuiltinCctv();
+                  await cfg.restore!(c.sourceManager);
                   if (!mounted) return;
                   await _load();
                 },
                 icon: const Icon(Icons.restore, size: 16),
-                label: const Text('恢复「内置央视频道」源',
-                    style: TextStyle(fontSize: 12.5)),
+                label: Text(cfg.restoreLabel,
+                    style: const TextStyle(fontSize: 12.5)),
               ),
             ),
         ],

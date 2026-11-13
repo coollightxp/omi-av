@@ -6903,9 +6903,15 @@ class SleepFinalCard extends StatelessWidget {
           right: 0,
           top: 0,
           bottom: 0,
-          child: Align(
-            alignment: const Alignment(0, -0.42),
-            child: Container(
+          // 整层穿透：卡片只做提示，绝不能挡住双击全屏/单击呼面板——
+          // 最后 60 秒用户还想继续操作画面；只有「继续观看」按钮自己可点
+          child: IgnorePointer(
+            ignoring: true,
+            child: Align(
+              alignment: const Alignment(0, -0.42),
+              child: IgnorePointer(
+                ignoring: false,
+                child: Container(
               padding:
                   const EdgeInsets.symmetric(horizontal: 26, vertical: 20),
               decoration: BoxDecoration(
@@ -6966,6 +6972,8 @@ class SleepFinalCard extends StatelessWidget {
                 ],
               ),
             ),
+            ),
+          ),
           ),
         );
       },

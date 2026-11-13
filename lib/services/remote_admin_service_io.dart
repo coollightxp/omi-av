@@ -36,6 +36,12 @@ class RemoteAdminHooks {
   /// 恢复被删掉的内置电台精选
   final Future<void> Function()? restoreBuiltinRadio;
 
+  /// 重新抓一次内置节目单（央视网），返回提示文案
+  final Future<String> Function()? updateBuiltinEpg;
+
+  /// 内置节目单状态：{count, at}（网页上显示「N 条节目 · 更新于 …」）
+  final Future<Map<String, dynamic>> Function()? builtinEpgInfo;
+
   const RemoteAdminHooks({
     required this.getSnapshot,
     required this.applySnapshot,
@@ -46,6 +52,8 @@ class RemoteAdminHooks {
     this.playRadio,
     this.selectPlaylist,
     this.restoreBuiltinRadio,
+    this.updateBuiltinEpg,
+    this.builtinEpgInfo,
   });
 }
 
@@ -161,6 +169,18 @@ class RemoteAdminService {
       } else if (req.method == 'POST' && path == '/api/radio/restore') {
         await _hooks!.restoreBuiltinRadio?.call();
         _json(req, {'ok': true});
+      } else if (req.method == 'GET' && path == '/api/epg/builtin') {
+        final info = await _hooks!.builtinEpgInfo?.call() ?? {};
+        _json(req, {'ok': true, ...info});
+      } else if (req.method == 'POST' && path == '/api/epg/builtin-update') {
+        final fn = _hooks!.updateBuiltinEpg;
+        if (fn == null) {
+          req.response.statusCode = 501;
+          _json(req, {'ok': false, 'error': 'not supported'});
+        } else {
+          final msg = await fn();
+          _json(req, {'ok': true, 'message': msg});
+        }
       } else {
         req.response.statusCode = 404;
         req.response.write('not found');
@@ -556,8 +576,8 @@ function renderSources(){
     var row1='';
     if(!cur)row1+='<button class="btn ok b3" onclick="selectItem(\''+it.id+'\')">设为当前</button>';
     var rc=cur?'b2':'b3';
-    if(!builtin)row1+='<button class="btn '+rc+'" onclick="refreshItem()">刷新</button>';
-    row1+='<button class="btn '+rc+'" onclick="copyItem(\''+it.id+'\')">复制</button>';
+    if(!builtin)row1+='<button class="btn '+rc+'" onclick="refreshItem()">刷新</button>'
+      +'<button class="btn '+rc+'" onclick="copyItem(\''+it.id+'\')">复制</button>';
     var row2='';
     if(!builtin)row2='<div class="acts">'
       +'<button class="btn b2" onclick="openEdit(\''+it.id+'\')">编辑</button>'
@@ -566,7 +586,8 @@ function renderSources(){
       +'<div class="card-head"><div class="name">'+esc(it.name)+'</div>'
       +(builtin?'<span class="badge" style="color:#9fb2e8;border-color:#2c3a5e;background:#141c2c">内置</span>':'')
       +(cur?'<span class="badge">播放中</span>':'')+'</div>'
-      +'<div class="url">'+esc(it.url)+'</div>'+meta
+      // 内置源不给看地址：assets 路径没有意义，看介绍就行
+      +(builtin?'':'<div class="url">'+esc(it.url)+'</div>')+meta
       +'<div class="acts">'+row1+'</div>'+row2+'</div>';
   }
   box.innerHTML=html;
@@ -583,7 +604,6 @@ function renderRadio(){
       +'<div class="card-head"><div class="name">内置电台精选</div>'
       +'<span class="badge" style="color:#9fb2e8;border-color:#2c3a5e;background:#141c2c">内置</span>'
       +(b.current?'<span class="badge">当前</span>':'')+'</div>'
-      +'<div class="url">assets/radio/omi_radio.m3u</div>'
       +'<div class="meta"><span class="tag">出厂自带</span>电视伴音 / 央广 / 省市台 / 音乐 / 故事，共约 60 个台</div>'
       +'<div class="meta">内置台随安装包发布，单个不可删；要停用请到电脑上的设置里整源移除</div>';
     if(!b.current){
@@ -706,20 +726,38 @@ function renderEpg(){
   var html='';
   for(var i=0;i<items.length;i++){
     var it=items[i], cur=it.id===curId;
+    // 内置节目单：地址是 local://（App 自己从央视网抓的），不给编辑/复制
+    var builtin=String(it.url||'').indexOf('local://')===0;
     var row1='';
     if(!cur)row1+='<button class="btn ok b3" onclick="selectItem(\''+it.id+'\')">设为当前</button>';
     var rc=cur?'b2':'b3';
-    row1+='<button class="btn '+rc+'" onclick="refreshItem()">刷新</button>'
-      +'<button class="btn '+rc+'" onclick="copyItem(\''+it.id+'\')">复制</button>';
-    var row2='<button class="btn b2" onclick="openEdit(\''+it.id+'\')">编辑</button>'
-      +'<button class="btn danger b2" onclick="delItem(\''+it.id+'\')">删除</button>';
+    if(builtin){
+      row1+='<button class="btn '+rc+'" onclick="updateBuiltinEpg(this)">立即更新</button>';
+    }else{
+      row1+='<button class="btn '+rc+'" onclick="refreshItem()">刷新</button>'
+        +'<button class="btn '+rc+'" onclick="copyItem(\''+it.id+'\')">复制</button>';
+    }
+    var row2=builtin
+      ? '<button class="btn danger b2" onclick="delItem(\''+it.id+'\')">删除</button>'
+      : '<button class="btn b2" onclick="openEdit(\''+it.id+'\')">编辑</button>'
+        +'<button class="btn danger b2" onclick="delItem(\''+it.id+'\')">删除</button>';
     html+='<div class="card'+(cur?' is-cur':'')+'">'
       +'<div class="card-head"><div class="name">'+esc(it.name)+'</div>'
+      +(builtin?'<span class="badge">内置</span>':'')
       +(cur?'<span class="badge">使用中</span>':'')+'</div>'
-      +'<div class="url">'+esc(it.url)+'</div>'
+      +(builtin
+        ? '<div class="meta">每天从央视网获取今天+明天，不走第三方 EPG 站点</div>'
+        : '<div class="url">'+esc(it.url)+'</div>')
       +'<div class="acts">'+row1+'</div><div class="acts">'+row2+'</div></div>';
   }
   box.innerHTML=html;
+}
+function updateBuiltinEpg(btn){
+  if(btn){btn.disabled=true;btn.textContent='更新中…'}
+  fetch('/api/epg/builtin-update',{method:'POST'}).then(function(r){return r.json()})
+    .then(function(d){toast(d.message||(d.ok?'已更新':'更新失败'));load()})
+    .catch(function(){toast('更新失败：电脑端没响应')})
+    .then(function(){if(btn){btn.disabled=false;btn.textContent='立即更新'}});
 }
 
 // ==================== 设置通用构件 ====================

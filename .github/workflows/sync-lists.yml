@@ -1,0 +1,54 @@
+name: Sync builtin lists to public repo
+
+# 内置清单（央视频道 / 电台）要能被老版本 App 的「备用清单镜像」拉到，
+# 必须从一个公开位置提供：GitHub raw / jsDelivr 对私有仓库一律 404。
+#
+# 新版 App 优先直接从央视网直播页抓取（不依赖本 workflow）；这份同步是
+# 给「备用清单」兜底用的——央视网改版抓不到时，还能拉到最近一次同步的
+# 清单继续用。
+#
+# 使用前提（一次性，两分钟）：
+# 1. 在 GitHub 新建一个【公开】空仓库，名字叫 `omi-av-lists`
+#    （只放几份 m3u 清单，不含任何源码，源码仓库保持私有不受影响）
+# 2. 生成一个对该仓库有 Contents: Read and write 权限的 PAT
+# 3. 本仓库 Settings → Secrets and variables → Actions 添加 secret，
+#    名字叫 `LISTS_TOKEN`，值就是那个 PAT
+#
+# 配好之后，每次 push 改动了 assets/cctv/** 或 assets/radio/**，
+# 都会自动把两份清单同步到 omi-av-lists 的对应路径。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'assets/cctv/**'
+      - 'assets/radio/**'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync lists to omi-av-lists
+        env:
+          TOKEN: ${{ secrets.LISTS_TOKEN }}
+        run: |
+          set -e
+          if [ -z "$TOKEN" ]; then
+            echo "LISTS_TOKEN 未配置，跳过同步（不影响构建）"
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/coollightxp/omi-av-lists.git" lists-repo \
+            || { echo "clone 失败：检查 omi-av-lists 是否已创建、token 是否有效"; exit 0; }
+          mkdir -p lists-repo/cctv lists-repo/radio
+          cp assets/cctv/cctv_live.m3u lists-repo/cctv/
+          cp assets/radio/omi_radio.m3u lists-repo/radio/
+          cd lists-repo
+          git config user.name "omi-av-bot"
+          git config user.email "bot@omi-av.local"
+          git add -A
+          git diff --cached --quiet && echo "清单无变化" && exit 0
+          git commit -m "sync lists from omi-av $(date -u +%F)"
+          git push

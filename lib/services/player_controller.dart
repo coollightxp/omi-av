@@ -36,6 +36,7 @@ import 'channel_alias.dart';
 import 'scene_favorites.dart';
 import 'radio_recorder.dart';
 import 'tray_service.dart';
+import 'builtin_epg.dart';
 import 'radio_catalog.dart';
 import 'radio_directory.dart';
 import 'radio_logo.dart';
@@ -383,6 +384,20 @@ class PlayerController extends ChangeNotifier {
             PlaylistSource.builtinCctvId) {
           unawaited(refreshChannels());
         }
+      }));
+      // 内置电台清单：同一套到期机制，互不影响
+      unawaited(sourceManager.maybeAutoUpdateBuiltinRadio().then((_) {
+        if (sourceManager.currentPlaylistId ==
+            PlaylistSource.builtinRadioId) {
+          unawaited(refreshChannels());
+        }
+      }));
+      // 内置节目单：每天从央视网抓「今天 + 明天」，只有真更新过才重解析
+      unawaited(BuiltinEpg.maybeAutoRefresh().then((updated) async {
+        if (!updated) return;
+        if (sourceManager.currentEpg?.url != BuiltinEpg.localUrl) return;
+        await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+        await refreshEpg();
       }));
     });
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
@@ -812,6 +827,25 @@ class PlayerController extends ChangeNotifier {
             await refreshChannels();
           },
           restoreBuiltinRadio: () => restoreBuiltinRadio(),
+          // 内置节目单：网页上「立即更新」直接让电脑端去央视网抓
+          updateBuiltinEpg: () async {
+            final (ok, msg) = await BuiltinEpg.refresh(force: true);
+            if (ok) {
+              await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+              if (sourceManager.currentEpg?.url == BuiltinEpg.localUrl) {
+                await refreshEpg();
+              }
+            }
+            notifyListeners();
+            return msg;
+          },
+          builtinEpgInfo: () async {
+            final at = await BuiltinEpg.fetchedAt();
+            return {
+              'count': await BuiltinEpg.programCount(),
+              'at': at?.toIso8601String(),
+            };
+          },
         ),
       );
       _remoteAdminUrl = remoteAdminService.endpoint;
@@ -893,11 +927,20 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> _remoteAdminApply(Map<String, dynamic> data) async {
     final rawPl = (data['playlists'] as List?) ?? const [];
+    // 网页 persist() 发回的是整份 state，里面带着快照原样下发过的电台源；
+    // 这些项只在「电台」页管理，这里必须先剥掉再回填，否则直播源槽位
+    // 会吃到电台项、剩下的又被追加，一次保存就多出一批重复电台源
     final posted = rawPl
         .whereType<Map>()
-        .map((m) => PlaylistSource.fromJson(
-            _normalizeRemoteItem(m.cast<String, dynamic>())))
+        .map((m) => _normalizeRemoteItem(m.cast<String, dynamic>()))
+        .where((m) =>
+            m['radio'] != true &&
+            !_isRadioPlaylistId((m['id'] ?? '').toString()))
+        .map((m) => PlaylistSource.fromJson(m))
         .toList();
+    // 双保险：同 id 只留一条（旧版本网页保存过一次的设备本地可能已攒了重复）
+    final seen = <String>{};
+    posted.retainWhere((p) => seen.add(p.id));
     // 网页「直播源」页只列电视源（电台在「电台」页）：保存时按原位置回填
     // 现有的电台源，否则手机点一次保存就把内置电台/我的电台删了
     final playlists = <PlaylistSource>[];
@@ -4585,6 +4628,30 @@ class PlayerController extends ChangeNotifier {
     } else {
       notifyListeners();
     }
+  }
+
+  // ==================== 内置节目单（央视网） ====================
+
+  /// 手动抓一次内置节目单（设置页 / 网页管理端共用）。
+  ///
+  /// 抓的是「今天 + 明天」两天，成功后让当前源重新解析；失败只提示，
+  /// 保留旧节目单，界面不会突然空掉。
+  Future<void> updateBuiltinEpg() async {
+    final (ok, msg) = await BuiltinEpg.refresh(force: true);
+    OsdBus.show(msg, icon: ok ? Icons.check_circle : Icons.error_outline);
+    if (ok) {
+      await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+      if (sourceManager.currentEpg?.url == BuiltinEpg.localUrl) {
+        await refreshEpg();
+      }
+    }
+    notifyListeners();
+  }
+
+  /// 恢复被删掉的内置节目单
+  Future<void> restoreBuiltinEpg() async {
+    await sourceManager.restoreBuiltinEpg();
+    notifyListeners();
   }
 
   // ==================== NumLock 状态守护（Windows runner 层实现） ====================
