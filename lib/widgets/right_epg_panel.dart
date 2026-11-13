@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -35,6 +36,17 @@ class RightEpgPanel extends StatefulWidget {
 }
 
 class RightEpgPanelState extends State<RightEpgPanel> {
+  /// 关闭后是否还留在控件树里（opacity 层在老显卡上会合成出白块，
+  /// 并且收起后仍参与命中测试，等于一块透明挡板压在画面上）
+  bool _render = false;
+  Timer? _unmountTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _render = widget.isOpen;
+  }
+
   final ScrollController _scrollController = ScrollController();
   // 记录已定位过的节目单首项，避免每次 tick 都重复滚动
   String? _lastScrolledKey;
@@ -62,8 +74,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
     final dayStart = DateTime(now.year, now.month, now.day);
     final dayEnd = dayStart.add(const Duration(days: 1));
     return all
-        .where((p) =>
-            p.endTime.isAfter(dayStart) && p.startTime.isBefore(dayEnd))
+        .where(
+            (p) => p.endTime.isAfter(dayStart) && p.startTime.isBefore(dayEnd))
         .toList();
   }
 
@@ -83,6 +95,7 @@ class RightEpgPanelState extends State<RightEpgPanel> {
 
   @override
   void dispose() {
+    _unmountTimer?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
@@ -90,6 +103,19 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   @override
   void didUpdateWidget(covariant RightEpgPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // 展开/收起时同步「是否留在控件树里」：收起动画走完后整块摘掉，
+    // 避免长期留着一个 opacity 层（老显卡上会合成出白块）和一块
+    // 透明的点击挡板
+    if (widget.isOpen != oldWidget.isOpen) {
+      _unmountTimer?.cancel();
+      if (widget.isOpen) {
+        _render = true;
+      } else {
+        _unmountTimer = Timer(const Duration(milliseconds: 320), () {
+          if (mounted) setState(() => _render = false);
+        });
+      }
+    }
     // 面板由开变关时重置定位标记，下次打开重新滚动到当前节目
     if (oldWidget.isOpen && !widget.isOpen) {
       _lastScrolledKey = null;
@@ -122,8 +148,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
     if (action == 'up' || action == 'down') {
       if (!isDown) return;
       setState(() {
-        _kbIndex = (_kbIndex + (action == 'down' ? 1 : -1))
-            .clamp(0, epg.length - 1);
+        _kbIndex =
+            (_kbIndex + (action == 'down' ? 1 : -1)).clamp(0, epg.length - 1);
         // 记录节目身份：EPG 刷新后按身份把索引对齐回来，
         // 避免选中框/预约串到别的节目
         _kbSelectionKey = _programKey(epg[_kbIndex]);
@@ -165,9 +191,7 @@ class RightEpgPanelState extends State<RightEpgPanel> {
     final reserved = controller.isProgramReserved(program);
     controller.toggleReservation(program);
     OsdBus.show(
-      reserved
-          ? '已取消预约：${program.title}'
-          : '已预约：${program.title}，到时间将自动播放',
+      reserved ? '已取消预约：${program.title}' : '已预约：${program.title}，到时间将自动播放',
       icon: reserved ? Icons.alarm_off : Icons.alarm_on,
     );
   }
@@ -179,9 +203,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   void _scrollKeyboardTo(int index) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients) return;
-      final ctx = _itemKeys.length > index
-          ? _itemKeys[index].currentContext
-          : null;
+      final ctx =
+          _itemKeys.length > index ? _itemKeys[index].currentContext : null;
       if (ctx != null) {
         Scrollable.ensureVisible(
           ctx,
@@ -235,8 +258,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
     // 保证节目名/时间/简介能完整显示
     final compact = shortest < 600;
     // 不超过屏幕宽度的 92%，避免小逻辑分辨率电视盒子上被裁切
-    final drawerW =
-        designW.clamp(0.0, size.width * 0.92).toDouble();
+    final drawerW = designW.clamp(0.0, size.width * 0.92).toDouble();
+    if (!_render) return const SizedBox.shrink();
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
@@ -244,13 +267,12 @@ class RightEpgPanelState extends State<RightEpgPanel> {
       top: 0,
       bottom: 0,
       width: drawerW,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
-        onExit: (_) => widget.onHoverExit?.call(),
-        onHover: (_) => widget.onHoverMove?.call(),
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
-          opacity: widget.isOpen ? 1.0 : 0.0,
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
+        child: MouseRegion(
+          onEnter: (_) => widget.onHoverEnter?.call(),
+          onExit: (_) => widget.onHoverExit?.call(),
+          onHover: (_) => widget.onHoverMove?.call(),
           child: ScaledPanel(
             alignment: Alignment.centerRight,
             scale: 1.0,
@@ -262,19 +284,23 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                       (compact ? 0.78 : 1.0),
                 ),
               ),
-              child: Material(
-                // 与设置面板/左侧抽屉同一套表面色 + 描边
-                color: AppColors.overlay,
-                elevation: 28,
-                shape: const Border(
-                    left: BorderSide(color: AppColors.stroke)),
-                child: SafeArea(
-                  child: Column(
-                    children: [
-                      _buildHeader(),
-                      const Divider(height: 1, color: Colors.white12),
-                      Expanded(child: _buildEpgList()),
-                    ],
+              child: RepaintBoundary(
+                child: Material(
+                  // 与设置面板/左侧抽屉同一套表面色 + 描边
+                  // 不透明表面色：overlay 带 6% 透明度，Windows 老显卡
+                  // 局部重绘时会露出未绘制区域，看起来是一大块纯白
+                  color: AppColors.overlaySolid,
+                  elevation: 28,
+                  shape:
+                      const Border(left: BorderSide(color: AppColors.stroke)),
+                  child: SafeArea(
+                    child: Column(
+                      children: [
+                        _buildHeader(),
+                        const Divider(height: 1, color: Colors.white12),
+                        Expanded(child: _buildEpgList()),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -310,13 +336,12 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                     Text(
                       controller.currentChannel == null
                           ? '未选择频道'
-                          : controller
-                              .displayTitle(controller.currentChannel!),
+                          : controller.displayTitle(controller.currentChannel!),
                       maxLines: 1,
                       softWrap: false,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                          color: Colors.white54, fontSize: t.listSub),
+                      style:
+                          TextStyle(color: Colors.white54, fontSize: t.listSub),
                     ),
                     // 联动显示当前正在播放的节目名
                     if (controller.currentProgram != null)
@@ -372,7 +397,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
         } else if (_kbSelectionKey != null) {
           // EPG 刷新后（头部裁剪/重新解析）按节目身份重新对齐索引，
           // 防止选中框和预约操作串到别的节目
-          final found = epg.indexWhere((p) => _programKey(p) == _kbSelectionKey);
+          final found =
+              epg.indexWhere((p) => _programKey(p) == _kbSelectionKey);
           if (found >= 0) {
             _kbIndex = found;
           } else {
@@ -411,10 +437,10 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   /// 电台版节目面板：
   /// ① 有 ICY 元数据 → 正在播 + 本次已播列表
   /// ② 没有 → 台标 + 台名 + 「该电台暂无节目表」+ 正在收听状态
-  Widget _buildRadioView(
-      BuildContext context, PlayerController c, Channel ch) {
+  Widget _buildRadioView(BuildContext context, PlayerController c, Channel ch) {
     // URL 文件名（index.m3u8 / 64k.mp3）不算曲目
-    final tracks = c.radioTracks.where((t) => !PlayerController.isJunkTrack(t)).toList();
+    final tracks =
+        c.radioTracks.where((t) => !PlayerController.isJunkTrack(t)).toList();
     final now = tracks.isNotEmpty ? tracks.first : '';
     final group = ch.groupTitle.isEmpty ? '音频直播' : ch.groupTitle;
     return ListView(
@@ -644,9 +670,7 @@ class _EpgProgramTile extends StatelessWidget {
                     final reserved = controller.isProgramReserved(program);
                     return IconButton(
                       icon: Icon(
-                        reserved
-                            ? Icons.alarm_on
-                            : Icons.alarm_add,
+                        reserved ? Icons.alarm_on : Icons.alarm_add,
                         color: reserved ? Colors.amber : Colors.white54,
                         size: 20,
                       ),
@@ -695,8 +719,8 @@ class _EpgProgramTile extends StatelessWidget {
               child: LinearProgressIndicator(
                 value: program.progress,
                 backgroundColor: Colors.white10,
-                valueColor: const AlwaysStoppedAnimation<Color>(
-                    Colors.greenAccent),
+                valueColor:
+                    const AlwaysStoppedAnimation<Color>(Colors.greenAccent),
                 minHeight: 3.5,
               ),
             ),

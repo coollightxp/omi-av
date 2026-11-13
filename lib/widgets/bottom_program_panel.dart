@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -72,6 +73,23 @@ class _KbAction {
 }
 
 class BottomProgramPanelState extends State<BottomProgramPanel> {
+  /// 关闭后是否还留在控件树里（见 SettingsPanel 同名字段的说明：
+  /// opacity 层在老显卡上会合成出白块，且收起后仍吃鼠标/点击）
+  bool _render = false;
+  Timer? _unmountTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _render = widget.isVisible;
+  }
+
+  @override
+  void dispose() {
+    _unmountTimer?.cancel();
+    super.dispose();
+  }
+
   /// 遥控器当前高亮的按钮 id（null = 无高亮）。
   /// 用 id 而非索引：播放状态变化会让按钮顺序/可用性变化（如投屏按钮），
   /// 高亮不会因此错位。
@@ -87,6 +105,19 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   @override
   void didUpdateWidget(BottomProgramPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // 展开/收起时同步「是否留在控件树里」：收起动画走完后整块摘掉，
+    // 避免长期留着一个 opacity 层（老显卡上会合成出白块）和一块
+    // 透明的点击挡板
+    if (widget.isVisible != oldWidget.isVisible) {
+      _unmountTimer?.cancel();
+      if (widget.isVisible) {
+        _render = true;
+      } else {
+        _unmountTimer = Timer(const Duration(milliseconds: 320), () {
+          if (mounted) setState(() => _render = false);
+        });
+      }
+    }
     // 面板每次被呼出时，默认高亮「播放/暂停」（不可用时取第一个可用按钮）
     if (widget.isVisible && !oldWidget.isVisible) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -97,8 +128,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           return;
         }
         final play = enabled.where((a) => a.id == 'playpause');
-        setState(() =>
-            _kbId = play.isNotEmpty ? play.first.id : enabled.first.id);
+        setState(
+            () => _kbId = play.isNotEmpty ? play.first.id : enabled.first.id);
       });
     }
   }
@@ -142,65 +173,72 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     final scale = panelScaleOf(context) < 1.0 ? 0.72 : 1.0;
     // 用户多次反馈手机面板要尽量宽：窄屏完全贴边（0 边距）
     final hPad = screenW > 1200 ? 72.0 : (screenW > 900 ? 40.0 : 0.0);
+    // 收起后彻底不在树上：不留 opacity 层、不留透明挡板
+    if (!_render) return const SizedBox.shrink();
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 250),
       curve: Curves.easeOutCubic,
       left: hPad,
       right: hPad,
-      bottom: widget.isVisible ? (screenW > 900 ? 16 : 8) : -320,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
-        onExit: (_) => widget.onHoverExit?.call(),
-        onHover: (_) => widget.onHoverMove?.call(),
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
-          opacity: widget.isVisible ? 1.0 : 0.0,
+      // 收起位移要大于面板自身高度（面板约 300），否则底部会露出一条
+      bottom: widget.isVisible ? (screenW > 900 ? 16 : 8) : -600,
+      child: IgnorePointer(
+        ignoring: !widget.isVisible,
+        child: MouseRegion(
+          onEnter: (_) => widget.onHoverEnter?.call(),
+          onExit: (_) => widget.onHoverExit?.call(),
+          onHover: (_) => widget.onHoverMove?.call(),
           child: ScaledPanel(
             alignment: Alignment.bottomCenter,
             scale: 1.0,
-            child: Container(
-              decoration: BoxDecoration(
-                // 与设置面板 / 左右抽屉同一套表面色：深蓝灰 + 细描边
-                color: AppColors.overlay,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: AppColors.stroke),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.45),
-                    blurRadius: 24,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-              ),
-              child: SafeArea(
-                top: false,
-                child: Padding(
-                  // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
-                  padding: scale < 1
-                      ? const EdgeInsets.fromLTRB(6, 16, 4, 14)
-                      : const EdgeInsets.fromLTRB(22, 16, 18, 10),
-                  child: Consumer<PlayerController>(
-                    builder: (context, c, _) => Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (c.isSeekable) _buildSeekBar(c),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            _buildLogo(c, scale),
-                            SizedBox(width: AppDensity.of(context).logoGap),
-                            Expanded(child: _buildInfo(c, scale)),
-                            Flexible(
-                              flex: 0,
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerRight,
-                                child: _buildButtons(c),
+            // RepaintBoundary：面板整块缓存成独立图层，老显卡局部重绘
+            // 不再可能出现"整块没画出来露白底"（设置面板 v2.0.10 同款毛病，
+            // 用户实测的白框几何/行为/外观都与底部面板完全一致）
+            child: RepaintBoundary(
+              child: Container(
+                decoration: BoxDecoration(
+                  // 不透明表面色 + 独立图层，双保险
+                  color: AppColors.overlaySolid,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.stroke),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.45),
+                      blurRadius: 24,
+                      offset: const Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
+                    padding: scale < 1
+                        ? const EdgeInsets.fromLTRB(6, 16, 4, 14)
+                        : const EdgeInsets.fromLTRB(22, 16, 18, 10),
+                    child: Consumer<PlayerController>(
+                      builder: (context, c, _) => Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (c.isSeekable) _buildSeekBar(c),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              _buildLogo(c, scale),
+                              SizedBox(width: AppDensity.of(context).logoGap),
+                              Expanded(child: _buildInfo(c, scale)),
+                              Flexible(
+                                flex: 0,
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerRight,
+                                  child: _buildButtons(c),
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ],
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -347,8 +385,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           AnimatedBuilder(
             animation: Listenable.merge([c.videoController]),
             builder: (context, _) {
-              final icy =
-                  (c.videoController?.value.mediaTitle ?? '').trim();
+              final icy = (c.videoController?.value.mediaTitle ?? '').trim();
               final text = icy.isNotEmpty ? '♪ $icy' : radioGroup;
               if (text.isEmpty) return const SizedBox.shrink();
               return Text(
@@ -448,11 +485,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     // 投屏态：播放会话由发送端控制，只保留必要操作
     if (c.isCasting) {
       final castActions = <_KbAction>[
-        _KbAction(
-            'playpause',
-            c.isPlaying ? Icons.pause : Icons.play_arrow,
-            c.isPlaying ? '暂停' : '播放',
-            widget.onTogglePlayPause),
+        _KbAction('playpause', c.isPlaying ? Icons.pause : Icons.play_arrow,
+            c.isPlaying ? '暂停' : '播放', widget.onTogglePlayPause),
         if (c.isDesktop)
           _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
               c.isMuted ? '取消静音' : '静音', c.toggleMute),
@@ -463,8 +497,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                 ? '旋转画面'
                 : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
             c.cycleVideoRotation),
-        _KbAction('cast', Icons.cast_connected, '断开投屏',
-            c.stopCastAndRestore),
+        _KbAction('cast', Icons.cast_connected, '断开投屏', c.stopCastAndRestore),
       ];
       _actions = castActions;
       if (_kbId != null && !castActions.any((a) => a.id == _kbId)) {
@@ -531,11 +564,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             hasVideo ? c.cycleVideoRotation : null),
       // 静音：手机/平板也要（侧滑调音量之外给一个一键静音）；
       // 全屏仍只在桌面端（移动端全屏由系统/手势接管）
-      _KbAction(
-          'mute',
-          c.isMuted ? Icons.volume_off : Icons.volume_up,
-          c.isMuted ? '取消静音' : '静音',
-          c.toggleMute),
+      _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
+          c.isMuted ? '取消静音' : '静音', c.toggleMute),
       if (c.isDesktop)
         _KbAction(
             'fullscreen',
@@ -562,11 +592,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         ),
       // 后台播放（桌面端）：窗口缩到托盘只听声，托盘图标恢复
       if (c.isDesktop)
-        _KbAction('background', Icons.dock, '后台播放（缩到托盘只听声）',
-            c.enterBackgroundAudio),
+        _KbAction(
+            'background', Icons.dock, '后台播放（缩到托盘只听声）', c.enterBackgroundAudio),
       if (c.isCasting)
-        _KbAction('cast', Icons.cast_connected, '断开投屏',
-            c.stopCastAndRestore),
+        _KbAction('cast', Icons.cast_connected, '断开投屏', c.stopCastAndRestore),
     ];
     _actions = actions;
     // 当前高亮的动作若已消失（如断开投屏），清除高亮，等下次方向键重选
@@ -765,10 +794,8 @@ class _SeekBarState extends State<_SeekBar> {
           child: SliderTheme(
             data: SliderThemeData(
               trackHeight: 3,
-              thumbShape:
-                  const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape:
-                  const RoundSliderOverlayShape(overlayRadius: 12),
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
               activeTrackColor: Colors.blueAccent,
               inactiveTrackColor: Colors.white24,
               thumbColor: Colors.blueAccent,
@@ -793,4 +820,3 @@ class _SeekBarState extends State<_SeekBar> {
     );
   }
 }
-

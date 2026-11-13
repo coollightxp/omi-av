@@ -47,6 +47,17 @@ class LeftChannelDrawer extends StatefulWidget {
 }
 
 class LeftChannelDrawerState extends State<LeftChannelDrawer> {
+  /// 关闭后是否还留在控件树里（opacity 层在老显卡上会合成出白块，
+  /// 并且收起后仍参与命中测试，等于一块透明挡板压在画面上）
+  bool _render = false;
+  Timer? _unmountTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _render = widget.isOpen;
+  }
+
   /// 收藏场景虚拟分类 ID 前缀（不与真实源分类冲突）：
   /// 场景制收藏（方案 12.3）后每个场景一个 L1 条目，id = 前缀 + 场景名
   static const String _favCatPrefix = '::fav::';
@@ -94,6 +105,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
 
   @override
   void dispose() {
+    _unmountTimer?.cancel();
     _categoryScroll.dispose();
     _channelScroll.dispose();
     _okLongTimer?.cancel();
@@ -172,6 +184,19 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   @override
   void didUpdateWidget(covariant LeftChannelDrawer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // 展开/收起时同步「是否留在控件树里」：收起动画走完后整块摘掉，
+    // 避免长期留着一个 opacity 层（老显卡上会合成出白块）和一块
+    // 透明的点击挡板
+    if (widget.isOpen != oldWidget.isOpen) {
+      _unmountTimer?.cancel();
+      if (widget.isOpen) {
+        _render = true;
+      } else {
+        _unmountTimer = Timer(const Duration(milliseconds: 320), () {
+          if (mounted) setState(() => _render = false);
+        });
+      }
+    }
     // 打开时直接定位到当前播放频道所在分类，并滚动到当前频道
     if (!oldWidget.isOpen && widget.isOpen) {
       // 节目可能已切换，重新取「正在播」节目名
@@ -203,11 +228,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           _isFavCat(_selectedCategory!.id) &&
           favs.isNotEmpty) {
         _kbCategoryIndex = 0;
-        final favIdx = cur == null
-            ? -1
-            : favs.indexWhere((ch) => ch.id == cur.id);
-        _kbChannelIndex =
-            favIdx >= 0 ? favIdx.clamp(0, favs.length - 1) : 0;
+        final favIdx =
+            cur == null ? -1 : favs.indexWhere((ch) => ch.id == cur.id);
+        _kbChannelIndex = favIdx >= 0 ? favIdx.clamp(0, favs.length - 1) : 0;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _scrollToCurrentChannel();
         });
@@ -426,18 +449,18 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     final controller = context.read<PlayerController>();
     final cat = _selectedCategory;
     if (cat == null) return;
-    final idx = cat.channels
-        .indexWhere((ch) => ch.id == controller.currentChannel?.id);
+    final idx =
+        cat.channels.indexWhere((ch) => ch.id == controller.currentChannel?.id);
     if (idx < 0) return;
     // 注意：打开瞬间 _channelScroll 还没有 clients，
     // 不能在这里同步判断 hasClients，交给 postFrame
-    _ensureVisibleIndex(_channelScroll, _channelKeys, idx,
-        const Duration(milliseconds: 300));
+    _ensureVisibleIndex(
+        _channelScroll, _channelKeys, idx, const Duration(milliseconds: 300));
   }
 
   /// 频道全局序号（跨分类累加，1 起），与数字选台/OSD 序号一致
-  int _globalIndexOf(PlayerController controller, ChannelCategory cat,
-      int indexInCat) {
+  int _globalIndexOf(
+      PlayerController controller, ChannelCategory cat, int indexInCat) {
     // 序号口径必须与数字跳台一致：电视=当前源，电台=跨源目录
     // （PlayerController._switchDomainChannels 用的是同一份列表）
     final cats = _catsOf(controller);
@@ -482,8 +505,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     final compact = shortest < 600;
     // 任何情况下不超过屏幕宽度的 92%：逻辑分辨率很小的电视盒子上
     // 面板不能宽于屏幕，否则内容会被裁掉
-    final drawerW =
-        designW.clamp(0.0, size.width * 0.92).toDouble();
+    final drawerW = designW.clamp(0.0, size.width * 0.92).toDouble();
+    if (!_render) return const SizedBox.shrink();
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
@@ -491,13 +514,12 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       top: 0,
       bottom: 0,
       width: drawerW,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
-        onExit: (_) => widget.onHoverExit?.call(),
-        onHover: (_) => widget.onHoverMove?.call(),
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
-          opacity: widget.isOpen ? 1.0 : 0.0,
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
+        child: MouseRegion(
+          onEnter: (_) => widget.onHoverEnter?.call(),
+          onExit: (_) => widget.onHoverExit?.call(),
+          onHover: (_) => widget.onHoverMove?.call(),
           child: ScaledPanel(
             alignment: Alignment.centerLeft,
             scale: 1.0,
@@ -509,18 +531,22 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                       (compact ? 0.78 : 1.0),
                 ),
               ),
-              child: Material(
-                // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
-                color: AppColors.overlay,
-                elevation: 28,
-                shape: const Border(
-                    right: BorderSide(color: AppColors.stroke)),
-                child: SafeArea(
-                  child: Column(
-                    children: [
-                      _buildHeader(),
-                      Expanded(child: _buildBody()),
-                    ],
+              child: RepaintBoundary(
+                child: Material(
+                  // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
+                  // 不透明表面色：overlay 带 6% 透明度，Windows 老显卡
+                  // 局部重绘时会露出未绘制区域，看起来是一大块纯白
+                  color: AppColors.overlaySolid,
+                  elevation: 28,
+                  shape:
+                      const Border(right: BorderSide(color: AppColors.stroke)),
+                  child: SafeArea(
+                    child: Column(
+                      children: [
+                        _buildHeader(),
+                        Expanded(child: _buildBody()),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -608,8 +634,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   /// 电视 / 电台 两个标签。电台是跨源聚合（内置精选 + 我的电台），
   /// 切换标签不动当前节目源，点哪个台播哪个台。
   Widget _buildTabBar(PlayerController controller) {
-    final tvCount = controller.categories
-        .fold<int>(0, (a, e) => a + e.channels.length);
+    final tvCount =
+        controller.categories.fold<int>(0, (a, e) => a + e.channels.length);
     final radioCount = controller.radioCategories
         .fold<int>(0, (a, e) => a + e.channels.length);
     return Padding(
@@ -690,9 +716,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                   color: Colors.white38),
               const SizedBox(height: 16),
               Text(
-                radioOnlySource
-                    ? '当前源只有电台'
-                    : (isRadioTab ? '还没有电台' : '暂无频道列表'),
+                radioOnlySource ? '当前源只有电台' : (isRadioTab ? '还没有电台' : '暂无频道列表'),
                 style: TextStyle(color: Colors.white54, fontSize: t.listHeader),
               ),
               const SizedBox(height: 8),
@@ -715,9 +739,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                 icon: Icon(
                     radioOnlySource
                         ? Icons.radio
-                        : (isRadioTab
-                            ? Icons.travel_explore
-                            : Icons.settings),
+                        : (isRadioTab ? Icons.travel_explore : Icons.settings),
                     size: 18),
                 label: Text(radioOnlySource
                     ? '去电台标签'
@@ -738,8 +760,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       itemCount: cats.length + favCats.length,
       itemBuilder: (context, index) {
         final isFav = index < favCats.length;
-        final cat =
-            isFav ? favCats[index] : cats[index - favCats.length];
+        final cat = isFav ? favCats[index] : cats[index - favCats.length];
         final key = _categoryKeys.putIfAbsent(index, GlobalKey.new);
         final isMine = cat.id == PlaylistSource.radioLibraryId;
         return _CategoryTile(
@@ -931,7 +952,8 @@ class _CategoryTile extends StatelessWidget {
                   ),
                   Text(
                     '${category.channels.length} 个频道',
-                    style: TextStyle(color: Colors.white54, fontSize: t.listSub),
+                    style:
+                        TextStyle(color: Colors.white54, fontSize: t.listSub),
                   ),
                 ],
               ),

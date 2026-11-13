@@ -99,6 +99,18 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 否则每次拨开关都会重建整个播放树，正在播时就是"卡一下"）
   PlayerController? _settingsOwner;
 
+  /// 面板是否还在控件树里。
+  ///
+  /// 之前关闭时用的是「移到屏幕下方 + opacity 0」，面板始终留在树上：
+  ///  - opacity 层需要 saveLayer，Windows 老显卡/驱动上合成失败会画出一块
+  ///    纯白矩形（用户看到的「占满窗口的大白框」），且这层会吃掉鼠标
+  ///    hover 与点击——底部面板唤不出、双击不能全屏、安卓左右面板点不出来
+  ///  - 关闭后 opacity 0 依然参与命中测试，等于一块透明的挡板压在画面上
+  /// 现在改成：打开时渲染、关闭动画走完立刻从树上摘掉，全程不产生
+  /// opacity 层。
+  bool _renderPanel = false;
+  Timer? _unmountTimer;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -124,6 +136,22 @@ class _SettingsPanelState extends State<SettingsPanel>
     HardwareKeyboard.instance.addHandler(_onVerticalKey);
     // 安卓端：开始采样剪贴板（粘贴按钮弹出历史供选择）
     if (_showPasteButton) _ClipHistory.ensureWatching();
+    _renderPanel = widget.isOpen;
+  }
+
+  @override
+  void didUpdateWidget(covariant SettingsPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isOpen == oldWidget.isOpen) return;
+    _unmountTimer?.cancel();
+    if (widget.isOpen) {
+      setState(() => _renderPanel = true);
+    } else {
+      // 等滑出动画（300ms）走完再卸载，别在半空中消失
+      _unmountTimer = Timer(const Duration(milliseconds: 320), () {
+        if (mounted) setState(() => _renderPanel = false);
+      });
+    }
   }
 
   @override
@@ -131,6 +159,7 @@ class _SettingsPanelState extends State<SettingsPanel>
     _settingsOwner?.settingsNotifier.removeListener(_onSettingsChanged);
     HardwareKeyboard.instance.removeHandler(_onVerticalKey);
     _tabController.removeListener(_onTabIndexChanged);
+    _unmountTimer?.cancel();
     _navFocus.dispose();
     _panelFocusNode.dispose();
     _tabController.dispose();
@@ -180,9 +209,7 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 面板根焦点上的按键：与上面的全局处理器共用同一套逻辑，
   /// 保证焦点在面板内时按键一定先在这里被吃掉
   KeyEventResult _onPanelKeyEvent(FocusNode node, KeyEvent event) =>
-      _handleVertical(event)
-          ? KeyEventResult.handled
-          : KeyEventResult.ignored;
+      _handleVertical(event) ? KeyEventResult.handled : KeyEventResult.ignored;
 
   bool _handleVertical(KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
@@ -250,18 +277,18 @@ class _SettingsPanelState extends State<SettingsPanel>
     });
   }
 
-
   @override
   Widget build(BuildContext context) {
+    // 收起后彻底不在树上：不留 opacity 层、不留透明挡板
+    if (!_renderPanel) return const SizedBox.shrink();
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
       bottom: widget.isOpen ? 0 : -MediaQuery.of(context).size.height,
       left: 0,
       right: 0,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 200),
-        opacity: widget.isOpen ? 1.0 : 0.0,
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
         child: ScaledPanel(
           alignment: Alignment.bottomCenter,
           scale: panelScaleOf(context),
@@ -272,119 +299,132 @@ class _SettingsPanelState extends State<SettingsPanel>
               constraints: const BoxConstraints(maxWidth: 760),
               // RepaintBoundary + 不透明底色：局部重绘漏洞的兜底
               child: RepaintBoundary(
-                child: Material(
-            // elevation 的阴影环在 Windows 局部重绘时容易留一圈白边
-            // （老毛病），改成 0，靠描边 + 底色差把面板立起来
-            color: AppColors.overlaySolid,
-            elevation: 0,
-            shape: const RoundedRectangleBorder(
-              borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-              side: BorderSide(color: AppColors.stroke),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: SafeArea(
-              top: false,
-              child: Builder(builder: (context) {
-                // 横屏手机等矮屏（高度<500）时面板几乎占满全高，避免太短无法操作
-                final screenH = MediaQuery.of(context).size.height;
-                return SizedBox(
-                  key: _panelKey,
-                  height: screenH * (screenH < 500 ? 0.95 : 0.7),
-                  // 焦点遍历圈定在设置面板内（按控件树顺序上下走）：
-                  // 否则方向键会穿到播放页底部面板的按钮上
-                  child: FocusTraversalGroup(
-                    policy: WidgetOrderTraversalPolicy(),
-                    child: Focus(
-                      focusNode: _panelFocusNode,
-                      onKeyEvent: _onPanelKeyEvent,
-                      child: Column(
-                    children: [
-                    // 顶部拖拽条 + 标题
-                    Container(
-                      padding:
-                          const EdgeInsets.only(top: 10, bottom: 8),
-                      child: Column(
-                        children: [
-                          Container(
-                            width: 40,
-                            height: 4,
-                            decoration: BoxDecoration(
-                              color: Colors.white30,
-                              borderRadius: BorderRadius.circular(2),
+                child: RepaintBoundary(
+                  child: Material(
+                    // elevation 的阴影环在 Windows 局部重绘时容易留一圈白边
+                    // （老毛病），改成 0，靠描边 + 底色差把面板立起来
+                    color: AppColors.overlaySolid,
+                    elevation: 0,
+                    shape: const RoundedRectangleBorder(
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(16)),
+                      side: BorderSide(color: AppColors.stroke),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: SafeArea(
+                      top: false,
+                      child: Builder(builder: (context) {
+                        // 横屏手机等矮屏（高度<500）时面板几乎占满全高，避免太短无法操作
+                        final screenH = MediaQuery.of(context).size.height;
+                        return SizedBox(
+                          key: _panelKey,
+                          height: screenH * (screenH < 500 ? 0.95 : 0.7),
+                          // 焦点遍历圈定在设置面板内（按控件树顺序上下走）：
+                          // 否则方向键会穿到播放页底部面板的按钮上
+                          child: FocusTraversalGroup(
+                            policy: WidgetOrderTraversalPolicy(),
+                            child: Focus(
+                              focusNode: _panelFocusNode,
+                              onKeyEvent: _onPanelKeyEvent,
+                              child: Column(
+                                children: [
+                                  // 顶部拖拽条 + 标题
+                                  Container(
+                                    padding: const EdgeInsets.only(
+                                        top: 10, bottom: 8),
+                                    child: Column(
+                                      children: [
+                                        Container(
+                                          width: 40,
+                                          height: 4,
+                                          decoration: BoxDecoration(
+                                            color: Colors.white30,
+                                            borderRadius:
+                                                BorderRadius.circular(2),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        Row(
+                                          children: [
+                                            const SizedBox(width: 16),
+                                            const Text(
+                                              '设置',
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            const Spacer(),
+                                            // 关闭按钮只给鼠标用（遥控器用 Esc 关闭），
+                                            // 不参与焦点遍历，保证内容区往上走落到页签栏
+                                            ExcludeFocus(
+                                              child: IconButton(
+                                                icon: const Icon(Icons.close,
+                                                    color: Colors.white70),
+                                                onPressed: widget.onClose,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const Divider(
+                                      color: AppColors.divider, height: 1),
+                                  // 双栏设置中心（方案 4.1）：宽屏 = 左栏分类 + 右栏内容；
+                                  // 手机窄屏 = 左栏折成顶部横滑胶囊，其余不变
+                                  Expanded(
+                                    child:
+                                        LayoutBuilder(builder: (context, box) {
+                                      final narrow = box.maxWidth < 620;
+                                      final nav = _SettingsNav(
+                                        index: _tabController.index,
+                                        axis: narrow
+                                            ? Axis.horizontal
+                                            : Axis.vertical,
+                                        focusNode: _navFocus,
+                                        onChanged: (i) {
+                                          if (i == _tabController.index) return;
+                                          _tabController.index = i;
+                                        },
+                                        onEnterContent: _focusFirstContent,
+                                      );
+                                      final content =
+                                          _tabPage(_tabController.index);
+                                      if (narrow) {
+                                        return Column(
+                                          children: [
+                                            nav,
+                                            const Divider(
+                                                color: AppColors.divider,
+                                                height: 1),
+                                            Expanded(child: content),
+                                          ],
+                                        );
+                                      }
+                                      return Row(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
+                                        children: [
+                                          nav,
+                                          const VerticalDivider(
+                                              width: 1,
+                                              color: AppColors.divider),
+                                          Expanded(child: content),
+                                        ],
+                                      );
+                                    }),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                          const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              const SizedBox(width: 16),
-                              const Text(
-                                '设置',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const Spacer(),
-                              // 关闭按钮只给鼠标用（遥控器用 Esc 关闭），
-                              // 不参与焦点遍历，保证内容区往上走落到页签栏
-                              ExcludeFocus(
-                                child: IconButton(
-                                  icon: const Icon(Icons.close,
-                                      color: Colors.white70),
-                                  onPressed: widget.onClose,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(color: AppColors.divider, height: 1),
-                    // 双栏设置中心（方案 4.1）：宽屏 = 左栏分类 + 右栏内容；
-                    // 手机窄屏 = 左栏折成顶部横滑胶囊，其余不变
-                    Expanded(
-                      child: LayoutBuilder(builder: (context, box) {
-                        final narrow = box.maxWidth < 620;
-                        final nav = _SettingsNav(
-                          index: _tabController.index,
-                          axis: narrow ? Axis.horizontal : Axis.vertical,
-                          focusNode: _navFocus,
-                          onChanged: (i) {
-                            if (i == _tabController.index) return;
-                            _tabController.index = i;
-                          },
-                          onEnterContent: _focusFirstContent,
-                        );
-                        final content = _tabPage(_tabController.index);
-                        if (narrow) {
-                          return Column(
-                            children: [
-                              nav,
-                              const Divider(color: AppColors.divider, height: 1),
-                              Expanded(child: content),
-                            ],
-                          );
-                        }
-                        return Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            nav,
-                            const VerticalDivider(
-                                width: 1, color: AppColors.divider),
-                            Expanded(child: content),
-                          ],
                         );
                       }),
                     ),
-                  ],
-                      ),
-                    ),
                   ),
-                );
-              }),
-            ),
-              ),
+                ),
               ),
             ),
           ),
@@ -431,9 +471,8 @@ class _SettingsNav extends StatelessWidget {
       return KeyEventResult.ignored;
     }
     final k = event.logicalKey;
-    final prev = _vertical
-        ? LogicalKeyboardKey.arrowUp
-        : LogicalKeyboardKey.arrowLeft;
+    final prev =
+        _vertical ? LogicalKeyboardKey.arrowUp : LogicalKeyboardKey.arrowLeft;
     final next = _vertical
         ? LogicalKeyboardKey.arrowDown
         : LogicalKeyboardKey.arrowRight;
@@ -540,14 +579,16 @@ class _SettingsNav extends StatelessWidget {
                   size: 18,
                   color: selected ? AppColors.accent : Colors.white54,
                 ),
-                if (vertical) const SizedBox(width: 10) else const SizedBox(width: 6),
+                if (vertical)
+                  const SizedBox(width: 10)
+                else
+                  const SizedBox(width: 6),
                 Text(
                   label,
                   style: TextStyle(
                     color: selected ? Colors.white : Colors.white60,
                     fontSize: vertical ? 14 : 13,
-                    fontWeight:
-                        selected ? FontWeight.w600 : FontWeight.normal,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
                   ),
                 ),
               ],
@@ -666,28 +707,26 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                             urlCtl),
                       ),
                     ),
-                      if (type == PlaylistSourceType.local)
-                        IconButton(
-                          icon: const Icon(Icons.folder_open,
-                              color: Colors.blueAccent),
-                          onPressed: () async {
-                            final f =
-                                await _pickLocalFileWithTopmostFix();
-                            if (f?.path != null) urlCtl.text = f!.path!;
-                          },
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  _ImeSafeTextField(
-                    controller: filterCtl,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: _inputDecoration(
-                        '分组过滤（可选）：只导入命中的分组，逗号分隔'),
-                  ),
-                ],
-              ),
+                    if (type == PlaylistSourceType.local)
+                      IconButton(
+                        icon: const Icon(Icons.folder_open,
+                            color: Colors.blueAccent),
+                        onPressed: () async {
+                          final f = await _pickLocalFileWithTopmostFix();
+                          if (f?.path != null) urlCtl.text = f!.path!;
+                        },
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                _ImeSafeTextField(
+                  controller: filterCtl,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: _inputDecoration('分组过滤（可选）：只导入命中的分组，逗号分隔'),
+                ),
+              ],
             ),
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
@@ -857,8 +896,8 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   _ImeSafeTextField(
                     controller: _groupFilterController,
                     style: const TextStyle(color: Colors.white),
-                    decoration: _inputDecoration(
-                        '分组过滤（可选）：只导入命中的分组，逗号分隔，如 央视,卫视'),
+                    decoration:
+                        _inputDecoration('分组过滤（可选）：只导入命中的分组，逗号分隔，如 央视,卫视'),
                   ),
                   const SizedBox(height: 8),
                   SizedBox(
@@ -904,9 +943,8 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                       : Icons.folder,
                   isCurrent: isCurrent,
                   // 行上按 OK = 选定该播放列表；左右键进入行尾按钮
-                  onSelect: isCurrent
-                      ? null
-                      : () => controller.selectPlaylist(p.id),
+                  onSelect:
+                      isCurrent ? null : () => controller.selectPlaylist(p.id),
                   actions: [
                     // 内置源/我的电台地址都不是可编辑的字符串：不给编辑入口
                     if (!p.isBuiltin &&
@@ -918,8 +956,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
                           () => _copyPlaylist(p)),
-                    if (!p.isBuiltin &&
-                        p.type == PlaylistSourceType.url)
+                    if (!p.isBuiltin && p.type == PlaylistSourceType.url)
                       _RowAction(Icons.network_check, Colors.tealAccent, '诊断地址',
                           () => _diagnoseSource(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
@@ -948,33 +985,34 @@ class _PlaylistTabState extends State<_PlaylistTab> {
 class _RadioSourcesTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-  /// 管理区块统一收进折叠条：收起时不构建内容
-  Widget _manageSection(
-      {required IconData icon, required String title, required Widget child}) {
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        leading: Icon(icon, size: 18, color: Colors.white54),
-        title: Text(title,
-            style: const TextStyle(
-                color: Colors.white,
-                fontSize: 14,
-                fontWeight: FontWeight.bold)),
-        iconColor: Colors.white54,
-        collapsedIconColor: Colors.white54,
-        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-        childrenPadding: const EdgeInsets.only(bottom: 8),
-        children: [child],
-      ),
-    );
-  }
+    /// 管理区块统一收进折叠条：收起时不构建内容
+    Widget _manageSection(
+        {required IconData icon,
+        required String title,
+        required Widget child}) {
+      return Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          leading: Icon(icon, size: 18, color: Colors.white54),
+          title: Text(title,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold)),
+          iconColor: Colors.white54,
+          collapsedIconColor: Colors.white54,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+          childrenPadding: const EdgeInsets.only(bottom: 8),
+          children: [child],
+        ),
+      );
+    }
 
     return Consumer<PlayerController>(
       builder: (context, controller, _) {
         final playlists = controller.sourceManager.playlists;
-        final radioPlaylists = playlists
-            .where(_PlaylistTabState.isRadioPlaylist)
-            .toList();
+        final radioPlaylists =
+            playlists.where(_PlaylistTabState.isRadioPlaylist).toList();
         return ListView(
           padding: const EdgeInsets.only(bottom: 12),
           children: [
@@ -1019,8 +1057,7 @@ class _RadioSourcesTab extends StatelessWidget {
                 final p = radioPlaylists[index];
                 final isCurrent =
                     controller.sourceManager.currentPlaylistId == p.id;
-                final isLibrary =
-                    p.id == PlaylistSource.radioLibraryId;
+                final isLibrary = p.id == PlaylistSource.radioLibraryId;
                 return _SourceRow(
                   title: p.isBuiltin ? '${p.name} · 内置' : p.name,
                   subtitle: p.isBuiltin
@@ -1035,7 +1072,9 @@ class _RadioSourcesTab extends StatelessWidget {
                   actions: [
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
                         () => controller.refreshChannels()),
-                    _RowAction(Icons.delete, Colors.redAccent,
+                    _RowAction(
+                        Icons.delete,
+                        Colors.redAccent,
                         isLibrary ? '清空我的电台' : '整源移除',
                         () => controller.removePlaylist(p.id)),
                   ],
@@ -1173,7 +1212,8 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
               child: const Text('取消')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('删除', style: TextStyle(color: Colors.redAccent))),
+              child:
+                  const Text('删除', style: TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
@@ -1209,8 +1249,8 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white,
                     side: const BorderSide(color: AppColors.stroke),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
                 ),
               ],
@@ -1232,8 +1272,7 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
                       : Colors.white.withValues(alpha: 0.04),
                   borderRadius: BorderRadius.circular(8),
                   border: scene == controller.activeSceneName
-                      ? Border.all(
-                          color: Colors.amber.withValues(alpha: 0.45))
+                      ? Border.all(color: Colors.amber.withValues(alpha: 0.45))
                       : null,
                 ),
                 child: Row(
@@ -1329,8 +1368,7 @@ class _AliasSectionState extends State<_AliasSection> {
 
   Future<void> _editAlias(Channel ch) async {
     final controller = context.read<PlayerController>();
-    final ctl =
-        TextEditingController(text: ChannelAlias.aliasOf(ch.id) ?? '');
+    final ctl = TextEditingController(text: ChannelAlias.aliasOf(ch.id) ?? '');
     final alias = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1525,7 +1563,8 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
               child: const Text('取消')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('删除', style: TextStyle(color: Colors.redAccent))),
+              child:
+                  const Text('删除', style: TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
@@ -1594,7 +1633,8 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
                         size: 14, color: Colors.redAccent),
                     SizedBox(width: 8),
                     Text('正在录音…（底部面板可停止）',
-                        style: TextStyle(color: Color(0xDDFFFFFF), fontSize: 13)),
+                        style:
+                            TextStyle(color: Color(0xDDFFFFFF), fontSize: 13)),
                   ],
                 ),
               ),
@@ -1812,21 +1852,17 @@ class _EpgTabState extends State<_EpgTab> {
             else
               ...List.generate(epgs.length, (index) {
                 final e = epgs[index];
-                final isCurrent =
-                    controller.sourceManager.currentEpgId == e.id;
+                final isCurrent = controller.sourceManager.currentEpgId == e.id;
                 // 内置节目单：地址是 local://（App 自己抓的），不给编辑/复制
                 final builtin = e.url == BuiltinEpg.localUrl;
                 return _SourceRow(
                   title: builtin && !e.name.contains('内置')
                       ? '${e.name} · 内置'
                       : e.name,
-                  subtitle: builtin
-                      ? '每天从央视网获取今天+明天，不走第三方 EPG 站点'
-                      : e.url,
+                  subtitle: builtin ? '每天从央视网获取今天+明天，不走第三方 EPG 站点' : e.url,
                   icon: builtin ? Icons.live_tv : Icons.menu_book,
                   isCurrent: isCurrent,
-                  onSelect:
-                      isCurrent ? null : () => controller.selectEpg(e.id),
+                  onSelect: isCurrent ? null : () => controller.selectEpg(e.id),
                   actions: [
                     if (!builtin)
                       _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
@@ -1938,20 +1974,19 @@ class _PlayerSettingsTab extends StatelessWidget {
               subtitle: const Text('当前节目结束后自动切换',
                   style: TextStyle(color: Colors.white54, fontSize: 12)),
               value: s.autoPlayNext,
-              onChanged: (v) => controller
-                  .updateSettings(s.copyWith(autoPlayNext: v)),
+              onChanged: (v) =>
+                  controller.updateSettings(s.copyWith(autoPlayNext: v)),
               activeColor: Colors.blueAccent,
             ),
             SwitchListTile(
               secondary: const Icon(Icons.restore, color: Colors.white70),
               title: const Text('启动时恢复上次频道',
                   style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: const Text(
-                  '关闭后启动停在「请选择频道」，不发起任何网络请求',
+              subtitle: const Text('关闭后启动停在「请选择频道」，不发起任何网络请求',
                   style: TextStyle(color: Colors.white54, fontSize: 12)),
               value: s.resumeLastChannel,
-              onChanged: (v) => controller
-                  .updateSettings(s.copyWith(resumeLastChannel: v)),
+              onChanged: (v) =>
+                  controller.updateSettings(s.copyWith(resumeLastChannel: v)),
               activeColor: Colors.blueAccent,
             ),
             // 换台跳过：关键词命中台名/分组名即跳过（列表里仍可见可点播）
@@ -1964,8 +1999,8 @@ class _PlayerSettingsTab extends StatelessWidget {
               max: 2.0,
               divisions: 15,
               label: '${s.gestureSensitivity.toStringAsFixed(1)}x',
-              onChanged: (v) => controller
-                  .updateSettings(s.copyWith(gestureSensitivity: v)),
+              onChanged: (v) =>
+                  controller.updateSettings(s.copyWith(gestureSensitivity: v)),
             ),
             _buildSlider(
               icon: Icons.timer,
@@ -1986,14 +2021,14 @@ class _PlayerSettingsTab extends StatelessWidget {
               max: 30,
               divisions: 5,
               label: '${s.sourceTimeoutSeconds} 秒',
-              onChanged: (v) => controller.updateSettings(
-                  s.copyWith(sourceTimeoutSeconds: v.round())),
+              onChanged: (v) => controller
+                  .updateSettings(s.copyWith(sourceTimeoutSeconds: v.round())),
               subtitleText: '起播超过该时间未成功，自动尝试下一个源',
             ),
             // 播放缓冲：分段选择 5/10/20/30 秒（换台时由 MDK 后端应用）
             ListTile(
-              leading: const Icon(Icons.slow_motion_video,
-                  color: Colors.white70),
+              leading:
+                  const Icon(Icons.slow_motion_video, color: Colors.white70),
               title: const Text('播放缓冲'),
               subtitle: const Text('弱网或直播卡顿可调大，换台后生效'),
               trailing: SegmentedButton<int>(
@@ -2002,12 +2037,11 @@ class _PlayerSettingsTab extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                 ),
                 segments: const [5, 10, 20, 30]
-                    .map((v) =>
-                        ButtonSegment(value: v, label: Text('$v 秒')))
+                    .map((v) => ButtonSegment(value: v, label: Text('$v 秒')))
                     .toList(),
                 selected: {s.bufferSeconds},
-                onSelectionChanged: (sel) => controller.updateSettings(
-                    s.copyWith(bufferSeconds: sel.first)),
+                onSelectionChanged: (sel) => controller
+                    .updateSettings(s.copyWith(bufferSeconds: sel.first)),
               ),
             ),
             _buildUiScaleTile(context, controller, s),
@@ -2028,8 +2062,7 @@ class _PlayerSettingsTab extends StatelessWidget {
     return Column(
       children: [
         SwitchListTile(
-          secondary: const Icon(Icons.screen_rotation,
-              color: Colors.white70),
+          secondary: const Icon(Icons.screen_rotation, color: Colors.white70),
           title: const Text('字体大小自动适配',
               style: TextStyle(color: Colors.white, fontSize: 15)),
           subtitle: Text(
@@ -2099,8 +2132,7 @@ class _PlayerSettingsTab extends StatelessWidget {
               child: RadioListTile<String>(
                 value: o.$1,
                 title: Text(o.$2,
-                    style: const TextStyle(
-                        color: Colors.white, fontSize: 15)),
+                    style: const TextStyle(color: Colors.white, fontSize: 15)),
                 subtitle: Text(o.$3,
                     style:
                         const TextStyle(color: Colors.white38, fontSize: 12)),
@@ -2138,7 +2170,9 @@ class _PlayerSettingsTab extends StatelessWidget {
   /// 均衡器概要（拖到非 0 的段才显示）
   static String _eqSummary(List<double> gains) {
     final active = <String>[];
-    for (var i = 0; i < gains.length && i < PlayerController.kEqBandLabels.length; i++) {
+    for (var i = 0;
+        i < gains.length && i < PlayerController.kEqBandLabels.length;
+        i++) {
       final g = gains[i];
       if (g.abs() >= 0.05) {
         active.add('${PlayerController.kEqBandLabels[i]}'
@@ -2160,8 +2194,7 @@ class _PlayerSettingsTab extends StatelessWidget {
             title: Row(
               children: [
                 const Expanded(
-                  child: Text('自定义均衡器（10 段）',
-                      style: TextStyle(fontSize: 16)),
+                  child: Text('自定义均衡器（10 段）', style: TextStyle(fontSize: 16)),
                 ),
                 TextButton(
                   onPressed: () async {
@@ -2246,8 +2279,7 @@ class _PlayerSettingsTab extends StatelessWidget {
             }
           },
           title: Text(q.label,
-              style:
-                  const TextStyle(color: Colors.white70, fontSize: 14)),
+              style: const TextStyle(color: Colors.white70, fontSize: 14)),
           activeColor: Colors.blueAccent,
         );
       }).toList(),
@@ -2277,8 +2309,7 @@ class _PlayerSettingsTab extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(bottom: 2),
               child: Text(subtitleText,
-                  style: const TextStyle(
-                      color: Colors.white54, fontSize: 12)),
+                  style: const TextStyle(color: Colors.white54, fontSize: 12)),
             ),
           _NavSlider(
             value: clamped.toDouble(),
@@ -2357,10 +2388,10 @@ class _NavSliderState extends State<_NavSlider> {
         key != LogicalKeyboardKey.arrowRight) {
       return KeyEventResult.ignored;
     }
-    final next = (widget.value +
-            (key == LogicalKeyboardKey.arrowRight ? _step : -_step))
-        .clamp(widget.min, widget.max)
-        .toDouble();
+    final next =
+        (widget.value + (key == LogicalKeyboardKey.arrowRight ? _step : -_step))
+            .clamp(widget.min, widget.max)
+            .toDouble();
     widget.onChanged!(next);
     return KeyEventResult.handled;
   }
@@ -2419,21 +2450,19 @@ class _SystemSettingsTab extends StatelessWidget {
           children: [
             if (controller.isDesktop) ...[
               SwitchListTile(
-                secondary: const Icon(Icons.push_pin,
-                    color: Colors.white70),
+                secondary: const Icon(Icons.push_pin, color: Colors.white70),
                 title: const Text('窗口置顶',
                     style: TextStyle(color: Colors.white, fontSize: 15)),
                 subtitle: const Text('窗口始终保持在最前，确保快捷键响应',
                     style: TextStyle(color: Colors.white54, fontSize: 12)),
                 value: s.alwaysOnTop,
-                onChanged: (v) => controller
-                    .updateSettings(s.copyWith(alwaysOnTop: v)),
+                onChanged: (v) =>
+                    controller.updateSettings(s.copyWith(alwaysOnTop: v)),
                 activeColor: Colors.blueAccent,
               ),
               if (defaultTargetPlatform == TargetPlatform.windows)
                 SwitchListTile(
-                  secondary:
-                      const Icon(Icons.dock, color: Colors.white70),
+                  secondary: const Icon(Icons.dock, color: Colors.white70),
                   title: const Text('✕ 最小化到托盘',
                       style: TextStyle(color: Colors.white, fontSize: 15)),
                   subtitle: const Text(
@@ -2441,20 +2470,20 @@ class _SystemSettingsTab extends StatelessWidget {
                       '关着时 ✕ 直接退出。随时可用底部面板「后台播放」',
                       style: TextStyle(color: Colors.white54, fontSize: 12)),
                   value: s.closeToTray,
-                  onChanged: (v) => controller
-                      .updateSettings(s.copyWith(closeToTray: v)),
+                  onChanged: (v) =>
+                      controller.updateSettings(s.copyWith(closeToTray: v)),
                   activeColor: Colors.blueAccent,
                 ),
               SwitchListTile(
-                secondary: const Icon(Icons.power_settings_new,
-                    color: Colors.white70),
+                secondary:
+                    const Icon(Icons.power_settings_new, color: Colors.white70),
                 title: const Text('开机启动',
                     style: TextStyle(color: Colors.white, fontSize: 15)),
                 subtitle: const Text('开机后自动启动 Omi',
                     style: TextStyle(color: Colors.white54, fontSize: 12)),
                 value: s.launchAtStartup,
-                onChanged: (v) => controller
-                    .updateSettings(s.copyWith(launchAtStartup: v)),
+                onChanged: (v) =>
+                    controller.updateSettings(s.copyWith(launchAtStartup: v)),
                 activeColor: Colors.blueAccent,
               ),
               SwitchListTile(
@@ -2464,8 +2493,8 @@ class _SystemSettingsTab extends StatelessWidget {
                 subtitle: const Text('仅在程序启动时生效一次；启动后双击全屏/还原不受影响',
                     style: TextStyle(color: Colors.white54, fontSize: 12)),
                 value: s.startFullscreen,
-                onChanged: (v) => controller
-                    .updateSettings(s.copyWith(startFullscreen: v)),
+                onChanged: (v) =>
+                    controller.updateSettings(s.copyWith(startFullscreen: v)),
                 activeColor: Colors.blueAccent,
               ),
             ],
@@ -2474,8 +2503,7 @@ class _SystemSettingsTab extends StatelessWidget {
             ValueListenableBuilder<bool>(
               valueListenable: controller.clockVisible,
               builder: (context, showClock, _) => SwitchListTile(
-                secondary:
-                    const Icon(Icons.access_time, color: Colors.white70),
+                secondary: const Icon(Icons.access_time, color: Colors.white70),
                 title: const Text('显示时间',
                     style: TextStyle(color: Colors.white, fontSize: 15)),
                 subtitle: const Text('右上角一直显示实时系统时间',
@@ -2489,31 +2517,27 @@ class _SystemSettingsTab extends StatelessWidget {
             // 网页频道（webview:// 源）不可用
             ListTile(
               leading: Icon(Icons.language,
-                  color: s.webEnabled
-                      ? Colors.greenAccent
-                      : Colors.white54),
+                  color: s.webEnabled ? Colors.greenAccent : Colors.white54),
               title: const Text('网页直播支持',
                   style: TextStyle(color: Colors.white, fontSize: 15)),
               subtitle: Text(
                 s.webEnabled
                     ? '已开启：支持 webview:// 网页直播源\n关闭后重启不再加载 WebView2（不支持的系统可避免出错）'
                     : '已关闭：启动不加载 WebView2 运行时，网页直播源不可用；重新开启后恢复',
-                style: const TextStyle(
-                    color: Colors.white54, fontSize: 12),
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
               ),
               trailing: Switch(
                 value: s.webEnabled,
-                onChanged: (v) => controller
-                    .updateSettings(s.copyWith(webEnabled: v)),
+                onChanged: (v) =>
+                    controller.updateSettings(s.copyWith(webEnabled: v)),
                 activeColor: Colors.blueAccent,
               ),
             ),
             // 失败自动重载：网页卡死重载 + 直播流播放失败自动重试，共用次数
             ListTile(
               leading: Icon(Icons.refresh,
-                  color: s.autoReloadStall
-                      ? Colors.greenAccent
-                      : Colors.white54),
+                  color:
+                      s.autoReloadStall ? Colors.greenAccent : Colors.white54),
               title: const Text('失败自动重载',
                   style: TextStyle(color: Colors.white, fontSize: 15)),
               subtitle: const Text(
@@ -2524,28 +2548,24 @@ class _SystemSettingsTab extends StatelessWidget {
               ),
               trailing: Switch(
                 value: s.autoReloadStall,
-                onChanged: (v) => controller
-                    .updateSettings(s.copyWith(autoReloadStall: v)),
+                onChanged: (v) =>
+                    controller.updateSettings(s.copyWith(autoReloadStall: v)),
                 activeColor: Colors.blueAccent,
               ),
             ),
             // 自动重载/重试次数：3/5/10 次
             ListTile(
               leading: Icon(Icons.repeat,
-                  color: s.autoReloadStall
-                      ? Colors.white70
-                      : Colors.white24),
+                  color: s.autoReloadStall ? Colors.white70 : Colors.white24),
               enabled: s.autoReloadStall,
               title: Text('自动重试次数',
                   style: TextStyle(
-                      color:
-                          s.autoReloadStall ? Colors.white : Colors.white38,
+                      color: s.autoReloadStall ? Colors.white : Colors.white38,
                       fontSize: 15)),
               subtitle: Text('每个频道连续失败达到次数后判定链接失效',
                   style: TextStyle(
-                      color: s.autoReloadStall
-                          ? Colors.white54
-                          : Colors.white24,
+                      color:
+                          s.autoReloadStall ? Colors.white54 : Colors.white24,
                       fontSize: 12)),
               trailing: SegmentedButton<int>(
                 showSelectedIcon: false,
@@ -2553,13 +2573,12 @@ class _SystemSettingsTab extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                 ),
                 segments: const [3, 5, 10]
-                    .map((v) =>
-                        ButtonSegment(value: v, label: Text('$v 次')))
+                    .map((v) => ButtonSegment(value: v, label: Text('$v 次')))
                     .toList(),
                 selected: {s.retryTimes},
                 onSelectionChanged: s.autoReloadStall
-                    ? (sel) => controller.updateSettings(
-                        s.copyWith(retryTimes: sel.first))
+                    ? (sel) => controller
+                        .updateSettings(s.copyWith(retryTimes: sel.first))
                     : null,
               ),
             ),
@@ -2575,13 +2594,12 @@ class _SystemSettingsTab extends StatelessWidget {
                 controller.dlnaRunning
                     ? '已开启：${controller.dlnaName}\n${controller.dlnaEndpoint}\n手机需与本机同一局域网，防火墙需放行本程序；若同时开着 OMPlayer 等其它接收端，请先关闭（1900 组播端口同一时间只有先启动的程序收得到手机扫描）'
                     : '未开启：${controller.dlnaName.startsWith('接收服务启动失败') ? controller.dlnaName : '服务已停止或端口被占用；检查防火墙是否放行本程序'}',
-                style: const TextStyle(
-                    color: Colors.white54, fontSize: 12),
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
               ),
               trailing: Switch(
                 value: s.dlnaEnabled,
-                onChanged: (v) => controller
-                    .updateSettings(s.copyWith(dlnaEnabled: v)),
+                onChanged: (v) =>
+                    controller.updateSettings(s.copyWith(dlnaEnabled: v)),
                 activeColor: Colors.blueAccent,
               ),
             ),
@@ -2594,12 +2612,12 @@ class _SystemSettingsTab extends StatelessWidget {
                   style: TextStyle(
                       color: s.dlnaEnabled ? Colors.white : Colors.white38,
                       fontSize: 15)),
-              subtitle: Text('播完/发送端停止后先进「正在等待投屏」：'
+              subtitle: Text(
+                  '播完/发送端停止后先进「正在等待投屏」：'
                   '等待期间连播（下一集）可直接接上；'
                   '「一直等」则停在等待画面，直到新投屏或双击返回',
                   style: TextStyle(
-                      color:
-                          s.dlnaEnabled ? Colors.white54 : Colors.white24,
+                      color: s.dlnaEnabled ? Colors.white54 : Colors.white24,
                       fontSize: 12)),
               trailing: SegmentedButton<int>(
                 showSelectedIcon: false,
@@ -2636,8 +2654,7 @@ class _SystemSettingsTab extends StatelessWidget {
                     : (s.remoteAdminEnabled
                         ? '服务启动中或当前平台不支持（端口 8963 起）'
                         : '关闭后局域网内无法通过手机管理'),
-                style: const TextStyle(
-                    color: Colors.white54, fontSize: 12),
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
               ),
               trailing: Switch(
                 value: s.remoteAdminEnabled,
@@ -2652,19 +2669,16 @@ class _SystemSettingsTab extends StatelessWidget {
             ),
             // 网页频道诊断：复现「打不开/黑屏/串台」后导出日志发给开发者
             ListTile(
-              leading: const Icon(Icons.bug_report_outlined,
-                  color: Colors.white70),
+              leading:
+                  const Icon(Icons.bug_report_outlined, color: Colors.white70),
               title: const Text('导出网页诊断日志',
                   style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: const Text(
-                  '网页频道故障时使用：先打开故障频道复现一遍，再点这里导出',
+              subtitle: const Text('网页频道故障时使用：先打开故障频道复现一遍，再点这里导出',
                   style: TextStyle(color: Colors.white54, fontSize: 12)),
               onTap: () async {
                 final p = await WebDiag.flush();
                 OsdBus.show(
-                  p.isEmpty
-                      ? '暂无诊断日志：请先打开一次网页频道复现故障'
-                      : '诊断日志已导出：$p',
+                  p.isEmpty ? '暂无诊断日志：请先打开一次网页频道复现故障' : '诊断日志已导出：$p',
                   icon: Icons.bug_report_outlined,
                 );
               },
@@ -2676,7 +2690,6 @@ class _SystemSettingsTab extends StatelessWidget {
     );
   }
 }
-
 
 // ==================== 说明标签页 ====================
 
@@ -2723,12 +2736,18 @@ class _HelpTab extends StatelessWidget {
               _helpSection('后台播放与摸鱼模式（Windows）'),
               _helpInfoCard([
                 _helpRow('小窗播放', '悬浮置顶的小画面，边干别的边看'),
-                _helpRow('后台播放', '底部面板「后台」：窗口缩到托盘只听声，'
-                    '托盘图标左键恢复'),
-                _helpRow('摸鱼模式', '托盘右键菜单：静音 + 隐藏窗口；'
-                    '左键托盘图标一键恢复画面与音量'),
-                _helpRow('✕ 最小化到托盘', '设置 → 系统里打开后，'
-                    '点关闭按钮不退出、缩到托盘继续播'),
+                _helpRow(
+                    '后台播放',
+                    '底部面板「后台」：窗口缩到托盘只听声，'
+                        '托盘图标左键恢复'),
+                _helpRow(
+                    '摸鱼模式',
+                    '托盘右键菜单：静音 + 隐藏窗口；'
+                        '左键托盘图标一键恢复画面与音量'),
+                _helpRow(
+                    '✕ 最小化到托盘',
+                    '设置 → 系统里打开后，'
+                        '点关闭按钮不退出、缩到托盘继续播'),
               ]),
             ],
             _helpSection('遥控器'),
@@ -2828,22 +2847,18 @@ Widget _helpNotesCard(List<String> notes) {
       children: [
         for (var i = 0; i < notes.length; i++)
           Padding(
-            padding:
-                EdgeInsets.only(bottom: i == notes.length - 1 ? 0 : 10),
+            padding: EdgeInsets.only(bottom: i == notes.length - 1 ? 0 : 10),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Padding(
                   padding: EdgeInsets.only(top: 5, right: 8),
-                  child: Icon(Icons.circle,
-                      size: 5, color: Colors.blueAccent),
+                  child: Icon(Icons.circle, size: 5, color: Colors.blueAccent),
                 ),
                 Expanded(
                   child: Text(notes[i],
                       style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 13,
-                          height: 1.45)),
+                          color: Colors.white70, fontSize: 13, height: 1.45)),
                 ),
               ],
             ),
@@ -2936,9 +2951,10 @@ class _SourceRowState extends State<_SourceRow> {
     final k = event.logicalKey;
     if (k == LogicalKeyboardKey.arrowLeft ||
         k == LogicalKeyboardKey.arrowRight) {
-      final target = (k == LogicalKeyboardKey.arrowLeft ? _index - 1 : _index + 1)
-          .clamp(0, widget.actions.length)
-          .toInt();
+      final target =
+          (k == LogicalKeyboardKey.arrowLeft ? _index - 1 : _index + 1)
+              .clamp(0, widget.actions.length)
+              .toInt();
       setState(() => _index = target);
       if (target == 0) {
         _rowNode.requestFocus();
@@ -3138,8 +3154,7 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
             const SizedBox(height: 14),
             Container(
               width: double.infinity,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
                 color: const Color(0xFFECEEF2),
                 borderRadius: BorderRadius.circular(9),
@@ -3214,8 +3229,8 @@ class _ClipHistory {
 
   static void ensureWatching() {
     if (_timer != null) return;
-    _timer = Timer.periodic(
-        const Duration(milliseconds: 1500), (_) => _sample());
+    _timer =
+        Timer.periodic(const Duration(milliseconds: 1500), (_) => _sample());
     _sample();
   }
 
@@ -3310,8 +3325,7 @@ InputDecoration _inputDecoration(String hint,
       borderRadius: BorderRadius.circular(8),
       borderSide: BorderSide.none,
     ),
-    contentPadding:
-        const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
     // 剪贴板按钮仅安卓端显示（桌面端用右键菜单）
     suffixIcon: (pasteTarget == null || !_showPasteButton)
         ? null
@@ -3362,8 +3376,8 @@ class _BlacklistRowState extends State<_BlacklistRow> {
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(color: Colors.white54, fontSize: 12),
       ),
-      trailing: const Icon(Icons.chevron_right,
-          color: Colors.white38, size: 20),
+      trailing:
+          const Icon(Icons.chevron_right, color: Colors.white38, size: 20),
       onTap: _open,
     );
   }
@@ -3420,8 +3434,8 @@ class _BlacklistDialogState extends State<_BlacklistDialog> {
             const SizedBox(height: 12),
             if (keys.isEmpty)
               const Text('还没有屏蔽词',
-                  style: TextStyle(
-                      color: AppColors.textTertiary, fontSize: 12.5))
+                  style:
+                      TextStyle(color: AppColors.textTertiary, fontSize: 12.5))
             else
               Wrap(
                 spacing: 8,
@@ -3445,8 +3459,8 @@ class _BlacklistDialogState extends State<_BlacklistDialog> {
             const SizedBox(height: 14),
             _ImeSafeTextField(
               controller: _ctl,
-              style: const TextStyle(
-                  color: AppColors.textPrimary, fontSize: 13.5),
+              style:
+                  const TextStyle(color: AppColors.textPrimary, fontSize: 13.5),
               onSubmitted: (_) => _add(),
               decoration: InputDecoration(
                 hintText: '关键词，如「购物」「测试」「戏曲」',
@@ -3624,14 +3638,14 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
                       fontWeight: FontWeight.w600)),
               const Spacer(),
               Text('$_count 个台',
-                  style: const TextStyle(
-                      color: Colors.white38, fontSize: 12)),
+                  style: const TextStyle(color: Colors.white38, fontSize: 12)),
             ],
           ),
           const SizedBox(height: 6),
           Text(
             cfg.desc,
-            style: const TextStyle(color: Colors.white38, fontSize: 11.5, height: 1.5),
+            style: const TextStyle(
+                color: Colors.white38, fontSize: 11.5, height: 1.5),
           ),
           const SizedBox(height: 10),
           Row(
@@ -3639,8 +3653,8 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
               const Text('清单更新时间：',
                   style: TextStyle(color: Colors.white54, fontSize: 12.5)),
               Text(_atText,
-                  style: const TextStyle(
-                      color: Colors.white70, fontSize: 12.5)),
+                  style:
+                      const TextStyle(color: Colors.white70, fontSize: 12.5)),
             ],
           ),
           const SizedBox(height: 10),

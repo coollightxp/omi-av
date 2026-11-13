@@ -352,6 +352,9 @@ class PlayerController extends ChangeNotifier {
   void notifyListeners() {
     super.notifyListeners();
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    // 通知栏/锁屏音频卡片（此前是死代码：函数在、没人调，卡片永远
+    // 不出现）。签名去重在函数内部，频率高也不会跨通道刷
+    _syncAudioNotification();
     // 电台没有画面，进画中画只会得到一个小黑窗：电台应该在通知栏
     // 用音频卡片（上一台/暂停/下一台）控制，而不是切小窗
     final audioOnly = _currentChannel?.isRadio ?? false;
@@ -1585,7 +1588,25 @@ class PlayerController extends ChangeNotifier {
       await _openWebPageChannel(channel);
       return;
     }
-    if (_webPageActive) _webViewClosedAt = DateTime.now();
+    if (_webPageActive) {
+      _webViewClosedAt = DateTime.now();
+      // 离开网页：先把页面刷成黑底，再让控件销毁。
+      //
+      // WebView2 的原生窗口不是立刻消失的（要等 COM 释放，约 2.5 秒），
+      // 这段空档里它一直浮在 Flutter 画面最上层，露出的是它自己的默认
+      // 白底——用户看到的就是「切台时冒出一大块白框，鼠标在框里也不
+      // 消失，挪到窗口边缘那块小缝才慢慢没有」。提前把网页背景刷黑，
+      // 窗口即便还在，露出来的也是黑的。
+      try {
+        // ignore: avoid_dynamic_calls
+        webController?.evaluateJavascript(
+          source: "document.documentElement.style.background='#000';"
+              "if(document.body){document.body.style.background='#000';}",
+        );
+      } catch (_) {
+        // 网页可能还没加载完 / 已销毁，刷不上就算了，下面还有透明背景兜底
+      }
+    }
     _webPageActive = false;
     _webPageForeground = false;
     _currentChannel = channel;

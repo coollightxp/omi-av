@@ -6529,7 +6529,9 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
             // 网页播放器（如央视频）自动开播，无需用户先点击网页
             mediaPlaybackRequiresUserGesture: false,
             supportZoom: false,
-            transparentBackground: false,
+            // 透明背景：窗口销毁前的空档里，WebView 会先露一层默认白底，
+            // 用户看到的就是「切台时冒出一块大白框」。透明后露的是下层黑底
+            transparentBackground: true,
             cacheMode: CacheMode.LOAD_DEFAULT,
             // 允许 iframe 内的视频自动播放（央视频播放器在 iframe 内）
             iframeAllow: "autoplay; fullscreen; encrypted-media",
