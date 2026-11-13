@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -96,7 +94,20 @@ class BuiltinEpg {
     }
 
     // 频道集合取内置清单里的央视网频道（tvg-id 就是接口要的 slug）
-    var slugs = _slugsFromM3u(await _readCctvList());
+    final listText = await _readCctvList();
+    final channels = _parseChannels(listText);
+    var slugs = channels
+        .map((c) => c.id.toLowerCase())
+        .where((id) => RegExp(r'^cctv[0-9a-z+]+$').hasMatch(id))
+        .toList();
+    // 去重且保序
+    slugs = <String>{...slugs}.toList();
+    // 央视频那批台（ysp-*）：接口不认央视频 pid，但同一路 CCTV 频道的节目
+    // 跟央视网完全一致，按台号映射过去复用（见 _toXmltv）
+    final mirrors = channels
+        .where((c) => c.id.toLowerCase().startsWith('ysp-'))
+        .where((c) => _cctvEquivalent(c.name) != null)
+        .toList();
     if (slugs.isEmpty) {
       try {
         slugs = await BuiltinCatalog.fetchSlugs();
@@ -132,7 +143,7 @@ class BuiltinEpg {
       return (false, '央视网节目单接口没有返回数据（网络或接口变动）');
     }
 
-    final xml = _toXmltv(merged, slugs);
+    final xml = _toXmltv(merged, slugs, mirrors);
     final count = RegExp(r'<programme\b').allMatches(xml).length;
     if (count < 200) {
       return (false, '只取到 $count 条节目，疑似不完整，保留旧节目单');
@@ -157,17 +168,41 @@ class BuiltinEpg {
     }
   }
 
-  static List<String> _slugsFromM3u(String m3u) {
-    final re = RegExp(r'tvg-id="(cctv[0-9a-z+]+)"');
-    final out = <String>[];
+  /// 从清单里逐条取「tvg-id + 台名」。
+  ///
+  /// 央视网那 20 条 id 是 `cctv1 … cctv17 / cctv5plus / cctveurope`，
+  /// 央视频那 63 条是 `ysp-<pid>` / `ysp-sat-<pid>`，两种都要。
+  static List<_WebChannel> _parseChannels(String m3u) {
+    final re = RegExp(r'#EXTINF:[^\r\n]*tvg-id="([^"]+)"[^\r\n]*,([^\r\n]*)');
+    final out = <_WebChannel>[];
     for (final m in re.allMatches(m3u)) {
-      final s = m.group(1)!.toLowerCase();
-      if (!out.contains(s)) out.add(s);
+      final id = m.group(1)!.trim();
+      final name = m.group(2)!.trim();
+      if (id.isEmpty || name.isEmpty) continue;
+      out.add(_WebChannel(id, name));
     }
     return out;
   }
 
-  static String _toXmltv(Map<String, dynamic> data, List<String> slugs) {
+  /// 台名 → 央视网接口的 slug：`CCTV1` / `CCTV-1 综合` → `cctv1`，
+  /// `CCTV-5+` / `CCTV5PLUS` → `cctv5plus`。
+  ///
+  /// 字母后缀要排除：`CCTV4K` 是 4K 超高清，不是 CCTV-4。
+  static String? _cctvEquivalent(String name) {
+    final m = RegExp(r'CCTV[-\s]?(\d{1,2})(\s*\+|PLUS)?(?![\dA-Za-z])',
+            caseSensitive: false)
+        .firstMatch(name);
+    if (m == null) return null;
+    final n = int.tryParse(m.group(1)!);
+    if (n == null || n < 1 || n > 17) return null;
+    return m.group(2) == null ? 'cctv$n' : 'cctv${n}plus';
+  }
+
+  static String _toXmltv(
+    Map<String, dynamic> data,
+    List<String> slugs,
+    List<_WebChannel> mirrors,
+  ) {
     final buf = StringBuffer()
       ..writeln('<?xml version="1.0" encoding="UTF-8"?>')
       ..writeln('<tv generator-info-name="omi-builtin-epg">');
@@ -190,26 +225,50 @@ class BuiltinEpg {
       buf.writeln('  </channel>');
     }
 
-    for (final entry in data.entries) {
-      final info = entry.value;
-      if (info is! Map) continue;
-      final list = info['list'];
-      if (list is! List) continue;
-      for (final raw in list) {
-        if (raw is! Map) continue;
-        final title = (raw['title'] ?? '').toString().trim();
-        final st = (raw['startTime'] as num?)?.toInt() ?? 0;
-        final et = (raw['endTime'] as num?)?.toInt() ?? 0;
-        if (title.isEmpty || st <= 0 || et <= st) continue;
-        buf.writeln('  <programme start="${_xmltvTime(st)}" '
-            'stop="${_xmltvTime(et)}" channel="${_esc(entry.key)}">');
-        buf.writeln('    <title lang="zh">${_esc(title)}</title>');
-        buf.writeln('  </programme>');
+    // 央视频的 ysp-* 台：接口认不了它的 pid，但同一路 CCTV 的节目一样，
+    // 直接把对应 cctv slug 的 channel / programme 复制一份，id 换成 pid。
+    // 好处是播放器 tvg-id 精确命中，完全不依赖台名匹配。
+    final mirrorSrc = <String, String>{};
+    for (final ch in mirrors) {
+      final src = _cctvEquivalent(ch.name);
+      if (src == null || data[src] is! Map) continue;
+      mirrorSrc[ch.id] = src;
+      buf.writeln('  <channel id="${_esc(ch.id)}">');
+      buf.writeln('    <display-name>${_esc(ch.name)}</display-name>');
+      for (final alias in _aliases(src)) {
+        if (alias != ch.name) {
+          buf.writeln('    <display-name>${_esc(alias)}</display-name>');
+        }
       }
+      buf.writeln('  </channel>');
+    }
+
+    for (final entry in data.entries) {
+      _writeProgrammes(buf, entry.key, entry.value);
+    }
+    for (final entry in mirrorSrc.entries) {
+      _writeProgrammes(buf, entry.key, data[entry.value]);
     }
 
     buf.writeln('</tv>');
     return buf.toString();
+  }
+
+  static void _writeProgrammes(StringBuffer buf, String channelId, Object? info) {
+    if (info is! Map) return;
+    final list = info['list'];
+    if (list is! List) return;
+    for (final raw in list) {
+      if (raw is! Map) continue;
+      final title = (raw['title'] ?? '').toString().trim();
+      final st = (raw['startTime'] as num?)?.toInt() ?? 0;
+      final et = (raw['endTime'] as num?)?.toInt() ?? 0;
+      if (title.isEmpty || st <= 0 || et <= st) continue;
+      buf.writeln('  <programme start="${_xmltvTime(st)}" '
+          'stop="${_xmltvTime(et)}" channel="${_esc(channelId)}">');
+      buf.writeln('    <title lang="zh">${_esc(title)}</title>');
+      buf.writeln('  </programme>');
+    }
   }
 
   /// epoch 秒 → "20261113010200 +0800"（央视节目单是国内时间）
@@ -246,4 +305,11 @@ class BuiltinEpg {
         url: localUrl,
         addedAt: DateTime.now(),
       );
+}
+
+/// 清单里的一条网页频道
+class _WebChannel {
+  const _WebChannel(this.id, this.name);
+  final String id;
+  final String name;
 }

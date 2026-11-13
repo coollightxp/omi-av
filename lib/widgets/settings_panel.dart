@@ -28,7 +28,6 @@ import '../services/radio_library.dart';
 import '../services/web_diag.dart';
 import 'ime_safe_text_field.dart';
 import 'scaled_panel.dart';
-import 'sleep_timer_dialog.dart';
 
 export 'ime_safe_text_field.dart' show ImeSafeTextField;
 

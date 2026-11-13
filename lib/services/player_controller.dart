@@ -207,6 +207,9 @@ class PlayerController extends ChangeNotifier {
 
   // 播放进度定时刷新（进度条/倒计时）
   Timer? _tickTimer;
+  Timer? _epgDayTimer;
+  /// 已经检查过跨天的日期（yyyyMMdd），避免同一天反复拉节目单
+  String _epgDayChecked = '';
 
   /// 进度秒级去重 + 直播节目跨段去重（见 tick 里的说明）
   int? _lastTickSecond;
@@ -400,6 +403,11 @@ class PlayerController extends ChangeNotifier {
         await refreshEpg();
       }));
     });
+    // 跨天刷新：央视接口只给「今天 / 明天」，App 常驻过夜后缓存里就只剩
+    // 昨天和今天，今天那半截也过期了。每半小时看一眼缓存是哪天抓的，
+    // 日期变了就重抓一次（只在真跨天时触发，白天不会反复请求）
+    _epgDayTimer = Timer.periodic(
+        const Duration(minutes: 30), (_) => unawaited(_refreshEpgIfNewDay()));
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
     // 不 await：台标只是锦上添花，绝不能拖慢启动
     unawaited(RadioLogo.ensure());
@@ -1453,6 +1461,27 @@ class PlayerController extends ChangeNotifier {
       if (_radioCatalogLoaded) _refreshRadioCatalog();
       notifyListeners();
     }
+  }
+
+  /// 跨天检查：缓存是昨天抓的（或更早）就重抓内置节目单。
+  ///
+  /// 只有「内置节目单」是当前 EPG 时才值得跑；用户自己加的 xmltv 源
+  /// 有自己的刷新策略，这里不插手。
+  Future<void> _refreshEpgIfNewDay() async {
+    if (sourceManager.currentEpg?.url != BuiltinEpg.localUrl) return;
+    final at = await BuiltinEpg.fetchedAt();
+    if (at == null) return;
+    final now = DateTime.now();
+    final today = '${now.year}${now.month}${now.day}';
+    if (at.year == now.year && at.month == now.month && at.day == now.day) {
+      return;
+    }
+    if (_epgDayChecked == today) return;
+    _epgDayChecked = today;
+    final (ok, _) = await BuiltinEpg.refresh(force: true);
+    if (!ok) return;
+    await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+    await refreshEpg();
   }
 
   /// 刷新 EPG 数据。
@@ -4715,6 +4744,7 @@ class PlayerController extends ChangeNotifier {
   @override
   void dispose() {
     _tickTimer?.cancel();
+    _epgDayTimer?.cancel();
     _bootMinTimer?.cancel();
     _castRestoreTimer?.cancel();
     _castEndedTimer?.cancel();

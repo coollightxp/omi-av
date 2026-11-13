@@ -61,11 +61,30 @@ class BuiltinCatalog {
     return list;
   }
 
-  /// 接口单次最多带约 12 个频道，超过就直接回
+  /// 接口单次最多带 12 个频道，超过就直接回
   /// `{"errcode":"1001","msg":"params error"}`（实测 15 个必失败）。
   /// 之前一次把 20 个 slug 全塞进去，等于一次都没成功——这就是
   /// 「内置节目单一条节目都没有」的根因。
-  static const int _epgBatch = 10;
+  static const int _epgBatch = 12;
+
+  /// 清单 tvg-id 与接口 `c=` 参数对不上的台（央视网内部另有一套编号）。
+  ///
+  /// * `cctv9` 接口认，但返回的是 **CCTV-News**（境外新闻台），没有节目单；
+  ///   真正的纪录频道是 `cctvjilu`
+  /// * `cctv14` 接口直接报 `1001 params error`，少儿频道是 `cctvchild`
+  ///
+  /// 这两个台就是之前「第二批整批失败 + CCTV-9 空节目单」的元凶：
+  /// 一个错 id 把同批 10 个台一起拖死。
+  static const Map<String, String> _apiIds = {
+    'cctv9': 'cctvjilu',
+    'cctv14': 'cctvchild',
+  };
+
+  static final Map<String, String> _apiToSlug = {
+    for (final e in _apiIds.entries) e.value: e.key,
+  };
+
+  static String _apiId(String slug) => _apiIds[slug] ?? slug;
 
   /// 取节目单原始数据（同时带 channelName，用来给频道起名）
   ///
@@ -82,13 +101,13 @@ class BuiltinCatalog {
       final batch = slugs.sublist(
           i, i + _epgBatch > slugs.length ? slugs.length : i + _epgBatch);
       try {
-        merged.addAll(await _fetchEpgBatch(batch, ymd));
+        _mergeBack(merged, await _fetchEpgBatch(_apiIdsOf(batch), ymd));
       } catch (e) {
         // 整批失败：逐个再试，坏 slug 不连累同批的好台
         debugPrint('[BuiltinCatalog] 批次失败 ${batch.join(",")}: $e');
         for (final one in batch) {
           try {
-            merged.addAll(await _fetchEpgBatch([one], ymd));
+            _mergeBack(merged, await _fetchEpgBatch([_apiId(one)], ymd));
           } catch (_) {
             // 这个台今天没有节目单，跳过
           }
@@ -97,6 +116,18 @@ class BuiltinCatalog {
     }
     return merged;
   }
+
+  /// 接口返回的 key 是接口 id（cctvjilu / cctvchild），合并时改回清单里的
+  /// tvg-id（cctv9 / cctv14），否则播放器按 tvg-id 匹配会一条都对不上
+  static void _mergeBack(
+      Map<String, dynamic> into, Map<String, dynamic> got) {
+    for (final e in got.entries) {
+      into[_apiToSlug[e.key] ?? e.key] = e.value;
+    }
+  }
+
+  static List<String> _apiIdsOf(List<String> slugs) =>
+      slugs.map(_apiId).toList(growable: false);
 
   static Future<Map<String, dynamic>> _fetchEpgBatch(
     List<String> slugs,

@@ -679,7 +679,10 @@ jobs:
   # ==================== Web ====================
   build-web:
     name: Build Web
-    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
+    # Web 端只作界面预览：media_kit/libmpv 在浏览器里没有播放能力，
+    # 直播流与 webview:// 频道都放不出来，故不随 tag 出正式包，
+    # 需要时手动 Run workflow 构建一份看看界面即可。
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -719,12 +722,6 @@ jobs:
         with:
           name: web-build
           path: build/web
-
-      - name: Upload to Release
-        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: Omi-web.zip
 
   # ==================== Windows Desktop ====================
   build-windows:
@@ -1226,7 +1223,8 @@ jobs:
   create-release:
     name: Create Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build-android, build-web, build-windows, build-linux]
+    # Web 不参与正式发布（浏览器里放不了流），只出 Windows / Android / Linux
+    needs: [build-android, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -1244,5 +1242,12 @@ jobs:
           case "$TAG" in
             *-rc.*) PRERELEASE="--prerelease" ;;
           esac
-          gh release create "$TAG" $(find dist -type f) \
-            --title "$TAG" --generate-notes $PRERELEASE
+          # 只挑安装包，别把 web 目录里几百个静态文件一起传上去
+          FILES=$(find dist -type f \( -name "*.zip" -o -name "*.apk" \))
+          if [ -z "$FILES" ]; then
+            echo "::error::没有找到任何发布产物"
+            exit 1
+          fi
+          echo "$FILES"
+          gh release create "$TAG" $FILES \
+            --title "欧米视听 $TAG" --generate-notes $PRERELEASE
