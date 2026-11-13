@@ -32,7 +32,7 @@ class OmiVideoMdkController extends ChangeNotifier
     bool radioSpectrum = false,
     bool audioMeter = false,
   }) : _url = url {
-    _register();
+    _register(bufferSeconds);
     _pc = VideoPlayerController.networkUrl(
       url,
       httpHeaders: headers ?? const <String, String>{},
@@ -42,23 +42,51 @@ class OmiVideoMdkController extends ChangeNotifier
   }
 
   static bool _registered = false;
+  static int _bufferSecs = -1;
 
   /// 只在第一次用到 MDK 时注册：不切换引擎的用户完全不受影响（Windows
-  /// 上也不会去加载 mdk.dll）。低延迟设为直播模式，丢帧保最新画面。
-  static void _register() {
-    if (_registered) return;
+  /// 上也不会去加载 mdk.dll）。
+  ///
+  /// **不要开 `lowLatency`**。fvp 的 lowLatency>=2 会给每个播放器设
+  /// `avformat.fflags=+nobuffer`、`fpsprobesize=0`（不探测帧率，直接信
+  /// 容器头）并 `setBufferRange(max:1000, drop:true)`（只留 1 秒缓存、
+  /// 丢帧追最新）。直播追最新确实流畅，但投屏点播（视频号/腾讯视频的
+  /// mp4、m3u8 点播）会按错误的帧率出帧、丢帧追赶，表现为「画面加速、
+  /// 进度条飞、音画不同步」——v2.0.5 用户实测反馈。
+  ///
+  /// OMPlayer 那套 MDK 用的是 `player.buffer.range`（起播预读 + 缓冲
+  /// 上限）+ avio 断线重连，不碰帧率探测，所以它投屏正常。这里对齐。
+  static void _register(int bufferSeconds) {
+    if (_registered && _bufferSecs == bufferSeconds) return;
     _registered = true;
+    _bufferSecs = bufferSeconds;
+    // 上限 120 秒与 MPV 侧一致；起播预读最多 3 秒，避免大缓冲等太久
+    final maxMs = bufferSeconds.clamp(5, 120) * 1000;
+    final startMs = maxMs < 3000 ? maxMs : 3000;
     try {
       fvp.registerWith(options: <String, dynamic>{
         // web 走官方实现；移动端/桌面端用 MDK
         'platforms': <String>['windows', 'linux', 'android', 'macos', 'ios'],
-        'lowLatency': 2,
+        // 硬解优先，软解兜底（只写 'auto' 在部分老显卡上会直接失败）
         'video.decoders': <String>[
           'MFT:d3d=11',
           'D3D11',
           'DXVA',
-          'auto',
+          'CUDA',
+          'hap',
+          'FFmpeg',
+          'dav1d',
         ],
+        'player': <String, String>{
+          // 网络抖动/中间设备掐连接时自动重连（同 MPV 侧 avio 配置）
+          'avio.reconnect': '1',
+          'avio.reconnect_streamed': '1',
+          'avio.reconnect_on_network_error': '1',
+          'avio.reconnect_delay_max': '5',
+          'avio.rw_timeout': '15000000',
+          // 起播预读 + 缓冲上限（毫秒）；不丢帧、不改帧率探测
+          'buffer.range': '$startMs+$maxMs',
+        },
       });
     } catch (e) {
       debugPrint('[OmiVideo/mdk] register failed: $e');
