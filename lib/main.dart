@@ -7,19 +7,21 @@ import 'package:window_manager/window_manager.dart';
 
 import 'app.dart';
 import 'services/auto_launch.dart';
+import 'services/exit_guard.dart';
 import 'services/media_capture_service.dart';
 import 'services/tray_service.dart';
 import 'services/web_env.dart';
 
 /// 窗口关闭拦截：设置开了「✕ 最小化到托盘」时隐藏窗口继续播放，
-/// 托盘图标左键恢复；否则正常销毁退出。
+/// 托盘图标左键恢复；否则交给 [ExitGuard] 走统一的有序退出
+/// （先销毁网页控件/WebView2 环境，再快速结束进程）。
 class _OmiWindowListener extends WindowListener {
   @override
   void onWindowClose() async {
     if (TrayService.closeToTray) {
       await windowManager.hide();
     } else {
-      await windowManager.destroy();
+      await ExitGuard.quit();
     }
   }
 }

@@ -8,6 +8,7 @@ import '../models/channel.dart';
 import '../core/widgets/channel_badge.dart';
 import '../core/theme/app_colors.dart';
 import '../core/widgets/audio_wave.dart';
+import '../services/media/omi_video.dart';
 import '../services/player_controller.dart';
 
 /// 视频播放器显示组件
@@ -137,8 +138,10 @@ class VideoPlayerWidget extends StatelessWidget {
                   child: SizedBox(
                     width: hasSize ? w : 16,
                     height: hasSize ? h : 9,
-                    // 门面 build()：io 走 media_kit 的 Video，web 走 VideoPlayer
-                    child: vc.build(),
+                    // 门面 build()：io 走 media_kit 的 Video，web 走 VideoPlayer。
+                    // 用 _TextureSurface 包一层：面板/OSD 动画引起的父级重建
+                    // 不再重建纹理子树（老显卡上反复重建会闪黑一下）
+                    child: _TextureSurface(controller: vc),
                   ),
                 ),
               ),
@@ -506,5 +509,37 @@ class _LiveDotState extends State<_LiveDot>
         );
       },
     );
+  }
+}
+
+
+/// 视频纹理外壳：只在「内核实例」变化时才重建纹理子树。
+///
+/// 打开面板、OSD 淡入淡出、时钟刷新都会让上层 Consumer 重建；纹理
+/// widget 跟着重建时，Windows 上（尤其老显卡/1607）偶发整屏闪黑一帧。
+/// 这里把 `build()` 的结果缓存住，并用 RepaintBoundary 隔离重绘。
+class _TextureSurface extends StatefulWidget {
+  const _TextureSurface({required this.controller});
+
+  final OmiVideoController controller;
+
+  @override
+  State<_TextureSurface> createState() => _TextureSurfaceState();
+}
+
+class _TextureSurfaceState extends State<_TextureSurface> {
+  late Widget _child = widget.controller.build();
+
+  @override
+  void didUpdateWidget(covariant _TextureSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.controller, widget.controller)) {
+      _child = widget.controller.build();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(child: _child);
   }
 }

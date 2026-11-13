@@ -9,10 +9,13 @@ import 'package:flutter/material.dart';
 /// 点击时先卸载焦点再延时补挂，强制重建 IME 连接，规避该引擎缺陷。
 ///
 /// 2026-11 用户实测：Win10 1607（build 14393）上两个输入框之间切换
-/// （先点地址框再回名称框）直接 AppHang 假死→点一下崩溃退出。原方案
-/// 1607 跳过重连已不够——现状是必挂，重连版只会更好；延时从 30ms
-/// 放宽到 150ms，给 TSF 拆连接留足时间。若某系统反而加重，回退点：
-/// [_needsImeWorkaround] 按 build 号过滤即可。
+/// （先点地址框再回名称框）直接 AppHang 假死→点一下崩溃退出。
+///
+/// **二次修正**：上一版每个框各自延时 150ms 后无条件 `requestFocus()`，
+/// 用户快速来回点时 A 的定时器会把焦点从 B 抢回来，两个框互相拉锯，
+/// 表现出来同样是"点了没反应/假死"。现在改用全局序号：
+/// 每次点击递增，延时回调只在自己仍是最新一次点击、且期间没有别的
+/// 控件拿到焦点时才补挂——不抢别人的焦点。
 class ImeSafeTextField extends StatefulWidget {
   final TextEditingController? controller;
   final FocusNode? focusNode;
@@ -42,6 +45,9 @@ class ImeSafeTextField extends StatefulWidget {
 class _ImeSafeTextFieldState extends State<ImeSafeTextField> {
   FocusNode? _ownFocus;
 
+  /// 全局最近一次点击的序号：只有最新一次点击的延时回调有权补挂焦点
+  static int _tapSeq = 0;
+
   FocusNode get _focus => widget.focusNode ?? (_ownFocus ??= FocusNode());
 
   /// IME 重连是否启用（仅 Windows 有该缺陷与挂起报告）
@@ -52,6 +58,22 @@ class _ImeSafeTextFieldState extends State<ImeSafeTextField> {
   void dispose() {
     _ownFocus?.dispose();
     super.dispose();
+  }
+
+  void _onTap() {
+    if (!_needsImeWorkaround) return;
+    // 已聚焦在本框：再点一次没必要折腾 TSF，交给系统处理光标定位
+    if (_focus.hasFocus) return;
+    final seq = ++_tapSeq;
+    _focus.unfocus();
+    Future.delayed(const Duration(milliseconds: 130), () {
+      if (!mounted) return;
+      // 期间用户点了别的输入框：本次作废，绝不抢焦点
+      if (seq != _tapSeq) return;
+      final primary = FocusManager.instance.primaryFocus;
+      if (primary != null && primary != _focus) return;
+      if (!_focus.hasFocus) _focus.requestFocus();
+    });
   }
 
   @override
@@ -65,14 +87,7 @@ class _ImeSafeTextFieldState extends State<ImeSafeTextField> {
       onChanged: widget.onChanged,
       onSubmitted: widget.onSubmitted,
       textInputAction: widget.textInputAction,
-      onTap: !_needsImeWorkaround
-          ? null
-          : () {
-              _focus.unfocus();
-              Future.delayed(const Duration(milliseconds: 150), () {
-                if (mounted && !_focus.hasFocus) _focus.requestFocus();
-              });
-            },
+      onTap: _needsImeWorkaround ? _onTap : null,
     );
   }
 

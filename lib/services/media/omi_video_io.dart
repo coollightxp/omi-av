@@ -24,7 +24,8 @@ class OmiVideoController extends ChangeNotifier {
   }) : _url = url,
        _headers = headers,
        _radioSpectrum = radioSpectrum,
-       _audioMeter = audioMeter {
+       _audioMeter = audioMeter,
+       _meterActive = audioMeter {
     MediaKit.ensureInitialized();
     final bytes = (bufferSeconds.clamp(3, 120)) * 1024 * 1024;
     _player = Player(
@@ -47,6 +48,8 @@ class OmiVideoController extends ChangeNotifier {
   /// 走 mpv 的 af-metadata 读 astats 的 RMS，是**真实电平**，
   /// 不依赖 vo/showwaves，纯音频流也能拿到。
   final bool _audioMeter;
+  /// 电平表当前是否真的挂在链上（取不到数据后置 false 并摘掉滤镜）
+  bool _meterActive = false;
 
   /// 实时电平 0~1（-1 未知）。波形组件直接订阅，不走 ChangeNotifier，
   /// 免得每次取样都重建整棵播放树。
@@ -230,7 +233,11 @@ class OmiVideoController extends ChangeNotifier {
           _meterDead = true;
           _meterTimer?.cancel();
           audioLevel.value = -1; // -1 = 未知 → 波形切回模拟（必定会动）
-          debugPrint('[OmiVideo] af-metadata 不可用，波形退回模拟');
+          // 取不到电平说明滤镜链没起作用；直接摘掉 astats 保住声音
+          // （个别机器挂上后电台整路无声，视频不受影响）
+          _meterActive = false;
+          unawaited(applyAudioFilter(_lastAudioFilter));
+          debugPrint('[OmiVideo] af-metadata 不可用，摘掉电平表，波形退回模拟');
         }
         return;
       }
@@ -371,7 +378,7 @@ class OmiVideoController extends ChangeNotifier {
     final user = (lavfi ?? '').trim();
     final parts = <String>[
       if (user.isNotEmpty) user,
-      if (_audioMeter) 'astats=metadata=1:reset=1:measure_perchannel=none',
+      if (_meterActive) 'astats=metadata=1:reset=1:measure_perchannel=none',
     ];
     try {
       final platform = _player.platform;

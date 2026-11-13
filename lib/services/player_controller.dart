@@ -42,6 +42,7 @@ import 'source_manager.dart';
 import 'web_env.dart';
 import 'web_launch.dart';
 import 'network_monitor.dart';
+import 'exit_guard.dart';
 import 'osd_bus.dart';
 import 'pip.dart';
 
@@ -2117,7 +2118,9 @@ class PlayerController extends ChangeNotifier {
       // 电台：默认不抢 vo（lavfi-complex 出纹理在部分流上会黑屏/不动，
       // 见设置「真波形纹理(实验)」）；电平表始终挂，波形跟真实响度走
       radioSpectrum: channel.isRadio && _settings.spectrumTexture,
-      audioMeter: channel.isRadio,
+      // 电平表默认不挂：实测部分机器（Win10 1607 + 某些声卡）挂上
+      // astats 后电台整路无声，视频不受影响。想听真波形可在设置里开
+      audioMeter: channel.isRadio && _settings.radioMeter,
     );
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
@@ -2761,6 +2764,7 @@ class PlayerController extends ChangeNotifier {
   static const _kAudioPreset = 'settings_audio_preset';
   static const _kAudioEqGains = 'settings_audio_eq_gains';
   static const _kSpectrumTexture = 'settings_spectrum_texture';
+  static const _kRadioMeter = 'settings_radio_meter';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -2802,6 +2806,7 @@ class PlayerController extends ChangeNotifier {
         audioPreset: p.getString(_kAudioPreset) ?? '',
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
         spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
+        radioMeter: p.getBool(_kRadioMeter) ?? false,
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -2841,33 +2846,73 @@ class PlayerController extends ChangeNotifier {
     await _saveSettings();
   }
 
+  /// 退出前的收尾：停掉播放内核、落盘设置。
+  ///
+  /// 退出崩溃的另一半原因是 mpv 的解码/音频线程在引擎 shutdown 期间
+  /// 被连带拆除（flutter_windows.dll 内 0xc0000005）。这里主动释放，
+  /// 让原生资源先安静下来，再由 ExitGuard 结束进程。
+  Future<void> prepareForExit() async {
+    try {
+      await flushSettings();
+    } catch (_) {}
+    // 网页态由播放页负责拆（平台视图随 widget 树销毁），这里只停内核
+    try {
+      await _disposeVideoController();
+    } catch (_) {}
+  }
+
   Future<void> _saveSettings() async {
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setString(_kAudioPreset, _settings.audioPreset);
-      await p.setString(
+      // 只写变化的键：每个 set 在 Windows 上都是一次平台通道 + 整文件
+      // 重写（平台线程 = UI 线程）。一次拨开关把 25 个键全写一遍，在老机器
+      // 上就是一两秒的假死。SharedPreferences 本身有内存缓存，get 是同步
+      // 且便宜的，比较后再写，通常只落 1 个键。
+      Future<void> putBool(String k, bool v) async {
+        if (p.getBool(k) == v) return;
+        await p.setBool(k, v);
+      }
+
+      Future<void> putInt(String k, int v) async {
+        if (p.getInt(k) == v) return;
+        await p.setInt(k, v);
+      }
+
+      Future<void> putDouble(String k, double v) async {
+        if (p.getDouble(k) == v) return;
+        await p.setDouble(k, v);
+      }
+
+      Future<void> putString(String k, String v) async {
+        if (p.getString(k) == v) return;
+        await p.setString(k, v);
+      }
+
+      await putString(_kAudioPreset, _settings.audioPreset);
+      await putString(
           _kAudioEqGains, jsonEncode(_settings.audioEqGains));
-      await p.setBool(_kSpectrumTexture, _settings.spectrumTexture);
-      await p.setBool(_kAutoPlayNext, _settings.autoPlayNext);
-      await p.setDouble(_kSensitivity, _settings.gestureSensitivity);
-      await p.setInt(_kAutoHide, _settings.autoHideDelay);
-      await p.setBool(_kLaunchAtStartup, _settings.launchAtStartup);
-      await p.setBool(_kStartFullscreen, _settings.startFullscreen);
-      await p.setBool(_kShowClock, _settings.showClock);
-      await p.setBool(_kAlwaysOnTop, _settings.alwaysOnTop);
-      await p.setBool(_kDlnaEnabled, _settings.dlnaEnabled);
-      await p.setDouble(_kDefaultVolume, _settings.defaultVolume);
-      await p.setDouble(_kDefaultBrightness, _settings.defaultBrightness);
-      await p.setInt(_kSourceTimeout, _settings.sourceTimeoutSeconds);
-      await p.setInt(_kBufferSeconds, _settings.bufferSeconds);
-      await p.setDouble(_kUiScale, _settings.uiScale);
-      await p.setBool(_kUiScaleAuto, _settings.uiScaleAuto);
-      await p.setBool(_kRemoteAdmin, _settings.remoteAdminEnabled);
-      await p.setBool(_kWebEnabled, _settings.webEnabled);
-      await p.setBool(_kAutoReloadStall, _settings.autoReloadStall);
-      await p.setInt(_kRetryTimes, _settings.retryTimes);
-      await p.setInt(_kCastEndWait, _settings.castEndWaitSeconds);
-      await p.setBool(_kResumeLastChannel, _settings.resumeLastChannel);
+      await putBool(_kSpectrumTexture, _settings.spectrumTexture);
+      await putBool(_kRadioMeter, _settings.radioMeter);
+      await putBool(_kAutoPlayNext, _settings.autoPlayNext);
+      await putDouble(_kSensitivity, _settings.gestureSensitivity);
+      await putInt(_kAutoHide, _settings.autoHideDelay);
+      await putBool(_kLaunchAtStartup, _settings.launchAtStartup);
+      await putBool(_kStartFullscreen, _settings.startFullscreen);
+      await putBool(_kShowClock, _settings.showClock);
+      await putBool(_kAlwaysOnTop, _settings.alwaysOnTop);
+      await putBool(_kDlnaEnabled, _settings.dlnaEnabled);
+      await putDouble(_kDefaultVolume, _settings.defaultVolume);
+      await putDouble(_kDefaultBrightness, _settings.defaultBrightness);
+      await putInt(_kSourceTimeout, _settings.sourceTimeoutSeconds);
+      await putInt(_kBufferSeconds, _settings.bufferSeconds);
+      await putDouble(_kUiScale, _settings.uiScale);
+      await putBool(_kUiScaleAuto, _settings.uiScaleAuto);
+      await putBool(_kRemoteAdmin, _settings.remoteAdminEnabled);
+      await putBool(_kWebEnabled, _settings.webEnabled);
+      await putBool(_kAutoReloadStall, _settings.autoReloadStall);
+      await putInt(_kRetryTimes, _settings.retryTimes);
+      await putInt(_kCastEndWait, _settings.castEndWaitSeconds);
+      await putBool(_kResumeLastChannel, _settings.resumeLastChannel);
     } catch (_) {}
   }
 
@@ -2995,11 +3040,8 @@ class PlayerController extends ChangeNotifier {
     TrayService.onExitFish = () => exitFishMode();
     TrayService.onQuit = () async {
       await flushSettings();
-      try {
-        // 先解除关闭拦截再销毁，否则 destroy 又被拦回 hide
-        await windowManager.setPreventClose(false);
-        await windowManager.destroy();
-      } catch (_) {}
+      // 与标题栏 ✕ 走同一套有序析构（先拆网页控件/内核再结束进程）
+      await ExitGuard.quit();
     };
     unawaited(TrayService.ensure());
   }
@@ -3055,6 +3097,19 @@ class PlayerController extends ChangeNotifier {
 
   /// 真波形纹理（实验）：mpv lavfi-complex → vo 出图
   bool get spectrumTexture => _settings.spectrumTexture;
+
+  /// 电台真实电平波形（实验）：在音频链上挂 astats 取响度。
+  /// 关着时波形按播放态动画，音频链完全不碰
+  bool get radioMeter => _settings.radioMeter;
+
+  Future<void> setRadioMeter(bool on) async {
+    if (_settings.radioMeter == on) return;
+    updateSettings(_settings.copyWith(radioMeter: on));
+    OsdBus.show(
+      on ? '真实电平波形：开（重开当前电台生效）' : '真实电平波形：关（波形改为模拟）',
+      icon: Icons.graphic_eq,
+    );
+  }
 
   Future<void> setSpectrumTexture(bool on) async {
     if (_settings.spectrumTexture == on) return;

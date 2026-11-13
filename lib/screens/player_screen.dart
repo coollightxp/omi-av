@@ -13,6 +13,7 @@ import 'package:window_manager/window_manager.dart';
 import '../core/theme/app_colors.dart';
 import '../core/widgets/standby_shell.dart';
 import '../models/channel.dart';
+import '../services/exit_guard.dart';
 import '../services/osd_bus.dart';
 import '../services/pip.dart';
 import '../services/player_controller.dart';
@@ -200,45 +201,48 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             defaultTargetPlatform == TargetPlatform.macOS)) {
       windowManager.addListener(this);
       windowManager.setPreventClose(true);
+      // main.dart 的全局监听也会收到关窗事件（托盘模式需要它判断隐藏
+      // 还是退出），真正该销毁什么由这里注册的流程负责——两边都走
+      // ExitGuard，避免各自 destroy 抢跑导致退出崩溃
+      ExitGuard.prepare = _prepareExit;
     }
   }
 
   @override
   void onWindowClose() async {
-    final c = _controllerRef;
-    try {
-      if (c != null && c.webPageActive) {
-        c.exitWebPage();
-        // 等一帧让 WebView 平台视图完成原生销毁，规避退出崩溃
-        await Future<void>.delayed(const Duration(milliseconds: 600));
-      }
-      // 释放 WebView2 环境及其宿主子进程，避免退出后残留
-      // WebView2 进程继续解码占用资源（Win10 家庭版报"已停止工作"）
-      try {
-        await webViewEnvironment?.dispose();
-      } catch (_) {}
-      await _windowsFastQuit();
-      await windowManager.setPreventClose(false);
+    // 统一入口：关窗/托盘退出/快捷键都走同一套有序析构。
+    // 这里只做「关窗前该销毁什么」，真正 destroy 由 ExitGuard 收尾
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
       await windowManager.destroy();
-    } catch (_) {
-      try {
-        await webViewEnvironment?.dispose();
-      } catch (_) {}
-      await _windowsFastQuit();
-      await windowManager.setPreventClose(false);
-      await windowManager.destroy();
+      return;
     }
+    await ExitGuard.quit();
   }
 
-  /// Windows：请求 runner 恢复光标/卸载钩子后直接结束进程。
-  /// Windows 10 1607 等老系统上，引擎与插件析构会在 flutter_windows.dll
-  /// 内抛 0xc0000005，事件查看器表现为退出时"omi.exe 已停止工作"。
-  /// 这里在释放 WebView2 之后走快速退出，跳过会崩溃的析构链；runner 若是
-  /// 旧版本没有该指令，等待超时后仍按正常流程关闭窗口。
-  Future<void> _windowsFastQuit() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) return;
-    unawaited(WinHotkeys.quitApp());
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+  /// 有序退出的第一步：先把网页控件拆干净，再让外层销毁窗口。
+  /// 由 [ExitGuard.prepare] 调用，超时 6 秒兜底（WebView2 宿主偶尔不响应）
+  Future<void> _prepareExit() async {
+    final c = _controllerRef;
+    try {
+      if (c != null) {
+        // 网页态：置 false 触发本页重建，_WebChannelOverlay 被移除，
+        // InAppWebView 平台视图在这一帧完成原生销毁
+        if (c.webPageActive) {
+          c.exitWebPage();
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+        }
+        // 落盘设置 + 停掉播放内核（mpv 线程在引擎 shutdown 期间被拆会
+        // 抛 0xc0000005，先自己释放）
+        try {
+          await c.prepareForExit();
+        } catch (_) {}
+      }
+      // 释放 WebView2 环境及其宿主子进程，避免退出后残留进程继续解码
+      try {
+        await webViewEnvironment?.dispose();
+      } catch (_) {}
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    } catch (_) {}
   }
 
   @override
@@ -612,7 +616,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                             ),
                           )
                         : !controller.webPageActive
-                            ? const VideoPlayerWidget()
+                            // 视频单独成层：面板滑入/OSD 淡入只重绘自己那一层，
+                            // 不必带着视频纹理整屏重绘（老显卡上会闪黑一帧）
+                            ? const RepaintBoundary(
+                                child: VideoPlayerWidget())
                             : (!controller.webPageForeground
                                 ? Container(
                                     color: Colors.black,

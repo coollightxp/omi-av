@@ -1862,6 +1862,18 @@ class _PlayerSettingsTab extends StatelessWidget {
               activeColor: Colors.blueAccent,
             ),
             SwitchListTile(
+              secondary: const Icon(Icons.timeline, color: Colors.white70),
+              title: const Text('电台电平驱动波形（实验）',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: const Text(
+                  '默认关：波形按播放状态动画，完全不碰音频链。开启后波形跟着'
+                  '真实响度起伏，但个别机器会出现电台无声（关掉即恢复）',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              value: s.radioMeter,
+              onChanged: (v) => controller.setRadioMeter(v),
+              activeColor: Colors.blueAccent,
+            ),
+            SwitchListTile(
               secondary: const Icon(Icons.skip_next, color: Colors.white70),
               title: const Text('自动播放下一频道',
                   style: TextStyle(color: Colors.white, fontSize: 15)),

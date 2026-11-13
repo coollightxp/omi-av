@@ -95,6 +95,15 @@ class PlayerSettings {
   /// 稳定且不黑屏。绝大多数用户不需要开。
   final bool spectrumTexture;
 
+  /// 电台「真实电平波形」开关（默认关）。
+  ///
+  /// 开着时在 mpv 的 `af` 链上串一条 `astats` 电平表，波形跟着真实响度走；
+  /// 关着时波形按播放态动画，**完全不碰音频链**。
+  /// 2026-11 用户实测：Win10 1607 上挂这条滤镜后电台整路无声（视频不受
+  /// 影响，因为视频不挂滤镜），所以默认关闭；想要真波形的用户可在
+  /// 「在线电台」页签里自行开启，出现无声直接关掉即可。
+  final bool radioMeter;
+
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -121,6 +130,7 @@ class PlayerSettings {
     this.audioPreset = '',
     this.audioEqGains = const <double>[],
     this.spectrumTexture = false,
+    this.radioMeter = false,
   });
 
   PlayerSettings copyWith({
@@ -149,6 +159,7 @@ class PlayerSettings {
     String? audioPreset,
     List<double>? audioEqGains,
     bool? spectrumTexture,
+    bool? radioMeter,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -177,6 +188,7 @@ class PlayerSettings {
       audioPreset: audioPreset ?? this.audioPreset,
       audioEqGains: audioEqGains ?? this.audioEqGains,
       spectrumTexture: spectrumTexture ?? this.spectrumTexture,
+      radioMeter: radioMeter ?? this.radioMeter,
     );
   }
 }
