@@ -29,6 +29,7 @@ import '../widgets/gesture_indicator_overlay.dart';
 import '../widgets/left_channel_drawer.dart';
 import '../widgets/right_epg_panel.dart';
 import '../widgets/settings_panel.dart';
+import '../widgets/sleep_timer_dialog.dart';
 import '../widgets/top_title_bar.dart';
 import '../widgets/video_player_widget.dart';
 
@@ -1053,11 +1054,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             final double panelScale =
                 (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.55, 1.0);
             final options = _exitOptions(c);
-            // 按钮多于 4 个（锁定/小窗/扫码/设置/关机全出现）时加宽卡片，
-            // 避免 FittedBox 把标题和图标整体缩得太小
-            final double cardW =
-                (options.length > 5 ? 500 : (options.length > 4 ? 430 : 340)) *
-                    panelScale;
+            // 宽度按项数算：每格 48 + 间距 16，两侧留 56；
+            // 项齐时（锁定/小窗/扫码/设置/定时/退出/关机）会到 8 格，
+            // 固定档位会挤，改成按数量伸缩再交给 FittedBox 兜底
+            final double need =
+                options.length * 48.0 + (options.length - 1) * 16.0 + 56.0;
+            final double cardW = need.clamp(340.0, 640.0) * panelScale;
             return Dialog(
               // 与设置面板/左右抽屉同一套表面色与描边
               backgroundColor: AppColors.overlay,
@@ -1136,11 +1138,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         c.toggleLock();
         break;
       case 'mini':
-        // 桌面端窗口置顶缩小；移动端系统画中画（PiP）
+        // 桌面端窗口置顶缩小；移动端视频走系统画中画（PiP）。
+        // 电台没有画面，画中画只是一张静止封面（用户实测「停在那儿」）
+        // → 直接退到后台，音频继续，控制交给通知栏/锁屏卡片
         if (c.isDesktop) {
           c.toggleMiniWindow();
         } else if (!kIsWeb) {
-          await _enterPip();
+          final radio = c.currentChannel?.isRadio ?? false;
+          if (radio) {
+            final ok = await moveToBackground();
+            if (mounted) {
+              _showOsd(ok ? '已退到后台继续播放' : '当前系统不支持后台播放',
+                  icon: ok ? Icons.headphones : Icons.info_outline);
+            }
+          } else {
+            await _enterPip();
+          }
         }
         break;
       case 'remoteAdmin':
@@ -1149,12 +1162,26 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'settings':
         _toggleSettings();
         break;
+      case 'sleep':
+        // 已设过就报剩余，没设就报玩法；弹窗与底部面板/设置面板同一套
+        await showSleepTimerDialog(context);
+        break;
       case 'shutdown':
         // 不直接执行 shutdown：先弹应用内关机卡片（60 秒倒计时，
         // 默认聚焦「取消」），确认后才关机（对标 OMTV）
         await _showShutdownDialog();
         break;
     }
+  }
+
+  /// 退出卡片上的定时关闭标签：未设定显示「定时关闭」，已设定显示剩余
+  /// （方块固定 48px，选中时才显示文字，必须够短）
+  static String _sleepLabel(PlayerController c) {
+    final r = c.sleepRemain;
+    if (r == null) return '定时关闭';
+    final h = r.inHours;
+    final m = r.inMinutes % 60;
+    return h > 0 ? '$h:${m.toString().padLeft(2, '0')}' : '$m 分';
   }
 
   /// 退出框是否提供「关闭系统」：仅 Windows/Linux 原生（Web/安卓/iOS/macOS 不显示）
@@ -1165,18 +1192,29 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 退出框按钮列表（顺序即遥控器 ←/→ 的移动顺序）。
   /// 「锁定/小窗/扫码/设置」统一收在这里，底部信息栏只保留播放相关按钮
-  List<_ExitOption> _exitOptions(PlayerController c) => <_ExitOption>[
+  List<_ExitOption> _exitOptions(PlayerController c) {
+    // 电台没有画面：移动端进画中画只会显示一张静止封面（用户实测
+    // 「电台小窗停在那儿」），应当直接退后台，音频交给通知栏卡片控制。
+    // 桌面端的小窗是缩窗口置顶而不是画中画，仍按「小窗/恢复窗口」。
+    final radio = c.currentChannel?.isRadio ?? false;
+    return <_ExitOption>[
         const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
         if (!c.locked)
           const _ExitOption(
               Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
         // 小窗播放：桌面端窗口置顶缩小；移动端系统画中画（Web 端不支持，不显示）
-        if (!kIsWeb)
+        if (!kIsWeb && c.isDesktop)
           _ExitOption(
               c.miniWindow
                   ? Icons.fullscreen
                   : Icons.picture_in_picture_alt,
               c.miniWindow ? '恢复窗口' : '小窗播放',
+              Colors.greenAccent,
+              'mini'),
+        if (!kIsWeb && !c.isDesktop)
+          _ExitOption(
+              radio ? Icons.headphones : Icons.picture_in_picture_alt,
+              radio ? '后台播放' : '小窗播放',
               Colors.greenAccent,
               'mini'),
         // Web 扫码管理：局域网管理服务未启动（地址为空）时不显示
@@ -1185,6 +1223,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
               Icons.qr_code_2, '扫码管理', Colors.lightBlueAccent,
               'remoteAdmin'),
         const _ExitOption(Icons.settings, '设置', Colors.tealAccent, 'settings'),
+        // 定时关闭：属于「退出」这一类（到点暂停/退程序/关机），
+        // 放在退出卡片里对全场景生效——看视频和听电台都走同一条链路，
+        // 跟当前播的是什么无关
+        _ExitOption(
+          c.sleepRemain == null ? Icons.bedtime_outlined : Icons.bedtime,
+          _sleepLabel(c),
+          Colors.deepPurpleAccent,
+          'sleep',
+        ),
         const _ExitOption(Icons.logout, '退出', Colors.redAccent, 'exit'),
         // 关闭系统仅 Windows/Linux 原生显示
         if (_canShutdownSystem)
@@ -1192,6 +1239,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
               Icons.power_settings_new, '关机', Colors.orangeAccent,
               'shutdown'),
       ];
+  }
 
   /// 退出框按钮数（锁定项随锁定状态消失，关机仅桌面端显示）
   int get _exitOptionCount =>
