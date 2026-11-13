@@ -89,6 +89,7 @@ class SourceManager {
     _currentPlaylistId = prefs.getString(_currentPlaylistKey);
     _builtinRemoved = prefs.getBool(_builtinRemovedKey) == true;
     await _ensureBuiltinRadio(prefs);
+    await _ensureBuiltinCctv(prefs);
     // 我的电台：库里有台就保证源列表里有对应条目
     await RadioLibrary.load();
     await ensureRadioLibrarySource();
@@ -120,12 +121,159 @@ class SourceManager {
     await _savePlaylists();
   }
 
+  /// 内置央视频道：规则同上，独立删除标记（删电台不影响央视，反之亦然）
+  Future<void> _ensureBuiltinCctv(SharedPreferences prefs) async {
+    if (prefs.getBool(_kBuiltinCctvRemovedKey) == true) return;
+    if (_playlists.any((p) => p.id == PlaylistSource.builtinCctvId)) return;
+    final builtin = PlaylistSource(
+      id: PlaylistSource.builtinCctvId,
+      name: PlaylistSource.builtinCctvName,
+      url: PlaylistSource.builtinCctvAsset,
+      type: PlaylistSourceType.builtin,
+      format: PlaylistFormat.m3u,
+      addedAt: _builtinEpoch,
+    );
+    // 插在电台条目之后，两者都靠前（出厂源不该埋在用户源后面）
+    final idx = _playlists.indexWhere(
+      (p) => p.id == PlaylistSource.builtinRadioId,
+    );
+    _playlists.insert(idx >= 0 ? idx + 1 : 0, builtin);
+    await _savePlaylists();
+    // 全新安装（没有任何当前源）：默认落到央视频道。电视是主场景，
+    // 让用户开箱就能看到台，而不是先对着一个空列表找源
+    if (_currentPlaylistId == null) {
+      _currentPlaylistId = PlaylistSource.builtinCctvId;
+      await prefs.setString(_currentPlaylistKey, _currentPlaylistId!);
+    }
+  }
+
   /// 恢复被删除的内置源（设置页「恢复内置电台」）
   Future<void> restoreBuiltinRadio() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_builtinRemovedKey, false);
     _builtinRemoved = false;
     await _ensureBuiltinRadio(prefs);
+  }
+
+  /// 恢复被删除的内置央视频道
+  Future<void> restoreBuiltinCctv() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kBuiltinCctvRemovedKey, false);
+    await _ensureBuiltinCctv(prefs);
+  }
+
+  /// 读内置源字节：电台直接读 asset；央视频道优先用远程更新过的缓存
+  Future<List<int>> _loadBuiltinBytes(PlaylistSource source) async {
+    if (source.id == PlaylistSource.builtinCctvId) {
+      final prefs = await SharedPreferences.getInstance();
+      final cached = prefs.getString(_kBuiltinCctvCache);
+      if (cached != null && cached.trim().isNotEmpty) {
+        return utf8.encode(cached);
+      }
+      final data = await rootBundle.load(PlaylistSource.builtinCctvAsset);
+      return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    }
+    final data = await rootBundle.load(PlaylistSource.builtinRadioAsset);
+    return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+  }
+
+  // ==================== 内置央视频道：定期更新 ====================
+  // 网页型频道列表的"地址"本身长期有效（页面 URL 不随 CDN 签名变），
+  // 会变的是**有没有这个台、pid 有没有换**。所以清单做成可远程更新：
+  // 出厂 asset 兜底 → 到期后台拉远程 m3u → 存本地缓存 → 下次启动生效。
+  static const _kBuiltinCctvCache = 'builtin_cctv_cache';
+  static const _kBuiltinCctvAt = 'builtin_cctv_fetched_at';
+  static const _kBuiltinCctvInterval = 'builtin_cctv_interval_days';
+  static const _kBuiltinCctvRemovedKey = 'omi_builtin_cctv_removed';
+
+  /// 清单镜像：GitHub raw 为主，jsDelivr 兜底（国内可达性更好）
+  static const List<String> builtinCctvMirrors = <String>[
+    'https://raw.githubusercontent.com/coollightxp/omi-av/main/assets/cctv/cctv_live.m3u',
+    'https://cdn.jsdelivr.net/gh/coollightxp/omi-av@main/assets/cctv/cctv_live.m3u',
+  ];
+
+  /// 更新间隔（天）：0 = 关闭自动检查；默认 7 天
+  Future<int> getBuiltinCctvIntervalDays() async {
+    final p = await SharedPreferences.getInstance();
+    return p.getInt(_kBuiltinCctvInterval) ?? 7;
+  }
+
+  Future<void> setBuiltinCctvIntervalDays(int days) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(_kBuiltinCctvInterval, days.clamp(0, 365));
+  }
+
+  Future<DateTime?> getBuiltinCctvFetchedAt() async {
+    final p = await SharedPreferences.getInstance();
+    final ms = p.getInt(_kBuiltinCctvAt);
+    return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
+  }
+
+  /// 当前生效清单的频道数（缓存优先，否则数 asset）
+  Future<int> builtinCctvChannelCount() async {
+    final p = await SharedPreferences.getInstance();
+    final cached = p.getString(_kBuiltinCctvCache);
+    final text = cached ??
+        await rootBundle.loadString(PlaylistSource.builtinCctvAsset);
+    return text
+        .split('\n')
+        .where((l) => l.trimLeft().startsWith('#EXTINF'))
+        .length;
+  }
+
+  /// 到期就后台拉一次（启动时调，失败静默）
+  Future<void> maybeAutoUpdateBuiltinCctv() async {
+    final days = await getBuiltinCctvIntervalDays();
+    if (days <= 0) return;
+    final at = await getBuiltinCctvFetchedAt();
+    if (at != null &&
+        DateTime.now().difference(at).inDays < days) {
+      return;
+    }
+    await updateBuiltinCctv();
+  }
+
+  /// 拉取远程清单并落缓存。返回 (成功?, 说明)。
+  /// 校验三条，避免把一个坏文件覆盖掉能用的清单：
+  /// ① 含 #EXTINF ② 至少 10 条 ③ 链接多数是 webview:// 或 http(s)
+  Future<(bool, String)> updateBuiltinCctv({bool force = false}) async {
+    for (final url in builtinCctvMirrors) {
+      try {
+        final resp = await http.get(
+          Uri.parse(url),
+          headers: {'User-Agent': _uaBox, 'Accept': '*/*'},
+        ).timeout(const Duration(seconds: 25));
+        if (resp.statusCode != 200) continue;
+        final text = utf8.decode(resp.bodyBytes, allowMalformed: true);
+        final count = text
+            .split('\n')
+            .where((l) => l.trimLeft().startsWith('#EXTINF'))
+            .length;
+        final links = text
+            .split('\n')
+            .map((l) => l.trim())
+            .where((l) => l.isNotEmpty && !l.startsWith('#'))
+            .toList();
+        final good = links.where((l) =>
+            l.toLowerCase().startsWith('webview://') ||
+            l.toLowerCase().startsWith('http')).length;
+        if (count < 10 || good < count * 0.8) continue;
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_kBuiltinCctvCache, text);
+        await prefs.setInt(
+            _kBuiltinCctvAt, DateTime.now().millisecondsSinceEpoch);
+        // 正在用这个源：立刻重建频道缓存，用户不用手动刷新
+        if (_currentPlaylistId == PlaylistSource.builtinCctvId) {
+          _channelsLoaded = false;
+          unawaited(loadChannels());
+        }
+        return (true, '已更新到 $count 个频道');
+      } catch (_) {
+        // 换下一个镜像
+      }
+    }
+    return (false, '拉取失败（网络不通或清单未发布），继续用本地清单');
   }
 
   /// 确保「我的电台」源存在（在网上目录加了第一个台时调用）
@@ -194,11 +342,15 @@ class SourceManager {
       _channelsLoaded = false;
     }
     await _savePlaylists();
-    // 内置源删掉后打标记，下次启动不再自动补回
+    // 内置源删掉后打标记，下次启动不再自动补回（两个内置源各自独立）
     if (wasBuiltin) {
-      _builtinRemoved = true;
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_builtinRemovedKey, true);
+      if (id == PlaylistSource.builtinCctvId) {
+        await prefs.setBool(_kBuiltinCctvRemovedKey, true);
+      } else {
+        _builtinRemoved = true;
+        await prefs.setBool(_builtinRemovedKey, true);
+      }
     }
   }
 
@@ -244,11 +396,7 @@ class SourceManager {
       }
       final List<int> bytes;
       if (source.type == PlaylistSourceType.builtin) {
-        // 出厂内置源随安装包发布，从 asset 读，不走网络
-        final data =
-            await rootBundle.load(PlaylistSource.builtinRadioAsset);
-        bytes = data.buffer
-            .asUint8List(data.offsetInBytes, data.lengthInBytes);
+        bytes = await _loadBuiltinBytes(source);
       } else if (source.type == PlaylistSourceType.local) {
         bytes = await File(source.url).readAsBytes();
       } else {
@@ -262,8 +410,9 @@ class SourceManager {
           await _resolveContent(content, source.url, 2, {source.url});
       // 内置电台精选整份都是电台流：按地址/分组猜类型会漏判（音频 HLS
       // 的 m3u8 会落到 tv），必须整体强制 radio——否则这 60 个台会漏进
-      // 电视域，左侧两个标签看到一模一样的列表
-      if (source.type == PlaylistSourceType.builtin) {
+      // 电视域，左侧两个标签看到一模一样的列表。
+      // 内置央视频道相反：全是 webview 网页频道，按正常判定即可
+      if (source.id == PlaylistSource.builtinRadioId) {
         cats = [
           for (final c in cats)
             c.copyWith(

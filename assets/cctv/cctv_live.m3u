@@ -1,0 +1,176 @@
+#EXTM3U
+# Omi 内置央视频道（央视网 tv.cctv.com + 央视频 yangshipin.cn 免费直播页）
+# 全部为 webview:// 网页频道：由内置 WebView 打开官方直播页，不解析流地址，
+# 因此不会因 CDN 签名过期而失效；站点改版时用设置页「检查更新」拉新清单。
+# 清单生成时间 2026-11-04，来源：用户抓取校对
+
+# 央视网 + 央视频 免费直播频道页面链接合集 生成时间 2026-11-04
+# ========== 央视网 tv.cctv.com 直播页 ==========
+#EXTINF:-1 tvg-id="cctv1" group-title="央视网-央视频道",CCTV-1 综合
+webview://tv.cctv.com/live/cctv1/
+#EXTINF:-1 tvg-id="cctv2" group-title="央视网-央视频道",CCTV-2 财经
+webview://tv.cctv.com/live/cctv2/
+#EXTINF:-1 tvg-id="cctv3" group-title="央视网-央视频道",CCTV-3 综艺
+webview://tv.cctv.com/live/cctv3/
+#EXTINF:-1 tvg-id="cctv4" group-title="央视网-央视频道",CCTV-4 中文国际(亚)
+webview://tv.cctv.com/live/cctv4/
+#EXTINF:-1 tvg-id="cctv5" group-title="央视网-央视频道",CCTV-5 体育
+webview://tv.cctv.com/live/cctv5/
+#EXTINF:-1 tvg-id="cctv5plus" group-title="央视网-央视频道",CCTV-5+ 体育赛事
+webview://tv.cctv.com/live/cctv5plus/
+#EXTINF:-1 tvg-id="cctv6" group-title="央视网-央视频道",CCTV-6 电影
+webview://tv.cctv.com/live/cctv6/
+#EXTINF:-1 tvg-id="cctv7" group-title="央视网-央视频道",CCTV-7 国防军事
+webview://tv.cctv.com/live/cctv7/
+#EXTINF:-1 tvg-id="cctv8" group-title="央视网-央视频道",CCTV-8 电视剧
+webview://tv.cctv.com/live/cctv8/
+#EXTINF:-1 tvg-id="cctv9" group-title="央视网-央视频道",CCTV-9 纪录
+webview://tv.cctv.com/live/cctv9/
+#EXTINF:-1 tvg-id="cctv10" group-title="央视网-央视频道",CCTV-10 科教
+webview://tv.cctv.com/live/cctv10/
+#EXTINF:-1 tvg-id="cctv11" group-title="央视网-央视频道",CCTV-11 戏曲
+webview://tv.cctv.com/live/cctv11/
+#EXTINF:-1 tvg-id="cctv12" group-title="央视网-央视频道",CCTV-12 社会与法
+webview://tv.cctv.com/live/cctv12/
+#EXTINF:-1 tvg-id="cctv13" group-title="央视网-央视频道",CCTV-13 新闻
+webview://tv.cctv.com/live/cctv13/
+#EXTINF:-1 tvg-id="cctv14" group-title="央视网-央视频道",CCTV-14 少儿
+webview://tv.cctv.com/live/cctv14/
+#EXTINF:-1 tvg-id="cctv15" group-title="央视网-央视频道",CCTV-15 音乐
+webview://tv.cctv.com/live/cctv15/
+#EXTINF:-1 tvg-id="cctv16" group-title="央视网-央视频道",CCTV-16 奥林匹克
+webview://tv.cctv.com/live/cctv16/
+#EXTINF:-1 tvg-id="cctv17" group-title="央视网-央视频道",CCTV-17 农业农村
+webview://tv.cctv.com/live/cctv17/
+#EXTINF:-1 tvg-id="cctveurope" group-title="央视网-央视频道",CCTV-4 中文国际(欧)
+webview://tv.cctv.com/live/cctveurope/
+#EXTINF:-1 tvg-id="cctvamerica" group-title="央视网-央视频道",CCTV-4 中文国际(美)
+webview://tv.cctv.com/live/cctvamerica/
+# ========== 央视频 yangshipin.cn 直播页（免费/限免） ==========
+#EXTINF:-1 tvg-id="ysp-600001859" group-title="央视频-央视频道",CCTV1
+webview://www.yangshipin.cn/tv/home?pid=600001859
+#EXTINF:-1 tvg-id="ysp-600001800" group-title="央视频-央视频道",CCTV2
+webview://www.yangshipin.cn/tv/home?pid=600001800
+#EXTINF:-1 tvg-id="ysp-600001801" group-title="央视频-央视频道",CCTV3
+webview://www.yangshipin.cn/tv/home?pid=600001801
+#EXTINF:-1 tvg-id="ysp-600001814" group-title="央视频-央视频道",CCTV4
+webview://www.yangshipin.cn/tv/home?pid=600001814
+#EXTINF:-1 tvg-id="ysp-600001818" group-title="央视频-央视频道",CCTV5
+webview://www.yangshipin.cn/tv/home?pid=600001818
+#EXTINF:-1 tvg-id="ysp-600001817" group-title="央视频-央视频道",CCTV5+
+webview://www.yangshipin.cn/tv/home?pid=600001817
+#EXTINF:-1 tvg-id="ysp-600108442" group-title="央视频-央视频道",CCTV6
+webview://www.yangshipin.cn/tv/home?pid=600108442
+#EXTINF:-1 tvg-id="ysp-600004092" group-title="央视频-央视频道",CCTV7
+webview://www.yangshipin.cn/tv/home?pid=600004092
+#EXTINF:-1 tvg-id="ysp-600001803" group-title="央视频-央视频道",CCTV8
+webview://www.yangshipin.cn/tv/home?pid=600001803
+#EXTINF:-1 tvg-id="ysp-600004078" group-title="央视频-央视频道",CCTV9
+webview://www.yangshipin.cn/tv/home?pid=600004078
+#EXTINF:-1 tvg-id="ysp-600001805" group-title="央视频-央视频道",CCTV10
+webview://www.yangshipin.cn/tv/home?pid=600001805
+#EXTINF:-1 tvg-id="ysp-600001806" group-title="央视频-央视频道",CCTV11
+webview://www.yangshipin.cn/tv/home?pid=600001806
+#EXTINF:-1 tvg-id="ysp-600001807" group-title="央视频-央视频道",CCTV12
+webview://www.yangshipin.cn/tv/home?pid=600001807
+#EXTINF:-1 tvg-id="ysp-600001811" group-title="央视频-央视频道",CCTV13
+webview://www.yangshipin.cn/tv/home?pid=600001811
+#EXTINF:-1 tvg-id="ysp-600001809" group-title="央视频-央视频道",CCTV14
+webview://www.yangshipin.cn/tv/home?pid=600001809
+#EXTINF:-1 tvg-id="ysp-600001815" group-title="央视频-央视频道",CCTV15
+webview://www.yangshipin.cn/tv/home?pid=600001815
+#EXTINF:-1 tvg-id="ysp-600098637" group-title="央视频-央视频道",CCTV16-HD
+webview://www.yangshipin.cn/tv/home?pid=600098637
+#EXTINF:-1 tvg-id="ysp-600099502" group-title="央视频-央视频道",CCTV16(4K)
+webview://www.yangshipin.cn/tv/home?pid=600099502
+#EXTINF:-1 tvg-id="ysp-600001810" group-title="央视频-央视频道",CCTV17
+webview://www.yangshipin.cn/tv/home?pid=600001810
+#EXTINF:-1 tvg-id="ysp-600002264" group-title="央视频-央视频道",CCTV4K
+webview://www.yangshipin.cn/tv/home?pid=600002264
+#EXTINF:-1 tvg-id="ysp-600156816" group-title="央视频-央视频道",CCTV8K
+webview://www.yangshipin.cn/tv/home?pid=600156816
+#EXTINF:-1 tvg-id="ysp-600014550" group-title="央视频-央视频道",CGTN
+webview://www.yangshipin.cn/tv/home?pid=600014550
+#EXTINF:-1 tvg-id="ysp-600084704" group-title="央视频-央视频道",CGTN法语频道
+webview://www.yangshipin.cn/tv/home?pid=600084704
+#EXTINF:-1 tvg-id="ysp-600084758" group-title="央视频-央视频道",CGTN俄语频道
+webview://www.yangshipin.cn/tv/home?pid=600084758
+#EXTINF:-1 tvg-id="ysp-600084782" group-title="央视频-央视频道",CGTN阿拉伯语频道
+webview://www.yangshipin.cn/tv/home?pid=600084782
+#EXTINF:-1 tvg-id="ysp-600084744" group-title="央视频-央视频道",CGTN西班牙语频道
+webview://www.yangshipin.cn/tv/home?pid=600084744
+#EXTINF:-1 tvg-id="ysp-600084781" group-title="央视频-央视频道",CGTN外语纪录频道
+webview://www.yangshipin.cn/tv/home?pid=600084781
+#EXTINF:-1 tvg-id="ysp-600099658" group-title="央视频-央视频道",CCTV风云剧场频道(限免)
+webview://www.yangshipin.cn/tv/home?pid=600099658
+#EXTINF:-1 tvg-id="ysp-600099655" group-title="央视频-央视频道",CCTV第一剧场频道(限免)
+webview://www.yangshipin.cn/tv/home?pid=600099655
+#EXTINF:-1 tvg-id="ysp-600099620" group-title="央视频-央视频道",CCTV怀旧剧场频道(限免)
+webview://www.yangshipin.cn/tv/home?pid=600099620
+# ========== 央视频 卫视频道 ==========
+#EXTINF:-1 tvg-id="ysp-sat-600002309" group-title="央视频-卫视频道",北京卫视
+webview://www.yangshipin.cn/tv/home?pid=600002309
+#EXTINF:-1 tvg-id="ysp-sat-600002521" group-title="央视频-卫视频道",江苏卫视
+webview://www.yangshipin.cn/tv/home?pid=600002521
+#EXTINF:-1 tvg-id="ysp-sat-600002483" group-title="央视频-卫视频道",东方卫视
+webview://www.yangshipin.cn/tv/home?pid=600002483
+#EXTINF:-1 tvg-id="ysp-sat-600002520" group-title="央视频-卫视频道",浙江卫视
+webview://www.yangshipin.cn/tv/home?pid=600002520
+#EXTINF:-1 tvg-id="ysp-sat-600002475" group-title="央视频-卫视频道",湖南卫视
+webview://www.yangshipin.cn/tv/home?pid=600002475
+#EXTINF:-1 tvg-id="ysp-sat-600002508" group-title="央视频-卫视频道",湖北卫视
+webview://www.yangshipin.cn/tv/home?pid=600002508
+#EXTINF:-1 tvg-id="ysp-sat-600002485" group-title="央视频-卫视频道",广东卫视
+webview://www.yangshipin.cn/tv/home?pid=600002485
+#EXTINF:-1 tvg-id="ysp-sat-600002509" group-title="央视频-卫视频道",广西卫视
+webview://www.yangshipin.cn/tv/home?pid=600002509
+#EXTINF:-1 tvg-id="ysp-sat-600002498" group-title="央视频-卫视频道",黑龙江卫视
+webview://www.yangshipin.cn/tv/home?pid=600002498
+#EXTINF:-1 tvg-id="ysp-sat-600002506" group-title="央视频-卫视频道",海南卫视
+webview://www.yangshipin.cn/tv/home?pid=600002506
+#EXTINF:-1 tvg-id="ysp-sat-600002531" group-title="央视频-卫视频道",重庆卫视
+webview://www.yangshipin.cn/tv/home?pid=600002531
+#EXTINF:-1 tvg-id="ysp-sat-600002481" group-title="央视频-卫视频道",深圳卫视
+webview://www.yangshipin.cn/tv/home?pid=600002481
+#EXTINF:-1 tvg-id="ysp-sat-600002516" group-title="央视频-卫视频道",四川卫视
+webview://www.yangshipin.cn/tv/home?pid=600002516
+#EXTINF:-1 tvg-id="ysp-sat-600002525" group-title="央视频-卫视频道",河南卫视
+webview://www.yangshipin.cn/tv/home?pid=600002525
+#EXTINF:-1 tvg-id="ysp-sat-600002484" group-title="央视频-卫视频道",福建东南卫视
+webview://www.yangshipin.cn/tv/home?pid=600002484
+#EXTINF:-1 tvg-id="ysp-sat-600002490" group-title="央视频-卫视频道",贵州卫视
+webview://www.yangshipin.cn/tv/home?pid=600002490
+#EXTINF:-1 tvg-id="ysp-sat-600002503" group-title="央视频-卫视频道",江西卫视
+webview://www.yangshipin.cn/tv/home?pid=600002503
+#EXTINF:-1 tvg-id="ysp-sat-600002505" group-title="央视频-卫视频道",辽宁卫视
+webview://www.yangshipin.cn/tv/home?pid=600002505
+#EXTINF:-1 tvg-id="ysp-sat-600002532" group-title="央视频-卫视频道",安徽卫视
+webview://www.yangshipin.cn/tv/home?pid=600002532
+#EXTINF:-1 tvg-id="ysp-sat-600002493" group-title="央视频-卫视频道",河北卫视
+webview://www.yangshipin.cn/tv/home?pid=600002493
+#EXTINF:-1 tvg-id="ysp-sat-600002513" group-title="央视频-卫视频道",山东卫视
+webview://www.yangshipin.cn/tv/home?pid=600002513
+#EXTINF:-1 tvg-id="ysp-sat-600152137" group-title="央视频-卫视频道",天津卫视
+webview://www.yangshipin.cn/tv/home?pid=600152137
+#EXTINF:-1 tvg-id="ysp-sat-600190405" group-title="央视频-卫视频道",吉林卫视
+webview://www.yangshipin.cn/tv/home?pid=600190405
+#EXTINF:-1 tvg-id="ysp-sat-600190400" group-title="央视频-卫视频道",陕西卫视
+webview://www.yangshipin.cn/tv/home?pid=600190400
+#EXTINF:-1 tvg-id="ysp-sat-600190408" group-title="央视频-卫视频道",甘肃卫视
+webview://www.yangshipin.cn/tv/home?pid=600190408
+#EXTINF:-1 tvg-id="ysp-sat-600190737" group-title="央视频-卫视频道",宁夏卫视
+webview://www.yangshipin.cn/tv/home?pid=600190737
+#EXTINF:-1 tvg-id="ysp-sat-600190401" group-title="央视频-卫视频道",内蒙古卫视
+webview://www.yangshipin.cn/tv/home?pid=600190401
+#EXTINF:-1 tvg-id="ysp-sat-600190402" group-title="央视频-卫视频道",云南卫视
+webview://www.yangshipin.cn/tv/home?pid=600190402
+#EXTINF:-1 tvg-id="ysp-sat-600190407" group-title="央视频-卫视频道",山西卫视
+webview://www.yangshipin.cn/tv/home?pid=600190407
+#EXTINF:-1 tvg-id="ysp-sat-600190406" group-title="央视频-卫视频道",青海卫视
+webview://www.yangshipin.cn/tv/home?pid=600190406
+#EXTINF:-1 tvg-id="ysp-sat-600190403" group-title="央视频-卫视频道",西藏卫视
+webview://www.yangshipin.cn/tv/home?pid=600190403
+#EXTINF:-1 tvg-id="ysp-sat-600171827" group-title="央视频-卫视频道",中国教育电视台1频道
+webview://www.yangshipin.cn/tv/home?pid=600171827
+#EXTINF:-1 tvg-id="ysp-sat-600152138" group-title="央视频-卫视频道",新疆卫视
+webview://www.yangshipin.cn/tv/home?pid=600152138

@@ -99,5 +99,7 @@ flutter:
     - assets/logos/
     # 出厂内置电台精选（电视伴音 / 央广 / 省市台 / 音乐 / 故事）
     - assets/radio/
+    # 出厂内置央视频道（央视网 + 央视频 免费直播页，webview:// 形式）
+    - assets/cctv/
     # Windows 系统托盘图标（后台播放/摸鱼模式）
     - assets/tray/

@@ -361,6 +361,16 @@ class PlayerController extends ChangeNotifier {
     unawaited(bindTrayHandlers());
     _boot('正在加载节目源…');
     await sourceManager.loadFromPrefs();
+    // 内置央视频道清单：到期（默认 7 天）后台拉一次远程 m3u。
+    // 延迟 20 秒避开启动最忙的时段，失败静默用本地清单
+    Timer(const Duration(seconds: 20), () {
+      unawaited(sourceManager.maybeAutoUpdateBuiltinCctv().then((_) {
+        if (sourceManager.currentPlaylistId ==
+            PlaylistSource.builtinCctvId) {
+          unawaited(refreshChannels());
+        }
+      }));
+    });
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
     // 不 await：台标只是锦上添花，绝不能拖慢启动
     unawaited(RadioLogo.ensure());

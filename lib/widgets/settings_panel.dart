@@ -883,7 +883,9 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                 return _SourceRow(
                   // 内置源在标题上带「内置」后缀，副标题说明内容范围，
                   // 让用户一眼看出这不是自己加的、删了还能恢复
-                  title: p.isBuiltin ? '${p.name} · 内置' : p.name,
+                  title: p.isBuiltin && !p.name.contains('内置')
+                      ? '${p.name} · 内置'
+                      : p.name,
                   subtitle: p.url,
                   icon: p.type == PlaylistSourceType.url
                       ? Icons.cloud
@@ -913,6 +915,8 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   ],
                 );
               }),
+            const Divider(height: 24, color: Colors.white12),
+            const _BuiltinCctvSection(),
           ],
         );
       },
@@ -3404,6 +3408,168 @@ class _BlacklistDialogState extends State<_BlacklistDialog> {
           child: const Text('关闭'),
         ),
       ],
+    );
+  }
+}
+
+/// 内置央视频道 · 更新区（直播源页底部）
+///
+/// 网页型频道（webview://）的页面地址长期有效，会变的是「有哪些台」。
+/// 所以清单支持远程更新：出厂 asset 兜底 → 到期后台拉远程 m3u →
+/// 存本地缓存。这里只做展示与手动触发，真正的定时在启动时跑。
+class _BuiltinCctvSection extends StatefulWidget {
+  const _BuiltinCctvSection();
+
+  @override
+  State<_BuiltinCctvSection> createState() => _BuiltinCctvSectionState();
+}
+
+class _BuiltinCctvSectionState extends State<_BuiltinCctvSection> {
+  int _days = 7;
+  DateTime? _at;
+  int _count = 0;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final c = context.read<PlayerController>();
+    final sm = c.sourceManager;
+    final days = await sm.getBuiltinCctvIntervalDays();
+    final at = await sm.getBuiltinCctvFetchedAt();
+    final count = await sm.builtinCctvChannelCount();
+    if (!mounted) return;
+    setState(() {
+      _days = days;
+      _at = at;
+      _count = count;
+    });
+  }
+
+  String get _atText {
+    final at = _at;
+    if (at == null) return '从未更新（当前用出厂清单）';
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${at.year}-${two(at.month)}-${two(at.day)} '
+        '${two(at.hour)}:${two(at.minute)}';
+  }
+
+  Future<void> _update() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final c = context.read<PlayerController>();
+    final (ok, msg) = await c.sourceManager.updateBuiltinCctv(force: true);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    await _load();
+    OsdBus.show(msg, icon: ok ? Icons.check_circle : Icons.error_outline);
+    if (ok) {
+      // 正在用这个源就把列表刷新掉
+      if (c.sourceManager.currentPlaylistId ==
+          PlaylistSource.builtinCctvId) {
+        await c.refreshChannels();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.watch<PlayerController>();
+    final hasSource = c.sourceManager.playlists
+        .any((p) => p.id == PlaylistSource.builtinCctvId);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.live_tv, size: 16, color: Colors.white60),
+              const SizedBox(width: 8),
+              const Text('内置央视频道',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600)),
+              const Spacer(),
+              Text('$_count 个台',
+                  style: const TextStyle(
+                      color: Colors.white38, fontSize: 12)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '央视网 + 央视频免费直播页，走内置网页播放，不解析流地址，'
+            '不会因签名过期失效；站点改版或新增频道时更新清单即可。',
+            style: TextStyle(color: Colors.white38, fontSize: 11.5, height: 1.5),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const Text('清单更新时间：',
+                  style: TextStyle(color: Colors.white54, fontSize: 12.5)),
+              Text(_atText,
+                  style: const TextStyle(
+                      color: Colors.white70, fontSize: 12.5)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const Text('自动检查：',
+                  style: TextStyle(color: Colors.white54, fontSize: 12.5)),
+              const SizedBox(width: 6),
+              DropdownButton<int>(
+                value: _days,
+                dropdownColor: const Color(0xFF1B1D22),
+                underline: const SizedBox.shrink(),
+                style: const TextStyle(color: Colors.white, fontSize: 12.5),
+                items: const [
+                  DropdownMenuItem(value: 0, child: Text('关闭')),
+                  DropdownMenuItem(value: 7, child: Text('每周')),
+                  DropdownMenuItem(value: 30, child: Text('每月')),
+                ],
+                onChanged: (v) async {
+                  if (v == null) return;
+                  await c.sourceManager.setBuiltinCctvIntervalDays(v);
+                  if (!mounted) return;
+                  setState(() => _days = v);
+                },
+              ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: _busy ? null : _update,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 13,
+                        height: 13,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.sync, size: 16),
+                label: Text(_busy ? '检查中…' : '立即检查更新',
+                    style: const TextStyle(fontSize: 12.5)),
+              ),
+            ],
+          ),
+          if (!hasSource)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () async {
+                  await c.sourceManager.restoreBuiltinCctv();
+                  if (!mounted) return;
+                  await _load();
+                },
+                icon: const Icon(Icons.restore, size: 16),
+                label: const Text('恢复「内置央视频道」源',
+                    style: TextStyle(fontSize: 12.5)),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

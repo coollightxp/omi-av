@@ -44,6 +44,12 @@ class PlaylistSource {
   static const String builtinRadioId = 'omi-builtin-radio';
   static const String builtinRadioAsset = 'assets/radio/omi_radio.m3u';
 
+  /// 内置央视频道（央视网 + 央视频 免费直播页，webview:// 网页频道）。
+  /// 与电台同理：id 固定、随包发布、可停用可删除可恢复。
+  static const String builtinCctvId = 'omi-builtin-cctv';
+  static const String builtinCctvAsset = 'assets/cctv/cctv_live.m3u';
+  static const String builtinCctvName = '内置央视频道';
+
   /// 「我的电台」：内容来自 RadioLibrary（prefs），不落文件
   static const String radioLibraryId = 'omi-radio-library';
 
