@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -19,7 +20,8 @@ import 'omi_video_value.dart';
 /// 能力边界（与 mpv 引擎的差异，均在 UI 上做了降级）：
 /// - 没有 `af` 滤镜链 → 均衡器预设/自定义 EQ 不生效
 /// - 没有 af-metadata → 波形退回模拟动画（[audioLevel] 恒为 -1）
-/// - 录制不支持（`startRecord` 返回 false），电台录音仍走 mpv/直连保存
+/// - 录制/截帧走 fvp 扩展（MDK 原生 `record` / `snapshot`，见 OMPlayer
+///   同款实现），与 mpv 的 stream-record 一样可用
 class OmiVideoMdkController extends ChangeNotifier
     implements OmiVideoBackend {
   OmiVideoMdkController.network(
@@ -143,24 +145,60 @@ class OmiVideoMdkController extends ChangeNotifier
 
   Size get videoSize => _value.size;
 
-  /// MDK 支持帧回读（fvp 的 snapshot 扩展）；未初始化时返回 null
+  /// MDK 帧回读（fvp 的 snapshot 扩展）返回 RGBA 裸数据，这里再经
+  /// dart:ui 编码成 PNG（与 OMPlayer 同款做法）；未初始化/无画面返回 null
   @override
   Future<Uint8List?> snapshotPng() async {
     try {
       if (!_pc.value.isInitialized) return null;
-      return await _pc.snapshot();
+      final w = _pc.value.size.width.round();
+      final h = _pc.value.size.height.round();
+      if (w <= 0 || h <= 0) return null;
+      final rgba = await fvp.FVPControllerExtensions(_pc)
+          .snapshot(width: w, height: h);
+      if (rgba == null || rgba.isEmpty) return null;
+      final buf = await ui.ImmutableBuffer.fromUint8List(rgba);
+      final desc = ui.ImageDescriptor.raw(
+        buf,
+        width: w,
+        height: h,
+        pixelFormat: ui.PixelFormat.rgba8888,
+      );
+      final codec = await desc.instantiateCodec();
+      final frame = await codec.getNextFrame();
+      final png = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+      desc.dispose();
+      buf.dispose();
+      return png?.buffer.asUint8List();
     } catch (e) {
       debugPrint('[OmiVideo/mdk] snapshot failed: $e');
       return null;
     }
   }
 
-  /// MDK 没有 mpv 的 stream-record，录制交给电台录音器（直连保存）
+  /// MDK 原生录制（fvp 的 record 扩展，转封装到本地文件，`to: null` 停止）。
+  /// 与 mpv 的 stream-record 不同：mdk 会按输出后缀（.mp4）重新封装，
+  /// 直播流同样可用；文件尾在停止时写入
   @override
-  Future<bool> startRecord(String path) async => false;
+  Future<bool> startRecord(String path) async {
+    try {
+      if (!_pc.value.isInitialized) return false;
+      fvp.FVPControllerExtensions(_pc).record(to: path);
+      return true;
+    } catch (e) {
+      debugPrint('[OmiVideo/mdk] record start failed: $e');
+      return false;
+    }
+  }
 
   @override
-  Future<void> stopRecord() async {}
+  Future<void> stopRecord() async {
+    try {
+      fvp.FVPControllerExtensions(_pc).record(to: null);
+    } catch (e) {
+      debugPrint('[OmiVideo/mdk] record stop failed: $e');
+    }
+  }
 
   /// MDK 无 af 滤镜链：均衡器预设在这里不生效（UI 已提示）
   @override
