@@ -52,11 +52,12 @@ class AppDensity {
   /// 模态弹层圆角
   final double modalRadius;
 
-  // 数值按 1.0.201 实测观感校准（台标 128/92、按钮直径 48/44），
+  // 数值按 1.0.201 实测观感校准，v2.1.16 台标整体缩小一圈
+  // （用户反馈「台标太高、下面面板太高」）：desktop 128→96 / tv 104→84 / mobile 92→72，
   // 先贴合现状再优化，避免"改完不如原来"
   static const AppDensity _tv = AppDensity(
     panelHeight: 96, panelPaddingH: 18,
-    logoSize: 104, logoGap: 20,
+    logoSize: 84, logoGap: 16,
     buttonSize: 46, intraGroupGap: 6, interGroupGap: 16,
     useDividers: true,
     listRowHeight: 58,
@@ -66,7 +67,7 @@ class AppDensity {
 
   static const AppDensity _desktop = AppDensity(
     panelHeight: 96, panelPaddingH: 22,
-    logoSize: 128, logoGap: 28,
+    logoSize: 96, logoGap: 22,
     buttonSize: 48, intraGroupGap: 6, interGroupGap: 18,
     useDividers: true,
     listRowHeight: 50,
@@ -76,7 +77,7 @@ class AppDensity {
 
   static const AppDensity _mobile = AppDensity(
     panelHeight: 74, panelPaddingH: 6,
-    logoSize: 92, logoGap: 12,
+    logoSize: 72, logoGap: 10,
     buttonSize: 44, intraGroupGap: 2, interGroupGap: 10,
     useDividers: false,
     listRowHeight: 41,

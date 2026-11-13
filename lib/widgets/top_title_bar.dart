@@ -36,7 +36,12 @@ class TopTitleBar extends StatelessWidget {
               color: Colors.black.withOpacity(0.72),
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onPanStart: (_) => startWindowDrag(),
+                // 手动拖动（setPosition 跟手）：startDragging 在部分
+                // Windows 环境下不生效，见 window_drag_io 注释
+                onPanStart: (d) => beginWindowDrag(d.globalPosition),
+                onPanUpdate: (d) => updateWindowDrag(d.globalPosition),
+                onPanEnd: (_) => endWindowDrag(),
+                onPanCancel: endWindowDrag,
                 onDoubleTap: () async {
                   // 全屏状态下双击标题栏先退出全屏（同步控制器状态）
                   if (context.mounted &&
@@ -57,7 +62,7 @@ class TopTitleBar extends StatelessWidget {
                     const Icon(Icons.live_tv, color: Colors.white70, size: 18),
                     const SizedBox(width: 8),
                     const Text(
-                      'Omi',
+                      '欧米视听',
                       style: TextStyle(color: Colors.white70, fontSize: 13),
                     ),
                     const Spacer(),

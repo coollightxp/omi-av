@@ -401,6 +401,16 @@ class OmiVideoController extends ChangeNotifier
   /// 电台还挂在电平表（[_audioMeter]）时，astats 会串在**同一条链**上：
   /// `@omi_lv:lavfi=[<用户预设>,astats=…]`。mpv 的 af-metadata 只认带
   /// label 的滤镜，所以整条链打一个 label。
+  @override
+  Future<void> setVideoOutputDisabled(bool disabled) async {
+    try {
+      await _player.setVideoTrack(
+          disabled ? VideoTrack.no() : VideoTrack.auto());
+    } catch (_) {
+      // 轨道切换失败不影响音频播放
+    }
+  }
+
   Future<void> applyAudioFilter(String? lavfi) async {
     _lastAudioFilter = lavfi;
     final user = (lavfi ?? '').trim();

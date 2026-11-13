@@ -898,6 +898,9 @@ function renderPlayer(){
   html+=choiceCard('sourceTimeoutSeconds','切源等待时间','起播超过该时间未成功就试下一个源',
     [[5,'5 秒'],[10,'10 秒'],[15,'15 秒'],[20,'20 秒'],[25,'25 秒'],[30,'30 秒']],
     s.sourceTimeoutSeconds||5);
+  html+=choiceCard('tuneDwellMs','换台停留','连续按上下键只更新预览，停顿够才真正切台',
+    [[500,'0.5 秒'],[800,'0.8 秒'],[1200,'1.2 秒'],[2000,'2 秒']],
+    s.tuneDwellMs||1200);
   html+=choiceCard('bufferSeconds','播放缓冲','弱网卡顿可调大，换台后生效',
     [[5,'5 秒'],[10,'10 秒'],[20,'20 秒'],[30,'30 秒']], s.bufferSeconds||5);
   html+='<div class="group-title">界面</div>';

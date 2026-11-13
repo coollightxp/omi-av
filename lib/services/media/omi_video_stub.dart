@@ -39,6 +39,9 @@ class OmiVideoController extends ChangeNotifier
 
   /// 音频滤镜（Web 无 mpv）：no-op
   Future<void> applyAudioFilter(String? lavfi) async {}
+
+  @override
+  Future<void> setVideoOutputDisabled(bool disabled) async {}
   Future<void> stopRecord() async {}
 
   Future<void> release() async {}

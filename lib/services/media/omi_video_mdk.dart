@@ -233,6 +233,9 @@ class OmiVideoMdkController extends ChangeNotifier
   Future<void> applyAudioFilter(String? lavfi) async {}
 
   @override
+  Future<void> setVideoOutputDisabled(bool disabled) async {}
+
+  @override
   Future<void> release() async {
     if (_disposed) return;
     _disposed = true;

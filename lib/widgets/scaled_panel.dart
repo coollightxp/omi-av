@@ -15,6 +15,18 @@ double panelScaleOf(BuildContext context) {
   return 1.0;
 }
 
+/// 桌面窗口自适应缩放：窗口比设计基准（1280×700）小时，面板整体
+/// 等比缩小——固定尺寸的左右抽屉/底部面板在窄窗口里会被挤压变形
+/// （用户实测拖小窗口后卡片歪掉），同步缩放后比例始终不变。
+/// 手机/平板（最短边 < 700）不受影响，仍走各自的形态缩放。
+double windowFitScaleOf(BuildContext context) {
+  final size = MediaQuery.of(context).size;
+  if (size.shortestSide < 700) return 1.0;
+  final w = (size.width / 1280).clamp(0.72, 1.0);
+  final h = (size.height / 700).clamp(0.72, 1.0);
+  return w < h ? w : h;
+}
+
 /// 面板【整体】等比缩放。
 ///
 /// 与只改 textScaler（字小框大）不同：Transform.scale 把外框/内边距/

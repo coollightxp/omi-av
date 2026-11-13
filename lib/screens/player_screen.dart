@@ -640,7 +640,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                       ),
                                     ),
                                   )
-                                : const SizedBox.shrink()),
+                                    // 网页推到前台后不立刻揭开：video 元素的 play 事件先于画面
+                                    // 渲染，立刻露网页会闪出站点页面（央视网）或站点白底（央视频）。
+                                    // 黑幕多盖 800ms 再淡出，音频不受影响
+                                    : const _WebForegroundVeil()),
                   ),
 
                   // Windows 桌面亮度遮罩：原生 gamma ramp 在台式机/外接
@@ -2490,11 +2493,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                               ? controller.toggleMiniWindow
                               : controller.toggleFullscreen)
                           : controller.togglePlayPause,
-                      // 全屏状态下绝不能拖动窗口，否则窗口会掉到最底层、点击穿透
+                      // 全屏状态下绝不能拖动窗口，否则窗口会掉到最底层、点击穿透。
+                      // 手动拖动（setPosition 跟手）而非 WM_NCLBUTTONDOWN：
+                      // window_manager 的 startDragging 在部分 Windows
+                      // 环境（置顶/小窗）下不生效，实测拖不动窗口
                       onPanStart:
                           (controller.isDesktop && !controller.isFullscreen)
-                              ? (_) => startWindowDrag()
+                              ? (d) => beginWindowDrag(d.globalPosition)
                               : null,
+                      onPanUpdate:
+                          (controller.isDesktop && !controller.isFullscreen)
+                              ? (d) => updateWindowDrag(d.globalPosition)
+                              : null,
+                      onPanEnd: (controller.isDesktop && !controller.isFullscreen)
+                          ? (_) => endWindowDrag()
+                          : null,
                     ),
             ),
             // 右侧：音量调节 + 右边缘滑出 EPG；移动端右三分之一
@@ -2691,7 +2704,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _osdTimer = Timer(const Duration(seconds: 8), () {
       if (mounted) setState(() => _osdVisible = false);
     });
-    _tuneDebounce = Timer(const Duration(milliseconds: 450), () {
+    // 停留时间用户可调（设置 → 播放器 → 换台停留）：连续按 ↑/↓ 时
+    // 只刷新左上角预览、继续播当前台，停顿够才真正切流
+    _tuneDebounce = Timer(Duration(milliseconds: controller.settings.tuneDwellMs), () {
       _tuneDebounce = null;
       controller.playChannel(target).whenComplete(() {
         if (mounted) setState(() => _osdPreview = null);
@@ -7110,4 +7125,44 @@ String _sleepRemainText(Duration d) {
   final s = d.inSeconds % 60;
   final two = (int v) => v.toString().padLeft(2, '0');
   return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
+}
+
+/// 网页频道推前台后的黑幕：挂载即不透明盖住网页，800ms 后淡出。
+/// 只在 webPageForeground 刚翻真时挂上；期间音频已在放，观感是
+/// 「黑一下直接出画面」而不是闪一下站点页面/白屏
+class _WebForegroundVeil extends StatefulWidget {
+  const _WebForegroundVeil();
+
+  @override
+  State<_WebForegroundVeil> createState() => _WebForegroundVeilState();
+}
+
+class _WebForegroundVeilState extends State<_WebForegroundVeil> {
+  bool _shown = true;
+  Timer? _t;
+
+  @override
+  void initState() {
+    super.initState();
+    _t = Timer(const Duration(milliseconds: 800), () {
+      if (mounted) setState(() => _shown = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: AnimatedOpacity(
+        opacity: _shown ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 300),
+        child: Container(color: Colors.black),
+      ),
+    );
+  }
 }

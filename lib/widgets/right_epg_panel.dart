@@ -253,7 +253,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
           opacity: widget.isOpen ? 1.0 : 0.0,
           child: ScaledPanel(
             alignment: Alignment.centerRight,
-            scale: 1.0,
+            // 桌面窗口变小时整体等比缩，固定宽度的抽屉不被挤压变形
+            scale: windowFitScaleOf(context),
             child: MediaQuery(
               // 只在面板内缩小文字，不影响主界面其它区域
               data: MediaQuery.of(context).copyWith(

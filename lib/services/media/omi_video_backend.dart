@@ -39,6 +39,12 @@ abstract class OmiVideoBackend extends ChangeNotifier {
   /// mpv 专属；MDK 下为空实现
   Future<void> applyAudioFilter(String? lavfi);
 
+  /// 关掉/恢复视频输出（mpv `vid=no`/`auto`）。
+  /// 后台切台（通知栏上一台/下一台）时安卓侧没有 Surface，新播放器
+  /// 等纹理会卡住起播——音频先走 vid=no，回前台再恢复。
+  /// MDK/Web 下为空实现。
+  Future<void> setVideoOutputDisabled(bool disabled);
+
   /// 异步释放 native 资源（幂等，可重复调用）
   Future<void> release();
 }

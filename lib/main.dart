@@ -81,7 +81,7 @@ void main() async {
 
     await windowManager.waitUntilReadyToShow(
       const WindowOptions(
-        title: 'Omi',
+        title: '欧米视听',
         center: true,
         titleBarStyle: TitleBarStyle.hidden,
         // 原生窗口背景刷成黑色：默认白底会在启动全屏的一瞬间闪白框

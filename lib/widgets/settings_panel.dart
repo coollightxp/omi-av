@@ -265,7 +265,7 @@ class _SettingsPanelState extends State<SettingsPanel>
         opacity: widget.isOpen ? 1.0 : 0.0,
         child: ScaledPanel(
           alignment: Alignment.bottomCenter,
-          scale: panelScaleOf(context),
+          scale: panelScaleOf(context) * windowFitScaleOf(context),
           // 限宽居中：设置面板不再通栏铺满，宽屏下保持 760 逻辑像素以内
           child: Align(
             alignment: Alignment.bottomCenter,
@@ -1969,6 +1969,19 @@ class _PlayerSettingsTab extends StatelessWidget {
               label: '${(s.autoHideDelay / 1000).toStringAsFixed(1)} 秒',
               onChanged: (v) => controller.updateSettings(
                   s.copyWith(autoHideDelay: (v * 1000).round())),
+            ),
+            _buildSlider(
+              icon: Icons.slow_motion_video,
+              title: '换台停留',
+              value: s.tuneDwellMs / 1000,
+              min: 0.5,
+              max: 2.0,
+              divisions: 6,
+              label: '${(s.tuneDwellMs / 1000).toStringAsFixed(1)} 秒',
+              onChanged: (v) => controller
+                  .updateSettings(s.copyWith(tuneDwellMs: (v * 1000).round())),
+              subtitleText:
+                  '连续按上下键时只更新左上角预览、继续播当前台，停顿够才真正切台',
             ),
             _buildSlider(
               icon: Icons.swap_horiz,

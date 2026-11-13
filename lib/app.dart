@@ -53,7 +53,7 @@ class _OmiMaterialApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = context.read<PlayerController>();
     return MaterialApp(
-          title: 'Omi',
+          title: '欧米视听',
           debugShowCheckedModeBanner: false,
           // 中文本地化：输入框长按菜单（粘贴/复制）等系统文案用中文，
           // 否则 Android/Windows 上长按输入框弹出的都是英文

@@ -369,6 +369,12 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> _init() async {
+    // 前后台监听：安卓后台切台时新播放器拿不到 Surface，视频轨先关掉
+    // （见 _onAppHidden / _playCurrentSource）
+    _lifecycleListener = AppLifecycleListener(
+      onHide: _onAppHidden,
+      onShow: _onAppShown,
+    );
     // 启动计时：初始化耗时不足最短展示时长时，撤屏前补足等待。
     // 首次启动（无列表/无 EPG/无历史频道）全程只有毫秒级 prefs 读取，
     // 若不兜底，启动画面一闪而过甚至完全看不到，品牌动画形同虚设
@@ -954,6 +960,7 @@ class PlayerController extends ChangeNotifier {
         'radioMeter': s.radioMeter,
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
+        'tuneDwellMs': s.tuneDwellMs,
         'sourceTimeoutSeconds': s.sourceTimeoutSeconds,
         'bufferSeconds': s.bufferSeconds,
         'resumeLastChannel': s.resumeLastChannel,
@@ -1102,6 +1109,11 @@ class PlayerController extends ChangeNotifier {
       int autoHide = cur.autoHideDelay;
       final ahRaw = ri('autoHideDelay');
       if (ahRaw != null) autoHide = ahRaw.clamp(1000, 10000);
+      int tuneDwell = cur.tuneDwellMs;
+      final tdRaw = ri('tuneDwellMs');
+      if (tdRaw != null && const {500, 800, 1200, 2000}.contains(tdRaw)) {
+        tuneDwell = tdRaw;
+      }
       int sourceTimeout = cur.sourceTimeoutSeconds;
       final soRaw = ri('sourceTimeoutSeconds');
       if (soRaw != null && soRaw >= 5 && soRaw <= 30) {
@@ -1186,6 +1198,7 @@ class PlayerController extends ChangeNotifier {
           closeToTray: closeToTray,
           gestureSensitivity: gesture,
           autoHideDelay: autoHide,
+          tuneDwellMs: tuneDwell,
           sourceTimeoutSeconds: sourceTimeout,
           bufferSeconds: buffer,
           preferredQuality: quality,
@@ -2480,6 +2493,13 @@ class PlayerController extends ChangeNotifier {
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
     c.addListener(closure);
+    // 后台切台（通知栏上一台/下一台）：安卓侧没有 Surface，新播放器
+    // 等纹理会卡住起播（用户实测：通知栏切台声音停了，回到界面才
+    // 接着放）。App 在后台时先关视频输出（vid=no），回前台由
+    // 生命周期监听统一恢复
+    if (_appBackgrounded) {
+      unawaited(c.setVideoOutputDisabled(true));
+    }
     // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
     // （'custom' 走自定义均衡器增益构建）
     unawaited(c.applyAudioFilter(filterForPreset(_settings.audioPreset)));
@@ -3174,8 +3194,19 @@ class PlayerController extends ChangeNotifier {
   bool _wasFullscreenBeforeMini = false;
   bool _wasMaximizedBeforeMini = false;
 
+  /// 切换小窗的重入保护：setSize 是异步的，连点「小窗播放/恢复窗口」
+  /// 会在上一次还没完成时再次进入，第二次 getSize() 抓到的是小窗尺寸——
+  /// 之后每次恢复都回小窗大小（用户实测「退出小窗后记住了小窗尺寸」）
+  bool _miniToggling = false;
+  static const _miniSize = Size(420, 236);
+
+  bool _isMiniLikeSize(Size s) =>
+      (s.width - _miniSize.width).abs() < 16 &&
+      (s.height - _miniSize.height).abs() < 16;
+
   Future<void> toggleMiniWindow() async {
-    if (!isDesktop) return;
+    if (!isDesktop || _miniToggling) return;
+    _miniToggling = true;
     _miniWindow = !_miniWindow;
     try {
       if (_miniWindow) {
@@ -3192,9 +3223,14 @@ class PlayerController extends ChangeNotifier {
         if (_wasMaximizedBeforeMini) {
           await windowManager.unmaximize();
         }
-        _sizeBeforeMini = await windowManager.getSize();
+        final cur = await windowManager.getSize();
+        // 极端情况下窗口已经是小窗尺寸（上一次切换被打断）：
+        // 此时不能再把它记成「原尺寸」，否则恢复永远回到小窗
+        if (!_isMiniLikeSize(cur)) {
+          _sizeBeforeMini = cur;
+        }
         await windowManager.setAlwaysOnTop(true);
-        await windowManager.setSize(const Size(420, 236));
+        await windowManager.setSize(_miniSize);
       } else {
         if (_wasFullscreenBeforeMini) {
           // 原来就是全屏：直接回全屏（无需再 setSize）
@@ -3204,6 +3240,10 @@ class PlayerController extends ChangeNotifier {
           await windowManager.setAlwaysOnTop(false);
           await windowManager.setFullScreen(true);
         } else {
+          // _sizeBeforeMini 若已被污染成小窗尺寸，退回默认窗口大小
+          if (_isMiniLikeSize(_sizeBeforeMini)) {
+            _sizeBeforeMini = const Size(1280, 720);
+          }
           await windowManager.setSize(_sizeBeforeMini);
           if (_wasMaximizedBeforeMini) {
             _wasMaximizedBeforeMini = false;
@@ -3213,6 +3253,7 @@ class PlayerController extends ChangeNotifier {
         }
       }
     } catch (_) {}
+    _miniToggling = false;
     notifyListeners();
   }
 
@@ -3305,6 +3346,7 @@ class PlayerController extends ChangeNotifier {
   static const _kAutoPlayNext = 'settings_auto_play_next';
   static const _kSensitivity = 'settings_sensitivity';
   static const _kAutoHide = 'settings_auto_hide';
+  static const _kTuneDwell = 'settings_tune_dwell_ms';
   static const _kLaunchAtStartup = 'settings_launch_at_startup';
   static const _kStartFullscreen = 'settings_start_fullscreen';
   static const _kShowClock = 'settings_show_clock';
@@ -3349,6 +3391,7 @@ class PlayerController extends ChangeNotifier {
         autoPlayNext: p.getBool(_kAutoPlayNext) ?? true,
         gestureSensitivity: p.getDouble(_kSensitivity) ?? 1.0,
         autoHideDelay: p.getInt(_kAutoHide) ?? 3000,
+        tuneDwellMs: p.getInt(_kTuneDwell) ?? 1200,
         launchAtStartup: p.getBool(_kLaunchAtStartup) ?? false,
         startFullscreen: p.getBool(_kStartFullscreen) ?? false,
         showClock: p.getBool(_kShowClock) ?? false,
@@ -3468,6 +3511,7 @@ class PlayerController extends ChangeNotifier {
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
+      await putInt(_kTuneDwell, _settings.tuneDwellMs);
       await putBool(_kLaunchAtStartup, _settings.launchAtStartup);
       await putBool(_kStartFullscreen, _settings.startFullscreen);
       await putBool(_kShowClock, _settings.showClock);
@@ -4849,7 +4893,24 @@ class PlayerController extends ChangeNotifier {
   }
 
   @override
+  /// App 是否在后台（安卓通知栏切台时关视频输出的判定，
+  /// 见 _playCurrentSource 内的 setVideoOutputDisabled）
+  bool _appBackgrounded = false;
+  AppLifecycleListener? _lifecycleListener;
+
+  void _onAppHidden() {
+    _appBackgrounded = true;
+    unawaited(_videoController?.setVideoOutputDisabled(true));
+  }
+
+  void _onAppShown() {
+    _appBackgrounded = false;
+    unawaited(_videoController?.setVideoOutputDisabled(false));
+  }
+
   void dispose() {
+    _lifecycleListener?.dispose();
+    _lifecycleListener = null;
     _tickTimer?.cancel();
     _epgDayTimer?.cancel();
     _bootMinTimer?.cancel();

@@ -157,7 +157,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           opacity: widget.isVisible ? 1.0 : 0.0,
           child: ScaledPanel(
             alignment: Alignment.bottomCenter,
-            scale: 1.0,
+            // 手机保持铺满宽度（scale=1 由上方 padding 逻辑控制），
+            // 桌面窗口变小时整体等比缩，卡片不变形
+            scale: panelScaleOf(context) < 1.0 ? 1.0 : windowFitScaleOf(context),
             child: Container(
               decoration: BoxDecoration(
                 // 与设置面板 / 左右抽屉同一套表面色：深蓝灰 + 细描边
@@ -177,8 +179,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                 child: Padding(
                   // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
                   padding: scale < 1
-                      ? const EdgeInsets.fromLTRB(6, 16, 4, 14)
-                      : const EdgeInsets.fromLTRB(22, 16, 18, 10),
+                      ? const EdgeInsets.fromLTRB(6, 12, 4, 10)
+                      : const EdgeInsets.fromLTRB(22, 12, 18, 8),
                   child: Consumer<PlayerController>(
                     builder: (context, c, _) => Column(
                       mainAxisSize: MainAxisSize.min,
