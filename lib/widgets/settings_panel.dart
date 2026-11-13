@@ -2546,8 +2546,8 @@ class _SystemSettingsTab extends StatelessWidget {
                   style: TextStyle(color: Colors.white, fontSize: 15)),
               subtitle: Text(
                 controller.dlnaRunning
-                    ? '已开启：${controller.dlnaName}\n${controller.dlnaEndpoint}\n手机需与本机同一局域网，防火墙需放行本程序'
-                    : '未开启：服务已停止或端口被占用',
+                    ? '已开启：${controller.dlnaName}\n${controller.dlnaEndpoint}\n手机需与本机同一局域网，防火墙需放行本程序；若同时开着 OMPlayer 等其它接收端，请先关闭（1900 组播端口同一时间只有先启动的程序收得到手机扫描）'
+                    : '未开启：${controller.dlnaName.startsWith('接收服务启动失败') ? controller.dlnaName : '服务已停止或端口被占用；检查防火墙是否放行本程序'}',
                 style: const TextStyle(
                     color: Colors.white54, fontSize: 12),
               ),

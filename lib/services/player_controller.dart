@@ -741,8 +741,11 @@ class PlayerController extends ChangeNotifier {
       _dlnaName = dlnaService.deviceName;
       _dlnaRunning = dlnaService.isRunning;
       _dlnaEndpoint = dlnaService.deviceEndpoint;
-    } catch (_) {
+    } catch (e) {
+      // 把失败原因亮到设置面板：端口被占/无网卡等，用户扫不到时能自查
       _dlnaRunning = false;
+      _dlnaName = '接收服务启动失败：$e';
+      CastLog.write('DLNA start failed: $e');
     }
     notifyListeners();
   }
