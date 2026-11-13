@@ -675,14 +675,14 @@ jobs:
       # 上传改走 gh CLI：softprops/action-gh-release 找到已有 Release 后
       # 会先 PATCH 一次元数据（实测 2026-11-13 v2.1.14 三平台齐挂
       # 「Resource not accessible by integration」），gh release upload
-      # 只传资产不动元数据，GITHUB_TOKEN 的 contents:write 足够
+      # 只传资产不动元数据，GITHUB_TOKEN 的 contents:write 足够。
+      # 命令必须单行：Windows runner 默认 pwsh，反斜杠续行会被当成一元运算符报错（v2.1.15 实测）
       - name: Upload to Release
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/Omi-android-*.apk \
-            --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/Omi-android-*.apk --clobber --repo "$GITHUB_REPOSITORY"
 
   # ==================== Web ====================
   build-web:
@@ -1174,8 +1174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" Omi-windows.zip \
-            --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$GITHUB_REF_NAME" Omi-windows.zip --clobber --repo "$GITHUB_REPOSITORY"
 
   # ==================== Linux Desktop ====================
   build-linux:
@@ -1230,8 +1229,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" Omi-linux.zip \
-            --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$GITHUB_REF_NAME" Omi-linux.zip --clobber --repo "$GITHUB_REPOSITORY"
 
   # ==================== 打 tag 自动建 Release（方案 14.2） ====================
   # 版本号唯一来源 = git 标签（14.1）：
