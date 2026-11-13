@@ -2351,6 +2351,18 @@ class PlayerController extends ChangeNotifier {
 
   String _lastAudioSig = '';
 
+  /// 通知权限只申请一次（系统窗只弹一次，之后拒绝就只能去设置里开）
+  bool _notifAsked = false;
+
+  Future<void> _ensureNotifPermission() async {
+    if (_notifAsked) return;
+    _notifAsked = true;
+    try {
+      if (await notifGranted()) return;
+      await requestNotif();
+    } catch (_) {}
+  }
+
   /// 通知栏/锁屏卡片：只在电台域出现（电视正常播放有画面，不需要）。
   /// 台名 + 当前曲目 + 播放态，变化时才推给原生，避免每 500ms 跨通道。
   void _syncAudioNotification() {
@@ -2364,6 +2376,9 @@ class PlayerController extends ChangeNotifier {
       }
       return;
     }
+    // Android 13+ 没授 POST_NOTIFICATIONS 时，卡片与锁屏控件都不会出现
+    // （前台服务照跑，但系统把通知吞了）——首次进电台先申请
+    unawaited(_ensureNotifPermission());
     final icy = _lastMediaTitle;
     final program = (icy.isNotEmpty && !isJunkTrack(icy))
         ? icy

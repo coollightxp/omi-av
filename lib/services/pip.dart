@@ -95,6 +95,17 @@ Future<bool> openNotifSettings() async {
   }
 }
 
+/// 申请通知权限（Android 13+ 必需：POST_NOTIFICATIONS 不给，通知栏/
+/// 锁屏的电台卡片根本不会显示，MediaSession 也拿不到锁屏控件）。
+/// 系统只在首次弹窗，之后返回 false 表示用户已拒绝——只能引导去设置。
+Future<bool> requestNotif() async {
+  try {
+    return await _channel.invokeMethod<bool>('requestNotif') ?? false;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// 更新通知栏/锁屏音频卡片（MediaService 前台服务 + MediaSession，
 /// LXFM 同款电台体验）：台名 + 当前曲目 + 播放态按钮
 /// （上一台/播放暂停/下一台/关闭），锁屏与下拉栏同卡。

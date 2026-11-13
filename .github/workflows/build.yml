@@ -71,8 +71,13 @@ jobs:
             || echo "::warning::PictureInPicture manifest patch failed"
           # 画中画 + 前台服务 + 通知权限
           grep -q "FOREGROUND_SERVICE_MEDIA_PLAYBACK" $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application|' $MANIFEST
-          # TV 盒子可装可用：不强制触摸屏；声明 leanback 非必需
-          grep -q "android.software.leanback" $MANIFEST || sed -i 's|<application|<uses-feature android:name="android.hardware.touchscreen" android:required="false" />\n    <uses-feature android:name="android.software.leanback" android:required="false" />\n    <uses-feature android:name="android.hardware.type.television" android:required="false" />\n    <application|' $MANIFEST
+          # 通知栏/锁屏卡片的前台服务必须在 manifest 里注册，否则
+          # startForegroundService 直接抛「not found」——表现就是电台播放
+          # 完全没有通知栏/锁屏卡片（v2.0.4 的漏项）
+          grep -q 'android:name=".MediaService"' $MANIFEST || sed -i 's|</application>|<service android:name=".MediaService"\n            android:exported="false"\n            android:foregroundServiceType="mediaPlayback" />\n    </application>|' $MANIFEST
+          grep -q 'android:name=".MediaService"' $MANIFEST \
+            || echo "::warning::MediaService manifest patch failed"
+          # TV 盒子可装可用：不强制触摸屏；声明 leanback 非必需          grep -q "android.software.leanback" $MANIFEST || sed -i 's|<application|<uses-feature android:name="android.hardware.touchscreen" android:required="false" />\n    <uses-feature android:name="android.software.leanback" android:required="false" />\n    <uses-feature android:name="android.hardware.type.television" android:required="false" />\n    <application|' $MANIFEST
           # 挖孔/刘海屏全屏不留黑边
           mkdir -p android/app/src/main/res/values-v28
           cat > android/app/src/main/res/values-v28/styles.xml <<'XML'
@@ -98,6 +103,7 @@ jobs:
             cat > "$ACTIVITY" <<KOTLIN
           package $PKG
 
+          import android.Manifest
           import android.app.PictureInPictureParams
           import android.content.Intent
           import android.content.pm.PackageManager
@@ -127,6 +133,10 @@ jobs:
                               "isTv" -> result.success(isTv())
                               "notifGranted" -> result.success(
                                   NotificationManagerCompat.from(this).areNotificationsEnabled())
+                              "requestNotif" -> {
+                                  requestNotifPermission()
+                                  result.success(true)
+                              }
                               "openNotifSettings" -> result.success(openNotifSettings())
                               // 听电视：整任务退到后台但不杀进程，音频继续
                               "background" -> result.success(moveTaskToBack(true))
@@ -153,8 +163,21 @@ jobs:
                       }
               }
 
-              private fun openNotifSettings(): Boolean {
-                  return try {
+              // Android 13+：POST_NOTIFICATIONS 是运行时权限，不申请的话
+              // 前台服务的卡片会被系统吞掉（电台看不到通知栏/锁屏控件）
+              private fun requestNotifPermission() {
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      try {
+                          if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                                  != PackageManager.PERMISSION_GRANTED) {
+                              requestPermissions(
+                                  arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+                          }
+                      } catch (e: Exception) {}
+                  }
+              }
+
+              private fun openNotifSettings(): Boolean {                  return try {
                       val i = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                       i.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
                       i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -269,11 +292,16 @@ jobs:
                           .putExtra("program", program)
                           .putExtra("playing", playing)
                           .putExtra("logo", logoUrl)
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                          ctx.startForegroundService(i)
-                      } else {
-                          ctx.startService(i)
-                      }
+                      // Android 12+ 后台起前台服务会抛
+                      // ForegroundServiceStartNotAllowedException；
+                      // 卡片刷新失败不能连累播放，吞掉即可
+                      try {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              ctx.startForegroundService(i)
+                          } else {
+                              ctx.startService(i)
+                          }
+                      } catch (e: Exception) {}
                   }
 
                   fun stop(ctx: android.content.Context) {

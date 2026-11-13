@@ -382,12 +382,13 @@ class DlnaService {
       _notifyAlive();
       await Future.delayed(const Duration(milliseconds: 400));
     }
-    // 周期通告 10 秒一次：开热点的手机自己当发送端时，它发出的
+    // 周期通告 5 秒一次：开热点的手机自己当发送端时，它发出的
     // M-SEARCH 组播在热点网卡上常被系统延迟/丢弃（tethering 对
-    // 宿主机组播支持差），发现设备很大程度靠被动收 alive——
-    // 30 秒一次意味着热点机最长要等半分钟才扫到接收端
+    // 宿主机组播支持差），发现设备很大程度靠被动收 alive。
+    // 投屏进行中 CDN 流量大，组播丢包率更高——10 秒一次时发送端
+    // 想「再投一条」经常刷不出设备；5 秒一轮 6 个小包，开销可忽略
     _aliveTimer =
-        Timer.periodic(const Duration(seconds: 10), (_) => _notifyAlive());
+        Timer.periodic(const Duration(seconds: 5), (_) => _notifyAlive());
   }
 
   String? _headerValue(String msg, String field) {
@@ -423,38 +424,45 @@ class DlnaService {
       socket.send(resp.codeUnits, addr, port);
     }
 
-    // 略微延迟回复，避免同网络设备风暴
+    // 略微延迟回复，避免同网络设备风暴；**连发两轮**（100ms / 600ms）。
+    // 手机热点、多网卡环境下 SSDP 单播也会丢（tethering 的 UDP 队列很小，
+    // 投屏中 CDN 大流量时更明显）。只答一轮时发送端偶发拿不到应答，
+    // 表现为「已经投上了，再想投新的却扫不到设备名称」，而接收端一断开
+    // （byebye + alive 突发一波）又立刻出现。两轮间隔 500ms 足够错开
+    // 丢包窗口；发送端按 USN 去重，不会出现重复设备。
     // 必须对 ssdp:all 回复全部 6 个 USN（含 3 个 service 类型），
     // 乐播/抖音 SDK 依赖 AVTransport service USN 确认设备投屏能力
-    Future.delayed(const Duration(milliseconds: 100), () {
-      if (_ssdp == null) return;
-      void sendAll() {
-        send('upnp:rootdevice', '$usnBase::upnp:rootdevice');
-        send(usnBase, usnBase);
-        send('urn:schemas-upnp-org:device:MediaRenderer:1',
-            '$usnBase::urn:schemas-upnp-org:device:MediaRenderer:1');
-        send('urn:schemas-upnp-org:service:AVTransport:1',
-            '$usnBase::urn:schemas-upnp-org:service:AVTransport:1');
-        send('urn:schemas-upnp-org:service:RenderingControl:1',
-            '$usnBase::urn:schemas-upnp-org:service:RenderingControl:1');
-        send('urn:schemas-upnp-org:service:ConnectionManager:1',
-            '$usnBase::urn:schemas-upnp-org:service:ConnectionManager:1');
-      }
+    for (final delayMs in const [100, 600]) {
+      Future.delayed(Duration(milliseconds: delayMs), () {
+        if (_ssdp == null) return;
+        void sendAll() {
+          send('upnp:rootdevice', '$usnBase::upnp:rootdevice');
+          send(usnBase, usnBase);
+          send('urn:schemas-upnp-org:device:MediaRenderer:1',
+              '$usnBase::urn:schemas-upnp-org:device:MediaRenderer:1');
+          send('urn:schemas-upnp-org:service:AVTransport:1',
+              '$usnBase::urn:schemas-upnp-org:service:AVTransport:1');
+          send('urn:schemas-upnp-org:service:RenderingControl:1',
+              '$usnBase::urn:schemas-upnp-org:service:RenderingControl:1');
+          send('urn:schemas-upnp-org:service:ConnectionManager:1',
+              '$usnBase::urn:schemas-upnp-org:service:ConnectionManager:1');
+        }
 
-      if (st == 'ssdp:all') {
-        sendAll();
-      } else if (st == 'upnp:rootdevice') {
-        send(st, '$usnBase::upnp:rootdevice');
-      } else if (st == usnBase) {
-        send(st, usnBase);
-      } else if (st.contains('MediaRenderer') ||
-          st.contains('MediaServer') ||
-          st.contains('AVTransport') ||
-          st.contains('RenderingControl') ||
-          st.contains('ConnectionManager')) {
-        send(st, '$usnBase::$st');
-      }
-    });
+        if (st == 'ssdp:all') {
+          sendAll();
+        } else if (st == 'upnp:rootdevice') {
+          send(st, '$usnBase::upnp:rootdevice');
+        } else if (st == usnBase) {
+          send(st, usnBase);
+        } else if (st.contains('MediaRenderer') ||
+            st.contains('MediaServer') ||
+            st.contains('AVTransport') ||
+            st.contains('RenderingControl') ||
+            st.contains('ConnectionManager')) {
+          send(st, '$usnBase::$st');
+        }
+      });
+    }
   }
 
   void _notifyAlive() {
