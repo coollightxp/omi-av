@@ -723,18 +723,6 @@ function renderEpg(){
 }
 
 // ==================== 设置通用构件 ====================
-function settingDefs(){
-  return [
-    ['showClock','显示时间','右上角常驻显示系统时钟'],
-    ['autoPlayNext','自动播放下一台','当前频道播放结束后自动切到下一台'],
-    ['autoReloadStall','失败自动重载','直播流播放失败自动重试、网页频道卡死自动重载；次数用尽提示链接失效'],
-    ['webEnabled','网页直播支持','允许网页频道（webview:// 源）用内置浏览器播放'],
-    ['dlnaEnabled','DLNA 投屏接收','允许手机或其它设备投屏到本机'],
-    ['startFullscreen','启动即全屏','程序启动后直接进入全屏',true],
-    ['alwaysOnTop','窗口置顶','保持播放器窗口始终在最前',true],
-    ['launchAtStartup','开机自启动','登录系统后自动启动欧米视听',true]
-  ];
-}
 function switchCard(key,title,sub){
   var s=state.settings||{};
   var on=s[key]===true;
