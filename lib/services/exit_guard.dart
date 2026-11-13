@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'tray_service.dart';
 import 'win_hotkeys.dart';
 
 /// 统一退出流程（Windows 桌面端）。
@@ -43,6 +44,11 @@ class ExitGuard {
     } catch (e) {
       debugPrint('ExitGuard prepare failed: $e');
     }
+    // 先摘托盘图标：下面 runner 一发「快速结束进程」，system_tray 就
+    // 没机会走 destroy 了——通知区会残留一个僵尸图标（点一下才消失）
+    try {
+      await TrayService.dispose().timeout(const Duration(seconds: 2));
+    } catch (_) {}
     // runner 侧摘低级键盘钩子、恢复系统光标；旧 runner 无此指令也无妨
     unawaited(WinHotkeys.quitApp());
     // 给 WebView2 子进程与 mpv 线程一点收尾时间（实测 <500ms 够用）
