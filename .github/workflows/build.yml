@@ -1187,7 +1187,9 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libgtk-3-dev libasound2-dev pkg-config libwebkit2gtk-4.0-dev libsoup-3.0-dev
+          # libayatana-appindicator3-dev：system_tray 插件（托盘）硬依赖，
+          # 缺了 CMake 直接报 "requires ayatana-appindicator3-0.1"
+          sudo apt-get install -y ninja-build libgtk-3-dev libasound2-dev pkg-config libwebkit2gtk-4.0-dev libsoup-3.0-dev libayatana-appindicator3-dev
 
       - name: Create Linux project files
         run: flutter create . --platforms=linux --project-name omi
