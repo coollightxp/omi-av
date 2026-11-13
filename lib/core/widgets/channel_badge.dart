@@ -19,6 +19,7 @@ class ChannelBadge extends StatelessWidget {
     super.key,
     required this.channel,
     this.size = 24,
+    this.width,
     this.circular,
     this.background = const Color(0x14FFFFFF),
     this.extraLogoUrls = const [],
@@ -26,6 +27,13 @@ class ChannelBadge extends StatelessWidget {
 
   final Channel channel;
   final double size;
+
+  /// 容器宽度。不传 = 正方形 [size]×[size]。
+  ///
+  /// 不少台标是横向长图（圆标 + 台名文字，如各省卫视官方 logo），
+  /// 塞进正方形里 contain 会缩成很小一团；底部信息面板这类横向空间
+  /// 充裕的地方给 1.6 倍宽度，横向 logo 就能铺开显示
+  final double? width;
 
   /// 为空时按频道类型决定：电台圆形、电视圆角方
   final bool? circular;
@@ -45,7 +53,7 @@ class ChannelBadge extends StatelessWidget {
       borderRadius:
           BorderRadius.circular(_isRound ? size / 2 : size * 0.22),
       child: Container(
-        width: size,
+        width: width ?? size,
         height: size,
         color: background,
         child: _content(),

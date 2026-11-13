@@ -238,6 +238,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     return ChannelBadge(
       channel: ch,
       size: size,
+      // 1.6 倍宽：省台/卫视的官方台标多是「圆标 + 台名」的横向长图，
+      // 方形容器里 contain 只能缩成中间一小块（用户反馈「高度够、
+      // 不够宽，台标是残缺的」）。横向给足空间后整张图能铺开
+      width: size * 1.6,
       circular: false,
       background: Colors.white10,
       extraLogoUrls: [c.currentLogo],
