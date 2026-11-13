@@ -25,6 +25,15 @@ class RemoteAdminHooks {
   /// 内置节目单状态：{count, at}
   final Future<Map<String, dynamic>> Function()? builtinEpgInfo;
 
+  /// 内置清单（央视频道 / 电台精选）状态：{cctv:{...}, radio:{...}}
+  final Future<Map<String, dynamic>> Function()? builtinInfo;
+
+  /// 手动更新内置清单：kind = cctv / radio，返回 {ok, message}
+  final Future<Map<String, dynamic>> Function(String kind)? updateBuiltin;
+
+  /// 设置内置清单自动检查间隔（天）：0 关闭 / 7 每周 / 30 每月
+  final Future<void> Function(String kind, int days)? setBuiltinInterval;
+
   const RemoteAdminHooks({
     required this.getSnapshot,
     required this.applySnapshot,
@@ -37,6 +46,9 @@ class RemoteAdminHooks {
     this.restoreBuiltinRadio,
     this.updateBuiltinEpg,
     this.builtinEpgInfo,
+    this.builtinInfo,
+    this.updateBuiltin,
+    this.setBuiltinInterval,
   });
 }
 

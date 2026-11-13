@@ -64,13 +64,27 @@ class ChannelBadge extends StatelessWidget {
   Widget _content() {
     final asset = ChannelLogo.assetFor(channel);
     if (asset.isNotEmpty) {
-      return Image.asset(
+      return _inset(Image.asset(
         asset,
         fit: BoxFit.contain,
         errorBuilder: (_, __, ___) => _remote(0),
-      );
+      ));
     }
     return _remote(0);
+  }
+
+  /// 台标图在容器内的留白：官方 logo 普遍顶满画布，视觉上比旁边的
+  /// 文字大一圈。占位尺寸不动（保持与相邻元素的对齐/间距），图先
+  /// 四周各缩 10% 再 contain，看上去比例舒服（用户反馈「显示有点大」）。
+  /// 字母台标不走这里——它自带 14% 内边距，再缩就太小了。
+  Widget _inset(Widget child) {
+    return Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: (width ?? size) * 0.10,
+        vertical: size * 0.10,
+      ),
+      child: child,
+    );
   }
 
   /// 在线候选逐个尝试：channel.logoUrl → extraLogoUrls → Radio Browser
@@ -82,21 +96,21 @@ class ChannelBadge extends StatelessWidget {
   Widget _remote(int i) {
     final urls = _urls;
     if (i >= urls.length) return _radioThenLetter();
-    return Image.network(
+    return _inset(Image.network(
       urls[i],
       fit: BoxFit.contain,
       errorBuilder: (_, __, ___) => _remote(i + 1),
-    );
+    ));
   }
 
   Widget _radioThenLetter() {
     final fb = RadioLogo.logoFor(channel);
     if (fb.isNotEmpty) {
-      return Image.network(
+      return _inset(Image.network(
         fb,
         fit: BoxFit.contain,
         errorBuilder: (_, __, ___) => _letter(),
-      );
+      ));
     }
     return _letter();
   }

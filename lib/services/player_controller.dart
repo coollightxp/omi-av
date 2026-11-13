@@ -857,6 +857,37 @@ class PlayerController extends ChangeNotifier {
               'at': at?.toIso8601String(),
             };
           },
+          // 内置清单（央视频道 / 电台精选）：网页上与 App 设置面板
+          // 同款的更新时间 / 自动检查间隔 / 立即检查更新
+          builtinInfo: () async {
+            final sm = sourceManager;
+            return {
+              'cctv': {
+                'count': await sm.builtinCctvChannelCount(),
+                'at': (await sm.getBuiltinCctvFetchedAt())?.toIso8601String(),
+                'days': await sm.getBuiltinCctvIntervalDays(),
+              },
+              'radio': {
+                'count': await sm.builtinRadioStationCount(),
+                'at': (await sm.getBuiltinRadioFetchedAt())?.toIso8601String(),
+                'days': await sm.getBuiltinRadioIntervalDays(),
+              },
+            };
+          },
+          updateBuiltin: (kind) async {
+            final (ok, msg) = kind == 'radio'
+                ? await sourceManager.updateBuiltinRadio(force: true)
+                : await sourceManager.updateBuiltinCctv(force: true);
+            notifyListeners();
+            return {'ok': ok, 'message': msg};
+          },
+          setBuiltinInterval: (kind, days) async {
+            if (kind == 'radio') {
+              await sourceManager.setBuiltinRadioIntervalDays(days);
+            } else {
+              await sourceManager.setBuiltinCctvIntervalDays(days);
+            }
+          },
         ),
       );
       _remoteAdminUrl = remoteAdminService.endpoint;
