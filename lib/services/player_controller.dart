@@ -3243,16 +3243,18 @@ class PlayerController extends ChangeNotifier {
         !_isCasting) {
       _autoReloadCount++;
       final n = _autoReloadCount;
-      _state = PlayerState.error;
-      _lastError = '3 秒后自动重试（第 $n/$total 次）…';
+      // 自动重试期间不再整屏进错误页：启动恢复/网络抖动时错误卡片会闪现
+      // 一下又自己恢复（用户实测重进 App 闪「重试」后正常）。保持当前
+      // 状态 + OSD 轻提示即可，次数用尽才进错误页等用户手动处理。
+      _lastError = null;
+      OsdBus.show('连接失败，正在自动重试（第 $n/$total 次）…',
+          icon: Icons.refresh);
       notifyListeners();
       final ch = _currentChannel;
       _autoRetryTimer = Timer(const Duration(seconds: 3), () {
         _autoRetryTimer = null;
         // 期间用户已切台/手动重试/开始投屏：放弃本次自动重试
-        if (!identical(_currentChannel, ch) ||
-            _state != PlayerState.error ||
-            _isCasting) {
+        if (!identical(_currentChannel, ch) || _isCasting) {
           return;
         }
         _sourceIndex = 0;

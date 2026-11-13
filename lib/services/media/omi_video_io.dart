@@ -82,13 +82,20 @@ class OmiVideoController extends ChangeNotifier
 
   /// 电台流的曲目元数据：libmpv 把 ICY `StreamTitle` 映射到 `media-title`，
   /// 属性变化事件比轮询省事也更及时。Web 端没有 mpv，不参与。
+  ///
+  /// 部分电台（实测 AsiaFM 系列）的 Icecast 转码端有毛病：UTF-8 文本每
+  /// 三个字节序列的尾字节被替换成 `?`（「叶蒨文 - 曾经心痛」发出来就成
+  /// 了缺尾字节的残流），libmpv 对有效序列正常解码、对残字节按 latin1
+  /// 吐出 `æ`/`å` 一类残渣。字节在服务器端已经丢了，客户端无法还原，
+  /// 这里只做显示清理：删掉替换符、控制符与夹在中文/标点旁的残渣字符
+  /// 和孤立 `?`，让「正在播放」至少可读。
   void _observeMediaTitle() {
     final platform = _player.platform;
     if (platform is! NativePlayer) return;
     unawaited(() async {
       try {
         await platform.observeProperty('media-title', (value) async {
-          final t = value.trim();
+          final t = sanitizeIcyTitle(value.trim());
           if (t.isEmpty || t == _value.mediaTitle) return;
           _set(_value.copyWith(mediaTitle: t));
         });
@@ -97,6 +104,24 @@ class OmiVideoController extends ChangeNotifier
         debugPrint('[OmiVideo] observe media-title failed: $e');
       }
     }());
+  }
+
+  /// 清理 ICY 曲目元数据里的转码残渣（见 [_observeMediaTitle] 注释）。
+  /// 只在文本里确实有中文时才动 `?` 和 latin1 残渣，纯英文歌名原样放行。
+  static String sanitizeIcyTitle(String raw) {
+    var s = raw.replaceAll('\uFFFD', '');
+    // C1 控制区残渣（latin1 视角下的不可打印字节）
+    s = s.replaceAll(RegExp('[\u0080-\u009F]'), '');
+    if (!s.contains(RegExp('[\u4e00-\u9fff]'))) return s;
+    // latin1 扩展残渣：紧邻中文/全角标点的 æ å ç 一类字符
+    const ctx = '[\u4e00-\u9fff\u3000-\u303F\uFF00-\uFFEF（）()\\[\\]·，。：]';
+    s = s.replaceAll(RegExp('(?<=$ctx)'), '');
+    s = s.replaceAll(RegExp('(?=$ctx)'), '');
+    // 服务器替换尾字节产生的孤立 ?（夹在中文/标点之间或行尾）
+    s = s.replaceAll(RegExp('\\?(?=$ctx|[-—–\\s]|$)'), '');
+    // 残渣清掉后可能留下 "中文 -  (x)" 之类的空洞，压掉多余空格
+    s = s.replaceAll(RegExp(' {2,}'), ' ').replaceAll(RegExp(' ([)）])'), ')');
+    return s.trim();
   }
 
   void _bindStreams() {

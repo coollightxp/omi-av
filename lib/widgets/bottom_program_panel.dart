@@ -12,7 +12,6 @@ import '../core/widgets/ghost_button.dart';
 import '../player/widgets/source_stepper.dart';
 import '../services/player_controller.dart';
 import 'scaled_panel.dart';
-import 'sleep_timer_dialog.dart';
 
 /// 底部信息/控制面板
 /// 布局（参考电视播放器）：台标 | 当前节目(大字)+时段/频道/分辨率/线路 | 控制按钮
@@ -478,10 +477,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         ],
       ]);
     }
-    // 电台变体（方案 13.3）：音频没有画面，截图/旋转/小窗都不出现；
-    // 睡前听广播高频，专给一个「定时关闭」
+    // 电台变体（方案 13.3）：音频没有画面，截图/旋转/小窗都不出现
     final isRadio = c.currentChannel?.isRadio ?? false;
-    final sleepRemain = c.sleepCountdown.value;
     // 可用动作：禁用按钮不进列表，遥控器只会高亮能点的按钮
     final actions = <_KbAction>[
       // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
@@ -510,16 +507,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           hasChannel ? c.toggleRadioRecord : null,
         ),
       ],
-      // 定时关闭：电台（听着睡着）和电视（看着睡着）都需要。
-      // 到点动作可选暂停/退出/退出并关机，固定时刻见 showSleepTimerDialog
-      _KbAction(
-        'sleep',
-        Icons.bedtime_outlined,
-        sleepRemain == null
-            ? '定时关闭'
-            : '定时关闭（剩 ${_fmtRemain(sleepRemain)}）',
-        hasChannel ? () => showSleepTimerDialog(context) : null,
-      ),
       if (c.isDesktop && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
@@ -646,25 +633,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       children.add(_btn(byId('radioRec')));
     }
 
-    // 定时关闭独占最末位（电台专属）：跟换台/播放这些高频操作隔开，
-    // 睡前设一次就不容易被误碰
-    if (isRadio) {
-      children.add(_groupDivider(d));
-      children.add(_btn(byId('sleep')));
-    }
+    // 定时关闭入口统一收进退出卡片（长按返回/退出键），底部面板不再
+    // 放第二个入口：两处并存时遥控器焦点容易落到低频按钮上
 
     return Row(mainAxisSize: MainAxisSize.min, children: children);
-  }
-
-  /// 剩余时间文案：1:05:00 / 32:10
-  static String _fmtRemain(Duration d) {
-    final h = d.inHours;
-    final m = d.inMinutes % 60;
-    final sec = d.inSeconds % 60;
-    if (h > 0) {
-      return '$h:${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
-    }
-    return '$m:${sec.toString().padLeft(2, '0')}';
   }
 
   /// 面板按钮：统一走 [GhostButton]（全 App 唯一圆形操作钮）。
