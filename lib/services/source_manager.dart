@@ -11,6 +11,8 @@ import '../models/channel.dart';
 import '../models/epg_program.dart';
 import '../models/epg_source.dart';
 import '../models/playlist_source.dart';
+import 'builtin_catalog.dart';
+import 'builtin_epg.dart';
 import 'playlist_parser.dart';
 import 'radio_library.dart';
 import 'xmltv_epg_parser.dart';
@@ -24,6 +26,8 @@ class SourceManager {
   static const String _currentEpgKey = 'omi_current_epg';
   /// 用户删掉内置源后置 true，不再自动补回（设置页可手动恢复）
   static const String _builtinRemovedKey = 'omi_builtin_radio_removed';
+  /// 用户删掉内置 EPG 后置 true，不再自动补回
+  static const String _builtinEpgRemovedKey = 'omi_builtin_epg_removed';
 
   // EPG 每日缓存：拉取后序列化到 SharedPreferences，24h 内复用，
   // 避免每次打开都联网（EPG 一天内几乎不变）。
@@ -47,6 +51,7 @@ class SourceManager {
   bool _channelsLoaded = false;
   bool _epgLoaded = false;
   bool _builtinRemoved = false;
+  bool _builtinEpgRemoved = false;
 
   List<PlaylistSource> get playlists => List.unmodifiable(_playlists);
   List<EpgSource> get epgs => List.unmodifiable(_epgs);
@@ -94,11 +99,23 @@ class SourceManager {
     await RadioLibrary.load();
     await ensureRadioLibrarySource();
 
+    // 去重兜底：旧版网页保存曾把电台源重复追加进列表（一次保存多一批），
+    // 这里按 id 只留第一条，用户升级上来重启即自动清干净
+    if (_playlists.length > 1) {
+      final seen = <String>{};
+      _playlists.retainWhere((p) => seen.add(p.id));
+    }
+
     final epgStr = prefs.getString(_epgKey);
     if (epgStr != null && epgStr.isNotEmpty) {
       _epgs = EpgSource.decodeList(epgStr);
     }
     _currentEpgId = prefs.getString(_currentEpgKey);
+    _builtinEpgRemoved = prefs.getBool(_builtinEpgRemovedKey) == true;
+
+    // 内置节目单：默认就有一个，用户一个 EPG 都没配也能看到节目表。
+    // 用户删过就不再塞回来（设置页可重新加）。
+    await _ensureBuiltinEpg(prefs);
   }
 
   /// 内置电台精选：出厂自带，排在源列表首位。
@@ -147,6 +164,40 @@ class SourceManager {
     }
   }
 
+  /// 内置 EPG：只在没有、且用户没删过时补一条。
+  ///
+  /// 新装用户打开 EPG 页直接就有央视节目表（不用去哪个网站找 xmltv），
+  /// 老用户自己配的 EPG 不会被抢——只有当前 EPG 为空/失效时才落到内置。
+  Future<void> _ensureBuiltinEpg(SharedPreferences prefs) async {
+    if (_builtinEpgRemoved) return;
+    var changed = false;
+    if (!_epgs.any((e) => e.id == BuiltinEpg.sourceId)) {
+      _epgs.insert(0, BuiltinEpg.builtinSource());
+      changed = true;
+    }
+    final curValid =
+        _currentEpgId != null && _epgs.any((e) => e.id == _currentEpgId);
+    if (!curValid) {
+      _currentEpgId = BuiltinEpg.sourceId;
+      changed = true;
+    }
+    if (changed) await _saveEpgs();
+  }
+
+  /// 恢复被删除的内置节目单
+  Future<void> restoreBuiltinEpg() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_builtinEpgRemovedKey, false);
+    _builtinEpgRemoved = false;
+    await _ensureBuiltinEpg(prefs);
+  }
+
+  /// 内置 EPG 是否被用户删掉（设置页显示「恢复」用）
+  bool get builtinEpgRemoved => _builtinEpgRemoved;
+
+  /// 取消 EPG 的本地缓存（内置节目单手动更新后要强制重解析）
+  Future<void> invalidateEpgCache(String epgId) => clearEpgCache(epgId);
+
   /// 恢复被删除的内置源（设置页「恢复内置电台」）
   Future<void> restoreBuiltinRadio() async {
     final prefs = await SharedPreferences.getInstance();
@@ -164,16 +215,15 @@ class SourceManager {
 
   /// 读内置源字节：电台直接读 asset；央视频道优先用远程更新过的缓存
   Future<List<int>> _loadBuiltinBytes(PlaylistSource source) async {
-    if (source.id == PlaylistSource.builtinCctvId) {
-      final prefs = await SharedPreferences.getInstance();
-      final cached = prefs.getString(_kBuiltinCctvCache);
-      if (cached != null && cached.trim().isNotEmpty) {
-        return utf8.encode(cached);
-      }
-      final data = await rootBundle.load(PlaylistSource.builtinCctvAsset);
-      return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    final (cacheKey, asset) = source.id == PlaylistSource.builtinCctvId
+        ? (_kBuiltinCctvCache, PlaylistSource.builtinCctvAsset)
+        : (_kBuiltinRadioCache, PlaylistSource.builtinRadioAsset);
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString(cacheKey);
+    if (cached != null && cached.trim().isNotEmpty) {
+      return utf8.encode(cached);
     }
-    final data = await rootBundle.load(PlaylistSource.builtinRadioAsset);
+    final data = await rootBundle.load(asset);
     return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
   }
 
@@ -185,11 +235,33 @@ class SourceManager {
   static const _kBuiltinCctvAt = 'builtin_cctv_fetched_at';
   static const _kBuiltinCctvInterval = 'builtin_cctv_interval_days';
   static const _kBuiltinCctvRemovedKey = 'omi_builtin_cctv_removed';
+  static const _kBuiltinRadioCache = 'builtin_radio_cache';
+  static const _kBuiltinRadioAt = 'builtin_radio_fetched_at';
+  static const _kBuiltinRadioInterval = 'builtin_radio_interval_days';
 
-  /// 清单镜像：GitHub raw 为主，jsDelivr 兜底（国内可达性更好）
-  static const List<String> builtinCctvMirrors = <String>[
-    'https://raw.githubusercontent.com/coollightxp/omi-av/main/assets/cctv/cctv_live.m3u',
-    'https://cdn.jsdelivr.net/gh/coollightxp/omi-av@main/assets/cctv/cctv_live.m3u',
+  /// 清单镜像：多 CDN 串行尝试。
+  ///
+  /// 注意：GitHub 仓库当前是 private，raw / jsDelivr 都拿不到（404）——
+  /// 清单要真正可更新，仓库（或专门的 omi-av-lists 仓库）必须公开。
+  /// 镜像顺序：jsDelivr 多入口（国内可达性好）→ GitHub raw。
+  static List<String> _builtinMirrors(String repoPath) => <String>[
+        'https://cdn.jsdelivr.net/gh/coollightxp/$repoPath',
+        'https://fastly.jsdelivr.net/gh/coollightxp/$repoPath',
+        'https://testingcf.jsdelivr.net/gh/coollightxp/$repoPath',
+        'https://gcore.jsdelivr.net/gh/coollightxp/$repoPath',
+        'https://raw.githubusercontent.com/coollightxp/$repoPath',
+      ];
+
+  /// 央视清单：主仓库路径 + 公开清单仓库路径（若用户后续建了就自动可用）
+  static final List<String> builtinCctvMirrors = <String>[
+    ..._builtinMirrors('omi-av@main/assets/cctv/cctv_live.m3u'),
+    ..._builtinMirrors('omi-av-lists@main/cctv/cctv_live.m3u'),
+  ];
+
+  /// 电台清单：同上两套路径
+  static final List<String> builtinRadioMirrors = <String>[
+    ..._builtinMirrors('omi-av@main/assets/radio/omi_radio.m3u'),
+    ..._builtinMirrors('omi-av-lists@main/radio/omi_radio.m3u'),
   ];
 
   /// 更新间隔（天）：0 = 关闭自动检查；默认 7 天
@@ -233,16 +305,145 @@ class SourceManager {
     await updateBuiltinCctv();
   }
 
-  /// 拉取远程清单并落缓存。返回 (成功?, 说明)。
-  /// 校验三条，避免把一个坏文件覆盖掉能用的清单：
-  /// ① 含 #EXTINF ② 至少 10 条 ③ 链接多数是 webview:// 或 http(s)
+  // ==================== 内置电台：定期更新（与央视频道同款） ====================
+
+  Future<int> getBuiltinRadioIntervalDays() async {
+    final p = await SharedPreferences.getInstance();
+    return p.getInt(_kBuiltinRadioInterval) ?? 7;
+  }
+
+  Future<void> setBuiltinRadioIntervalDays(int days) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(_kBuiltinRadioInterval, days.clamp(0, 365));
+  }
+
+  Future<DateTime?> getBuiltinRadioFetchedAt() async {
+    final p = await SharedPreferences.getInstance();
+    final ms = p.getInt(_kBuiltinRadioAt);
+    return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
+  }
+
+  /// 当前生效电台清单的台数（缓存优先，否则数 asset）
+  Future<int> builtinRadioStationCount() async {
+    final p = await SharedPreferences.getInstance();
+    final cached = p.getString(_kBuiltinRadioCache);
+    final text = cached ??
+        await rootBundle.loadString(PlaylistSource.builtinRadioAsset);
+    return text
+        .split('\n')
+        .where((l) => l.trimLeft().startsWith('#EXTINF'))
+        .length;
+  }
+
+  /// 到期就后台拉一次（启动时调，失败静默）
+  Future<void> maybeAutoUpdateBuiltinRadio() async {
+    final days = await getBuiltinRadioIntervalDays();
+    if (days <= 0) return;
+    final at = await getBuiltinRadioFetchedAt();
+    if (at != null && DateTime.now().difference(at).inDays < days) {
+      return;
+    }
+    await updateBuiltinRadio();
+  }
+
+  /// 拉取远程央视频道清单并落缓存。返回 (成功?, 说明)。
   Future<(bool, String)> updateBuiltinCctv({bool force = false}) async {
-    for (final url in builtinCctvMirrors) {
+    // 第一优先：直接从央视网抓（不依赖任何托管仓库，站点改版也能自愈）
+    final current = await _readBuiltinText(
+        _kBuiltinCctvCache, PlaylistSource.builtinCctvAsset);
+    final (scraped, msg, text) = await BuiltinCatalog.buildCctvList(current);
+    if (scraped && text != null) {
+      await _storeBuiltinList(
+        cacheKey: _kBuiltinCctvCache,
+        atKey: _kBuiltinCctvAt,
+        sourceId: PlaylistSource.builtinCctvId,
+        text: text,
+      );
+      return (true, msg);
+    }
+    // 兜底：抓取失败（网络限制 / 站点大改）时，仍可拉预生成的清单
+    final (ok, mirrorMsg) = await _updateBuiltinList(
+      mirrors: builtinCctvMirrors,
+      cacheKey: _kBuiltinCctvCache,
+      atKey: _kBuiltinCctvAt,
+      sourceId: PlaylistSource.builtinCctvId,
+      unit: '频道',
+    );
+    if (ok) return (true, mirrorMsg);
+    return (false, '$msg；备用清单也不可达（$mirrorMsg）');
+  }
+
+  /// 读当前生效的内置清单文本（缓存优先，否则 asset）
+  Future<String> _readBuiltinText(String cacheKey, String asset) async {
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString(cacheKey);
+    if (cached != null && cached.trim().isNotEmpty) return cached;
+    try {
+      return await rootBundle.loadString(asset);
+    } catch (_) {
+      return '#EXTM3U\n';
+    }
+  }
+
+  /// 落缓存 + 当前正在用时立刻重建频道列表
+  Future<void> _storeBuiltinList({
+    required String cacheKey,
+    required String atKey,
+    required String sourceId,
+    required String text,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(cacheKey, text);
+    await prefs.setInt(atKey, DateTime.now().millisecondsSinceEpoch);
+    if (_currentPlaylistId == sourceId) {
+      _channelsLoaded = false;
+      unawaited(loadChannels());
+    }
+  }
+
+  /// 拉取远程内置电台清单并落缓存。返回 (成功?, 说明)。
+  Future<(bool, String)> updateBuiltinRadio({bool force = false}) async {
+    // 先从在线电台目录增量补台（只加不删）；失败再拉预生成的清单
+    final current = await _readBuiltinText(
+        _kBuiltinRadioCache, PlaylistSource.builtinRadioAsset);
+    final (ok, msg, text) = await BuiltinCatalog.buildRadioList(current);
+    if (ok && text != null) {
+      await _storeBuiltinList(
+        cacheKey: _kBuiltinRadioCache,
+        atKey: _kBuiltinRadioAt,
+        sourceId: PlaylistSource.builtinRadioId,
+        text: text,
+      );
+      return (true, msg);
+    }
+    if (ok) return (true, msg); // 没有新台，也算成功
+    final (mOk, mMmsg) = await _updateBuiltinList(
+      mirrors: builtinRadioMirrors,
+      cacheKey: _kBuiltinRadioCache,
+      atKey: _kBuiltinRadioAt,
+      sourceId: PlaylistSource.builtinRadioId,
+      unit: '个台',
+    );
+    if (mOk) return (true, mMmsg);
+    return (false, '$msg；备用清单也不可达（$mMmsg）');
+  }
+
+  /// 通用拉取：逐镜像串行尝试（jsDelivr 国内可达性好，raw 兜底），
+  /// 每个镜像 15 秒超时。校验三条，避免把一个坏文件覆盖掉能用的清单：
+  /// ① 含 #EXTINF ② 至少 10 条 ③ 链接多数是 webview:// 或 http(s)
+  Future<(bool, String)> _updateBuiltinList({
+    required List<String> mirrors,
+    required String cacheKey,
+    required String atKey,
+    required String sourceId,
+    required String unit,
+  }) async {
+    for (final url in mirrors) {
       try {
         final resp = await http.get(
           Uri.parse(url),
           headers: {'User-Agent': _uaBox, 'Accept': '*/*'},
-        ).timeout(const Duration(seconds: 25));
+        ).timeout(const Duration(seconds: 15));
         if (resp.statusCode != 200) continue;
         final text = utf8.decode(resp.bodyBytes, allowMalformed: true);
         final count = text
@@ -260,20 +461,19 @@ class SourceManager {
         if (count < 10 || good < count * 0.8) continue;
 
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(_kBuiltinCctvCache, text);
-        await prefs.setInt(
-            _kBuiltinCctvAt, DateTime.now().millisecondsSinceEpoch);
+        await prefs.setString(cacheKey, text);
+        await prefs.setInt(atKey, DateTime.now().millisecondsSinceEpoch);
         // 正在用这个源：立刻重建频道缓存，用户不用手动刷新
-        if (_currentPlaylistId == PlaylistSource.builtinCctvId) {
+        if (_currentPlaylistId == sourceId) {
           _channelsLoaded = false;
           unawaited(loadChannels());
         }
-        return (true, '已更新到 $count 个频道');
+        return (true, '已更新到 $count $unit');
       } catch (_) {
         // 换下一个镜像
       }
     }
-    return (false, '拉取失败（网络不通或清单未发布），继续用本地清单');
+    return (false, '拉取失败（清单仓库未公开或网络不通），继续用本地清单');
   }
 
   /// 确保「我的电台」源存在（在网上目录加了第一个台时调用）
@@ -365,9 +565,12 @@ class SourceManager {
   /// 全量替换（Web 管理端保存）：返回当前选中项是否仍存在
   Future<bool> replacePlaylists(
       List<PlaylistSource> list, String? currentId) async {
-    _playlists = list;
+    // 同 id 只留一条：网页端/外部调用者发来的列表不信任，防止重复源
+    // 在列表里越攒越多（历史上网页保存一次多一批电台源的教训）
+    final seen = <String>{};
+    _playlists = List.of(list)..retainWhere((p) => seen.add(p.id));
     _currentPlaylistId =
-        list.any((p) => p.id == currentId) ? currentId : null;
+        _playlists.any((p) => p.id == currentId) ? currentId : null;
     await _savePlaylists();
     return _currentPlaylistId != null;
   }
@@ -807,6 +1010,12 @@ class SourceManager {
       _cachedEpg = {};
       _epgLoaded = false;
     }
+    // 内置节目单被删：记下来，重启不再自动补回（设置页可恢复）
+    if (id == BuiltinEpg.sourceId) {
+      _builtinEpgRemoved = true;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_builtinEpgRemovedKey, true);
+    }
     await _saveEpgs();
   }
 
@@ -842,6 +1051,11 @@ class SourceManager {
       _cachedEpg = {};
       _epgLoaded = true;
       return {};
+    }
+
+    // 内置节目单：正文是 App 自己从央视网抓来拼好的 XMLTV，不走网络
+    if (source.url == BuiltinEpg.localUrl) {
+      return _loadBuiltinEpg(source.id);
     }
 
     final prefs = await SharedPreferences.getInstance();
@@ -904,6 +1118,45 @@ class SourceManager {
       _epgLoaded = true;
       rethrow;
     }
+    return _cachedEpg;
+  }
+
+  /// 加载内置节目单：读 BuiltinEpg 的本地 XMLTV 缓存。
+  ///
+  /// 缓存为空（全新安装、或用户刚清过缓存）时现场抓一次；抓不到就返回空表
+  /// 但不抛错——内置项挂掉不该弹一个「EPG 加载失败」，界面上只是没节目。
+  Future<Map<String, List<EpgProgram>>> _loadBuiltinEpg(String id) async {
+    var text = await BuiltinEpg.readCache();
+    if (text == null || text.trim().isEmpty) {
+      try {
+        final (ok, msg) = await BuiltinEpg.refresh(force: true);
+        if (!ok) debugPrintEpg('[内置EPG] $msg');
+      } catch (e) {
+        debugPrintEpg('[内置EPG] $e');
+      }
+      text = await BuiltinEpg.readCache();
+    }
+    if (text == null || text.trim().isEmpty) {
+      _cachedEpg = {};
+      _cachedEpgChannelNames = {};
+      _cachedEpgChannelIcons = {};
+      _epgLoaded = true;
+      return _cachedEpg;
+    }
+
+    final parsed = await XmltvEpgParser.parseBytesAsync(utf8.encode(text));
+    _cachedEpg = parsed.programs;
+    _cachedEpgChannelNames = parsed.channelNames;
+    _cachedEpgChannelIcons = parsed.channelIcons;
+    _epgLoaded = true;
+
+    final idx = _epgs.indexWhere((e) => e.id == id);
+    if (idx >= 0) {
+      _epgs[idx] = _epgs[idx].copyWith(lastUpdated: DateTime.now());
+      await _saveEpgs();
+    }
+    await _writeEpgCache(
+        id, parsed.programs, parsed.channelNames, parsed.channelIcons);
     return _cachedEpg;
   }
 

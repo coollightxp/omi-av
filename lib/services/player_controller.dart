@@ -36,7 +36,9 @@ import 'channel_alias.dart';
 import 'scene_favorites.dart';
 import 'radio_recorder.dart';
 import 'tray_service.dart';
+import 'builtin_epg.dart';
 import 'radio_catalog.dart';
+import 'radio_directory.dart';
 import 'radio_logo.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
@@ -205,6 +207,9 @@ class PlayerController extends ChangeNotifier {
 
   // 播放进度定时刷新（进度条/倒计时）
   Timer? _tickTimer;
+  Timer? _epgDayTimer;
+  /// 已经检查过跨天的日期（yyyyMMdd），避免同一天反复拉节目单
+  String _epgDayChecked = '';
 
   /// 进度秒级去重 + 直播节目跨段去重（见 tick 里的说明）
   int? _lastTickSecond;
@@ -347,6 +352,9 @@ class PlayerController extends ChangeNotifier {
   void notifyListeners() {
     super.notifyListeners();
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    // 通知栏/锁屏音频卡片（此前是死代码：函数在、没人调，卡片永远
+    // 不出现）。签名去重在函数内部，频率高也不会跨通道刷
+    _syncAudioNotification();
     // 电台没有画面，进画中画只会得到一个小黑窗：电台应该在通知栏
     // 用音频卡片（上一台/暂停/下一台）控制，而不是切小窗
     final audioOnly = _currentChannel?.isRadio ?? false;
@@ -383,7 +391,26 @@ class PlayerController extends ChangeNotifier {
           unawaited(refreshChannels());
         }
       }));
+      // 内置电台清单：同一套到期机制，互不影响
+      unawaited(sourceManager.maybeAutoUpdateBuiltinRadio().then((_) {
+        if (sourceManager.currentPlaylistId ==
+            PlaylistSource.builtinRadioId) {
+          unawaited(refreshChannels());
+        }
+      }));
+      // 内置节目单：每天从央视网抓「今天 + 明天」，只有真更新过才重解析
+      unawaited(BuiltinEpg.maybeAutoRefresh().then((updated) async {
+        if (!updated) return;
+        if (sourceManager.currentEpg?.url != BuiltinEpg.localUrl) return;
+        await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+        await refreshEpg();
+      }));
     });
+    // 跨天刷新：央视接口只给「今天 / 明天」，App 常驻过夜后缓存里就只剩
+    // 昨天和今天，今天那半截也过期了。每半小时看一眼缓存是哪天抓的，
+    // 日期变了就重抓一次（只在真跨天时触发，白天不会反复请求）
+    _epgDayTimer = Timer.periodic(
+        const Duration(minutes: 30), (_) => unawaited(_refreshEpgIfNewDay()));
     // 电台台标索引：读本地缓存 → 过期才后台拉一次 Radio Browser。
     // 不 await：台标只是锦上添花，绝不能拖慢启动
     unawaited(RadioLogo.ensure());
@@ -781,9 +808,54 @@ class PlayerController extends ChangeNotifier {
           refresh: (kind) async {
             if (kind == 'epgs') {
               await refreshEpg();
+            } else if (kind == 'radio') {
+              await _afterRadioLibraryChanged();
             } else {
               await refreshChannels();
             }
+          },
+          // 电台：搜索在电脑侧发请求，手机不必能直连外网目录
+          searchRadio: (q, tag) async {
+            final list = await RadioDirectory.search(query: q, tag: tag);
+            return list.map((e) => e.toJson()).toList();
+          },
+          addRadio: (m) async {
+            final st = RadioStation.fromJson(m);
+            if (st.id.isEmpty || st.url.isEmpty) return;
+            await addRadioStation(st);
+          },
+          removeRadio: (id) => removeRadioStation(id),
+          playRadio: (id) async {
+            for (final st in RadioLibrary.items) {
+              if (st.id == id) {
+                await playChannel(RadioLibrary.toChannel(st));
+                return;
+              }
+            }
+          },
+          selectPlaylist: (id) async {
+            await sourceManager.selectPlaylist(id);
+            await refreshChannels();
+          },
+          restoreBuiltinRadio: () => restoreBuiltinRadio(),
+          // 内置节目单：网页上「立即更新」直接让电脑端去央视网抓
+          updateBuiltinEpg: () async {
+            final (ok, msg) = await BuiltinEpg.refresh(force: true);
+            if (ok) {
+              await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+              if (sourceManager.currentEpg?.url == BuiltinEpg.localUrl) {
+                await refreshEpg();
+              }
+            }
+            notifyListeners();
+            return msg;
+          },
+          builtinEpgInfo: () async {
+            final at = await BuiltinEpg.fetchedAt();
+            return {
+              'count': await BuiltinEpg.programCount(),
+              'at': at?.toIso8601String(),
+            };
           },
         ),
       );
@@ -800,17 +872,39 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  static bool _isRadioPlaylistId(String id) =>
+      id == PlaylistSource.builtinRadioId ||
+      id == PlaylistSource.radioLibraryId;
+
   Future<Map<String, dynamic>> _remoteAdminSnapshot() async {
     final s = settings;
     return {
-      'playlists': sourceManager.playlists.map((e) => e.toJson()).toList(),
+      'playlists': sourceManager.playlists
+          .map((e) => {
+                ...e.toJson(),
+                // 网页「直播源」页要滤掉电台源，靠这个标记
+                'radio': _isRadioPlaylistId(e.id),
+              })
+          .toList(),
       'currentPlaylistId': sourceManager.currentPlaylistId,
       'epgs': sourceManager.epgs.map((e) => e.toJson()).toList(),
       'currentEpgId': sourceManager.currentEpgId,
-      // 手机端常用开关（不放 remoteAdminEnabled：关掉会断开自己）
+      // 电台页：我的电台 + 内置源状态
+      'radios': RadioLibrary.items.map((e) => e.toJson()).toList(),
+      'radioBuiltin': {
+        'id': PlaylistSource.builtinRadioId,
+        'exists': sourceManager.playlists
+            .any((p) => p.id == PlaylistSource.builtinRadioId),
+        'current':
+            sourceManager.currentPlaylistId == PlaylistSource.builtinRadioId,
+      },
+      // 手机端设置：与设备「设置」面板一一对应（网页里改不动的
+      // 只在设备上做，这里不出现）
       'settings': {
         'showClock': s.showClock,
         'dlnaEnabled': s.dlnaEnabled,
+        'dlnaRunning': _dlnaRunning,
+        'dlnaName': _dlnaName,
         'alwaysOnTop': s.alwaysOnTop,
         'autoPlayNext': s.autoPlayNext,
         'autoReloadStall': s.autoReloadStall,
@@ -821,21 +915,57 @@ class PlayerController extends ChangeNotifier {
         'launchAtStartup': s.launchAtStartup,
         'uiScale': s.uiScale,
         'uiScaleAuto': s.uiScaleAuto,
+        // 播放器页
+        'preferredQuality': s.preferredQuality.name,
+        'playEngine': s.playEngine,
+        'audioPreset': s.audioPreset,
+        'spectrumTexture': s.spectrumTexture,
+        'radioMeter': s.radioMeter,
+        'gestureSensitivity': s.gestureSensitivity,
+        'autoHideDelay': s.autoHideDelay,
+        'sourceTimeoutSeconds': s.sourceTimeoutSeconds,
+        'bufferSeconds': s.bufferSeconds,
+        'resumeLastChannel': s.resumeLastChannel,
+        'closeToTray': s.closeToTray,
         // 定时关闭（手机端可远程设定；到点动作 shutdown 仅桌面生效）
         'sleepActionKey': s.sleepActionKey,
         'sleepAtMs': s.sleepAtMs,
         'isDesktop': isDesktop,
+        'isWindows': kIsWindowsDesktop,
       },
     };
   }
 
   Future<void> _remoteAdminApply(Map<String, dynamic> data) async {
     final rawPl = (data['playlists'] as List?) ?? const [];
-    final playlists = rawPl
+    // 网页 persist() 发回的是整份 state，里面带着快照原样下发过的电台源；
+    // 这些项只在「电台」页管理，这里必须先剥掉再回填，否则直播源槽位
+    // 会吃到电台项、剩下的又被追加，一次保存就多出一批重复电台源
+    final posted = rawPl
         .whereType<Map>()
-        .map((m) => PlaylistSource.fromJson(
-            _normalizeRemoteItem(m.cast<String, dynamic>())))
+        .map((m) => _normalizeRemoteItem(m.cast<String, dynamic>()))
+        .where((m) =>
+            m['radio'] != true &&
+            !_isRadioPlaylistId((m['id'] ?? '').toString()))
+        .map((m) => PlaylistSource.fromJson(m))
         .toList();
+    // 双保险：同 id 只留一条（旧版本网页保存过一次的设备本地可能已攒了重复）
+    final seen = <String>{};
+    posted.retainWhere((p) => seen.add(p.id));
+    // 网页「直播源」页只列电视源（电台在「电台」页）：保存时按原位置回填
+    // 现有的电台源，否则手机点一次保存就把内置电台/我的电台删了
+    final playlists = <PlaylistSource>[];
+    var pi = 0;
+    for (final old in sourceManager.playlists) {
+      if (_isRadioPlaylistId(old.id)) {
+        playlists.add(old);
+      } else if (pi < posted.length) {
+        playlists.add(posted[pi++]);
+      }
+    }
+    while (pi < posted.length) {
+      playlists.add(posted[pi++]);
+    }
     final newPlId = data['currentPlaylistId']?.toString();
     final oldPlId = sourceManager.currentPlaylistId;
     final oldPlUrl = sourceManager.currentPlaylist?.url;
@@ -866,11 +996,28 @@ class PlayerController extends ChangeNotifier {
       await refreshEpg();
     }
 
-    // 手机端常用开关（settings 段缺省时跳过，兼容旧版页面的请求）
+    // 设置项（settings 段缺省时跳过，兼容旧版页面的请求）
     final rawSettings = data['settings'];
     if (rawSettings is Map) {
       bool? rb(String key) =>
           rawSettings[key] is bool ? rawSettings[key] as bool : null;
+      int? ri(String key) {
+        final v = rawSettings[key];
+        if (v is num) return v.toInt();
+        if (v is String) return int.tryParse(v);
+        return null;
+      }
+
+      double? rd(String key) {
+        final v = rawSettings[key];
+        if (v is num) return v.toDouble();
+        if (v is String) return double.tryParse(v);
+        return null;
+      }
+
+      String? rs(String key) =>
+          rawSettings[key] is String ? rawSettings[key] as String : null;
+
       final cur = _settings;
 
       // 时钟走独立通道，避免整棵播放树重建（见 setShowClock 注释）
@@ -878,26 +1025,72 @@ class PlayerController extends ChangeNotifier {
       if (clock != null && clock != cur.showClock) {
         setShowClock(clock);
       }
+      // 播放内核：换台生效（setPlayEngine 内部会重开当前台）
+      final engine = rs('playEngine');
+      if (engine != null &&
+          (engine == 'mpv' || engine == 'mdk') &&
+          engine != cur.playEngine) {
+        await setPlayEngine(engine);
+      }
+      // 声音实验室：只认内置预设，'custom' 的自定义增益留在设备上调
+      final preset = rs('audioPreset');
+      if (preset != null &&
+          preset != cur.audioPreset &&
+          (preset.isEmpty || kAudioPresets.containsKey(preset))) {
+        await setAudioPreset(preset);
+      }
+      final spectrum = rb('spectrumTexture');
+      if (spectrum != null && spectrum != cur.spectrumTexture) {
+        await setSpectrumTexture(spectrum);
+      }
+      final meter = rb('radioMeter');
+      if (meter != null && meter != cur.radioMeter) {
+        await setRadioMeter(meter);
+      }
+      VideoQuality? quality;
+      final qName = rs('preferredQuality');
+      for (final v in VideoQuality.values) {
+        if (v.name == qName) quality = v;
+      }
 
       final dlna = rb('dlnaEnabled') ?? cur.dlnaEnabled;
       final autoPlayNext = rb('autoPlayNext') ?? cur.autoPlayNext;
       final autoReloadStall = rb('autoReloadStall') ?? cur.autoReloadStall;
       final webEnabled = rb('webEnabled') ?? cur.webEnabled;
       final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
+      final resumeLast = rb('resumeLastChannel') ?? cur.resumeLastChannel;
+      final closeToTray = kIsWindowsDesktop
+          ? (rb('closeToTray') ?? cur.closeToTray)
+          : cur.closeToTray;
       double uiScale = cur.uiScale;
-      if (rawSettings['uiScale'] is num) {
-        uiScale = (rawSettings['uiScale'] as num).toDouble().clamp(0.8, 3.0);
+      final uiRaw = rd('uiScale');
+      if (uiRaw != null) uiScale = uiRaw.clamp(0.8, 3.0);
+      double gesture = cur.gestureSensitivity;
+      final gRaw = rd('gestureSensitivity');
+      if (gRaw != null) gesture = gRaw.clamp(0.5, 2.0);
+      int autoHide = cur.autoHideDelay;
+      final ahRaw = ri('autoHideDelay');
+      if (ahRaw != null) autoHide = ahRaw.clamp(1000, 10000);
+      int sourceTimeout = cur.sourceTimeoutSeconds;
+      final soRaw = ri('sourceTimeoutSeconds');
+      if (soRaw != null && soRaw >= 5 && soRaw <= 30) {
+        sourceTimeout = soRaw;
+      }
+      int buffer = cur.bufferSeconds;
+      final bufRaw = ri('bufferSeconds');
+      if (bufRaw != null && const {5, 10, 20, 30}.contains(bufRaw)) {
+        buffer = bufRaw;
       }
       // 数值型选项：只接受界面提供的档位，防止旧/异常页面写入非法值
       int retryTimes = cur.retryTimes;
-      final rt = rawSettings['retryTimes'];
-      if (rt is num && const {3, 5, 10}.contains(rt.toInt())) {
-        retryTimes = rt.toInt();
+      final rt = ri('retryTimes');
+      if (rt != null && const {3, 5, 10}.contains(rt)) {
+        retryTimes = rt;
       }
       int castEndWait = cur.castEndWaitSeconds;
-      final ce = rawSettings['castEndWaitSeconds'];
-      if (ce is num && const {-1, 0, 60, 300, 600}.contains(ce.toInt())) {
-        castEndWait = ce.toInt();
+      final ce = ri('castEndWaitSeconds');
+      if (ce != null && const {-1, 0, 60, 300, 600}.contains(ce)) {
+        castEndWait = ce;
       }
       final startFullscreen = rb('startFullscreen') ?? cur.startFullscreen;
       final alwaysOnTop =
@@ -926,19 +1119,26 @@ class PlayerController extends ChangeNotifier {
           );
         }
       }
-      if (dlna != cur.dlnaEnabled ||
-          autoPlayNext != cur.autoPlayNext ||
-          autoReloadStall != cur.autoReloadStall ||
-          webEnabled != cur.webEnabled ||
-          retryTimes != cur.retryTimes ||
-          castEndWait != cur.castEndWaitSeconds ||
-          uiScaleAuto != cur.uiScaleAuto ||
-          uiScale != cur.uiScale ||
-          startFullscreen != cur.startFullscreen ||
-          alwaysOnTop != cur.alwaysOnTop ||
-          launchAtStartup != cur.launchAtStartup) {
-        // 用 _settings 而非 cur：上面的定时关闭可能已经改过设置对象，
-        // 拿旧快照 copyWith 会把刚写入的 sleep* 覆盖回去
+      if (dlna != _settings.dlnaEnabled ||
+          autoPlayNext != _settings.autoPlayNext ||
+          autoReloadStall != _settings.autoReloadStall ||
+          webEnabled != _settings.webEnabled ||
+          retryTimes != _settings.retryTimes ||
+          castEndWait != _settings.castEndWaitSeconds ||
+          uiScaleAuto != _settings.uiScaleAuto ||
+          uiScale != _settings.uiScale ||
+          startFullscreen != _settings.startFullscreen ||
+          alwaysOnTop != _settings.alwaysOnTop ||
+          launchAtStartup != _settings.launchAtStartup ||
+          resumeLast != _settings.resumeLastChannel ||
+          closeToTray != _settings.closeToTray ||
+          gesture != _settings.gestureSensitivity ||
+          autoHide != _settings.autoHideDelay ||
+          sourceTimeout != _settings.sourceTimeoutSeconds ||
+          buffer != _settings.bufferSeconds ||
+          (quality != null && quality != _settings.preferredQuality)) {
+        // 用 _settings 而非 cur：上面的定时关闭/内核切换可能已经改过设置
+        // 对象，拿旧快照 copyWith 会把刚写入的 sleep*/playEngine 覆盖回去
         updateSettings(_settings.copyWith(
           dlnaEnabled: dlna,
           autoPlayNext: autoPlayNext,
@@ -951,6 +1151,13 @@ class PlayerController extends ChangeNotifier {
           startFullscreen: startFullscreen,
           alwaysOnTop: alwaysOnTop,
           launchAtStartup: launchAtStartup,
+          resumeLastChannel: resumeLast,
+          closeToTray: closeToTray,
+          gestureSensitivity: gesture,
+          autoHideDelay: autoHide,
+          sourceTimeoutSeconds: sourceTimeout,
+          bufferSeconds: buffer,
+          preferredQuality: quality,
         ));
       }
     }
@@ -1259,6 +1466,27 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  /// 跨天检查：缓存是昨天抓的（或更早）就重抓内置节目单。
+  ///
+  /// 只有「内置节目单」是当前 EPG 时才值得跑；用户自己加的 xmltv 源
+  /// 有自己的刷新策略，这里不插手。
+  Future<void> _refreshEpgIfNewDay() async {
+    if (sourceManager.currentEpg?.url != BuiltinEpg.localUrl) return;
+    final at = await BuiltinEpg.fetchedAt();
+    if (at == null) return;
+    final now = DateTime.now();
+    final today = '${now.year}${now.month}${now.day}';
+    if (at.year == now.year && at.month == now.month && at.day == now.day) {
+      return;
+    }
+    if (_epgDayChecked == today) return;
+    _epgDayChecked = today;
+    final (ok, _) = await BuiltinEpg.refresh(force: true);
+    if (!ok) return;
+    await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+    await refreshEpg();
+  }
+
   /// 刷新 EPG 数据。
   /// - 当前 EPG 可用（缓存新鲜或联网成功）→ 正常返回；
   /// - 当前 EPG 彻底失败且还有其他 EPG 源 → 依次尝试，成功一个就
@@ -1310,6 +1538,12 @@ class PlayerController extends ChangeNotifier {
   Future<void> playChannel(Channel channel) async {
     // 手动切台 = 放弃等待投屏
     _clearCastWait();
+    // 电台不需要小窗（只有带画面的直播才值得置顶小窗）。从视频小窗切到
+    // 电台时顺手还原主窗口——否则小窗里只剩一块电台底图，Windows 上
+    // 还会因为原生小窗切换露一帧白底，看着像个大白框
+    if (channel.isRadio && _miniWindow && isDesktop) {
+      await toggleMiniWindow();
+    }
     // 新频道 = 新收听会话：清空上一台的曲目栈
     if (_currentChannel?.id != channel.id) {
       _radioTracks.clear();
@@ -1318,6 +1552,9 @@ class PlayerController extends ChangeNotifier {
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
+    _softErrPending = false;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     _lastError = null;
@@ -1354,11 +1591,44 @@ class PlayerController extends ChangeNotifier {
       await _openWebPageChannel(channel);
       return;
     }
-    if (_webPageActive) _webViewClosedAt = DateTime.now();
+    if (_webPageActive) {
+      _webViewClosedAt = DateTime.now();
+      // 离开网页：先把页面刷成黑底，再让控件销毁。
+      //
+      // WebView2 的原生窗口不是立刻消失的（要等 COM 释放，约 2.5 秒），
+      // 这段空档里它一直浮在 Flutter 画面最上层，露出的是它自己的默认
+      // 白底——用户看到的就是「切台时冒出一大块白框，鼠标在框里也不
+      // 消失，挪到窗口边缘那块小缝才慢慢没有」。提前把网页背景刷黑，
+      // 窗口即便还在，露出来的也是黑的。
+      // 釜底抽薪：WebView2 的原生子窗口销毁要 2.5 秒，这期间它一直浮在
+      // Flutter 画布最上层，吃掉鼠标与双击，白底还会把底部面板整块盖住。
+      // 光刷黑网页背景不够——页面空白、加载失败或 about:blank 本身就是白。
+      // 直接把原生窗口缩成 0×0，白块立刻消失，也不再参与命中测试。
+      try {
+        // ignore: avoid_dynamic_calls
+        await webController?.setSize(const Size(0, 0));
+      } catch (_) {
+        // 控制器已销毁 / 平台不支持时忽略，下面的刷黑仍然生效
+      }
+      try {
+        // ignore: avoid_dynamic_calls
+        webController?.evaluateJavascript(
+          source: "document.documentElement.style.background='#000';"
+              "if(document.body){document.body.style.background='#000';}",
+        );
+      } catch (_) {
+        // 网页可能还没加载完 / 已销毁，刷不上就算了，下面还有透明背景兜底
+      }
+    }
     _webPageActive = false;
     _webPageForeground = false;
     _currentChannel = channel;
     _sourceIndex = 0;
+    // 立刻通知界面把网页控件摘掉。这里下面要等 2.5 秒让 WebView2 销毁
+    // 完成（否则和 mpv 初始化抢 COM 会崩），如果这中间不刷新界面，
+    // 旧的网页视图会一直挂在最上层、露出 WebView2 的白底——用户看到的
+    // 就是「进电台后冒出一个大白框，随便按个键（触发重绘）又没了」。
+    notifyListeners();
     // 网页→流方向同样要等 WebView2 销毁完成：网页播不出去往外退时，
     // 紧跟着就建 mpv 内核，与 WebView2 的 COM 释放竞争会撞出
     // 0xc0000005（页面加载失败状态下销毁更容易崩）。进入方向早有
@@ -1699,6 +1969,13 @@ class PlayerController extends ChangeNotifier {
     if (!_webPageActive) return;
     _resetWebRecording();
     _webViewClosedAt = DateTime.now();
+    // 同 playChannel：原生窗口先缩到 0×0 再走销毁，否则这 2.5 秒里
+    // 它会一直盖在画面上（白底 + 吃鼠标 + 吃双击）
+    try {
+      // ignore: avoid_dynamic_calls
+      unawaited(webController?.setSize(const Size(0, 0)) ??
+          Future<void>.value());
+    } catch (_) {}
     _webPageActive = false;
     _webPageForeground = false;
     WinHotkeys().setCursorHide(false);
@@ -2339,6 +2616,27 @@ class PlayerController extends ChangeNotifier {
         stopCastAndRestore();
         return;
       }
+      // 音频直播假死：报错了但播放位置还在走（声音没断），先别拆播放器。
+      // 6 秒后复检，位置仍在推进就继续播；真断流位置会停住，再走下面
+      // 的换源/重试链路。
+      if (!_softErrPending &&
+          !_isCasting &&
+          _state == PlayerState.playing &&
+          v.position > Duration.zero) {
+        _softErrPending = true;
+        final startPos = v.position;
+        _softErrTimer?.cancel();
+        _softErrTimer = Timer(const Duration(seconds: 6), () {
+          _softErrPending = false;
+          final vc = _videoController;
+          // 期间已换台/换实例/已暂停：本次判定作废
+          if (vc == null || !identical(vc, self)) return;
+          if (_state != PlayerState.playing) return;
+          if (vc.value.position > startPos) return;
+          _enterErrorOrRetry();
+        });
+        return;
+      }
       // 播放中途出错且有备用源时自动切换
       if (hasNextSource) {
         nextSource();
@@ -2472,6 +2770,11 @@ class PlayerController extends ChangeNotifier {
 
   void _startSleepTick() {
     _sleepTickTimer?.cancel();
+    // 先立刻算一次：徽标/卡片不必等第一个整秒才出现
+    final first = sleepRemain;
+    sleepCountdown.value = (first == null || first <= Duration.zero)
+        ? null
+        : first;
     _sleepTickTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       final r = sleepRemain;
       sleepCountdown.value = (r == null || r <= Duration.zero) ? null : r;
@@ -2891,6 +3194,18 @@ class PlayerController extends ChangeNotifier {
   int get autoReloadCount => _autoReloadCount;
 
   void markAutoReload() => _autoReloadCount++;
+
+  // ==================== 音频直播「假死」判定 ====================
+  //
+  // 电台是纯音频 HLS/ICY 流，mpv 偶尔会甩一个 hasError（解复用 EOF、
+  // 播放列表 reload 瞬间的错误），声音其实一直没断。旧逻辑一见 hasError
+  // 就进 error → 3 秒后重建播放器：用户看到的是「显示重试、后台还在响、
+  // 再等一会儿声音断掉」。
+  //
+  // 现在的判定：出错时如果播放位置还在推进，就当软错误忽略，6 秒后复检；
+  // 复检仍不推进才真正走重试（真断流位置会停在原地，兜底不会丢）。
+  bool _softErrPending = false;
+  Timer? _softErrTimer;
 
   /// 重载当前频道：网页频道整页重新载入（站点脚本随后按频道名重新点台），
   /// 直播流频道从第一个源重新播放。底部面板「重载」按钮与网页卡死
@@ -4429,6 +4744,30 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  // ==================== 内置节目单（央视网） ====================
+
+  /// 手动抓一次内置节目单（设置页 / 网页管理端共用）。
+  ///
+  /// 抓的是「今天 + 明天」两天，成功后让当前源重新解析；失败只提示，
+  /// 保留旧节目单，界面不会突然空掉。
+  Future<void> updateBuiltinEpg() async {
+    final (ok, msg) = await BuiltinEpg.refresh(force: true);
+    OsdBus.show(msg, icon: ok ? Icons.check_circle : Icons.error_outline);
+    if (ok) {
+      await sourceManager.invalidateEpgCache(BuiltinEpg.sourceId);
+      if (sourceManager.currentEpg?.url == BuiltinEpg.localUrl) {
+        await refreshEpg();
+      }
+    }
+    notifyListeners();
+  }
+
+  /// 恢复被删掉的内置节目单
+  Future<void> restoreBuiltinEpg() async {
+    await sourceManager.restoreBuiltinEpg();
+    notifyListeners();
+  }
+
   // ==================== NumLock 状态守护（Windows runner 层实现） ====================
   // Flutter Windows 引擎在窗口初始化时会把 NumLock 意外同步为关闭。
   // 该修复必须在原生 runner 的 UI 线程做（Dart FFI 线程没有消息队列，
@@ -4479,11 +4818,13 @@ class PlayerController extends ChangeNotifier {
   @override
   void dispose() {
     _tickTimer?.cancel();
+    _epgDayTimer?.cancel();
     _bootMinTimer?.cancel();
     _castRestoreTimer?.cancel();
     _castEndedTimer?.cancel();
     _castWaitTimer?.cancel();
     _autoRetryTimer?.cancel();
+    _softErrTimer?.cancel();
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
     _resetWebRecording();

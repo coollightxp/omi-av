@@ -76,7 +76,14 @@ class Channel {
   bool get isWebPage {
     if (streamUrls.isEmpty) return false;
     final u = streamUrls.first.trim();
+    // 显式 webview:// 永远按网页打开（用户自己标注的意图优先）
     if (u.toLowerCase().startsWith('webview://')) return true;
+    // 电台一律不进 WebView。音频台的地址五花八门，不少 CDN/电台门户
+    // 就是「https://host/」这种根路径——按下面那条规则会被判成网页，
+    // 结果打开一个 WebView2 白底页盖在电台画面上：底部面板唤不出、
+    // 双击全屏失效、鼠标在框里光标不隐藏（用户反馈的「切电台冒白框」）。
+    // 电台就是音频流，没有需要网页承载的场景
+    if (isRadio) return false;
     final m = RegExp(r'^(https?)://([^/?#]+)([^?#]*)', caseSensitive: false)
         .firstMatch(u);
     if (m == null) return false;
