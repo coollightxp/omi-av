@@ -82,6 +82,7 @@ dependencies:
   # FFI 基础库（web_env 用其 calloc 调 WebView2Loader.dll 官方检测接口）
   ffi: ^2.1.0
   share_plus: ^13.3.1
+  fvp: ^0.40.0
 
 dev_dependencies:
   flutter_test:

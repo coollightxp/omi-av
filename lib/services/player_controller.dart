@@ -26,7 +26,8 @@ import 'dlna_service.dart';
 import 'win_hotkeys.dart';
 import 'cast_log.dart';
 import 'format_hint.dart';
-import 'media/omi_video.dart';
+import 'media/omi_video_backend.dart';
+import 'media/omi_video_engine.dart';
 import 'media_capture_service.dart';
 import 'radio_library.dart';
 import 'channel_blacklist.dart';
@@ -51,7 +52,10 @@ enum PlayerState { idle, loading, playing, paused, error, ended, waitingForNetwo
 
 /// 播放器控制器 - 使用 ChangeNotifier 进行状态管理
 class PlayerController extends ChangeNotifier {
-  OmiVideoController? _videoController;
+  OmiVideoBackend? _videoController;
+
+  /// MDK 起播失败后的临时降级（不写设置，下次启动仍尊重用户选择）
+  bool _forceMpv = false;
   PlayerSettings _settings = const PlayerSettings();
 
   /// 时钟显隐的独立通知器：切换它只重建时钟本身，不触发整棵播放
@@ -249,7 +253,7 @@ class PlayerController extends ChangeNotifier {
   double get volume => _volume;
   double get brightness => _brightness;
   PlayerSettings get settings => _settings;
-  OmiVideoController? get videoController => _videoController;
+  OmiVideoBackend? get videoController => _videoController;
   /// 电视域分类：整组都是电台的分组不进来（内置电台源已整体标 radio，
   /// 这里再兜一层，防其它源里"广播"分组漏进电视标签）
   List<ChannelCategory> get categories => [
@@ -2109,8 +2113,11 @@ class PlayerController extends ChangeNotifier {
     // 新台前播、旧台后台出声的双路直播
     if (gen != _playGeneration) return;
 
-    final c = OmiVideoController.network(
-      Uri.parse(streamUrl),
+    // MDK 起播失败过就锁回 MPV，避免用户在坏环境里反复撞同一面墙
+    final useMdk = _settings.playEngine == 'mdk' && !_forceMpv;
+    final c = createOmiVideoBackend(
+      url: Uri.parse(streamUrl),
+      useMdk: useMdk,
       // libmpv 通过 http-header-fields 透传 UA/Referer；Web 端直接给 video 元素
       headers: headers.isEmpty ? null : headers,
       formatHint: formatHint,
@@ -2257,7 +2264,7 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _onVideoListener(OmiVideoController self) {
+  void _onVideoListener(OmiVideoBackend self) {
     // 只处理当前 controller 的事件，旧实例的迟到事件一律忽略
     if (!identical(self, _videoController)) return;
     final v = self.value;
@@ -2274,6 +2281,15 @@ class PlayerController extends ChangeNotifier {
       }
     }
     if (v.hasError) {
+      // MDK 引擎在本机起不来（老显卡缺 D3D11 特性/MDK 运行库缺失）：
+      // 自动切回 MPV 重开当前台，用户至少能看到画面，不用手动去设置里改
+      if (_settings.playEngine == 'mdk' && !_forceMpv) {
+        _forceMpv = true;
+        OsdBus.show('MDK 内核起播失败，已自动切回 MPV', icon: Icons.memory);
+        final ch = _currentChannel;
+        if (ch != null) unawaited(playChannel(ch));
+        return;
+      }
       if (_isCasting) {
         // 投屏只有一个源，出错基本意味着流真的断了（直播间关播/CDN 掐流）。
         // 直接切回投屏前频道，比停在 error 等用户手动操作体验好。
@@ -2765,6 +2781,7 @@ class PlayerController extends ChangeNotifier {
   static const _kAudioEqGains = 'settings_audio_eq_gains';
   static const _kSpectrumTexture = 'settings_spectrum_texture';
   static const _kRadioMeter = 'settings_radio_meter';
+  static const _kPlayEngine = 'settings_play_engine';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -2807,6 +2824,7 @@ class PlayerController extends ChangeNotifier {
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
         spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
         radioMeter: p.getBool(_kRadioMeter) ?? false,
+        playEngine: p.getString(_kPlayEngine) ?? 'mpv',
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -2893,6 +2911,7 @@ class PlayerController extends ChangeNotifier {
           _kAudioEqGains, jsonEncode(_settings.audioEqGains));
       await putBool(_kSpectrumTexture, _settings.spectrumTexture);
       await putBool(_kRadioMeter, _settings.radioMeter);
+      await putString(_kPlayEngine, _settings.playEngine);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
@@ -3097,6 +3116,28 @@ class PlayerController extends ChangeNotifier {
 
   /// 真波形纹理（实验）：mpv lavfi-complex → vo 出图
   bool get spectrumTexture => _settings.spectrumTexture;
+
+  /// 播放内核：'mpv'（默认，功能全）/ 'mdk'（D3D11 直出，老显卡更稳）
+  String get playEngine => _settings.playEngine;
+  bool get useMdkEngine => _settings.playEngine == 'mdk';
+
+  /// 切换播放内核。正在播内置流时立刻重开当前台，让用户当场看到差别；
+  /// 网页频道不受影响（网页走 WebView，与内核无关）
+  Future<void> setPlayEngine(String engine) async {
+    final next = engine == 'mdk' ? 'mdk' : 'mpv';
+    if (_settings.playEngine == next) return;
+    _forceMpv = false;
+    updateSettings(_settings.copyWith(playEngine: next));
+    OsdBus.show(
+      next == 'mdk' ? '播放内核：MDK（画面更稳，均衡器不可用）' : '播放内核：MPV（功能完整）',
+      icon: Icons.memory,
+    );
+    final ch = _currentChannel;
+    if (ch != null && !ch.isWebPage && !webPageActive) {
+      // 重开当前台：playChannel 内部会按新引擎重建控制器
+      await playChannel(ch);
+    }
+  }
 
   /// 电台真实电平波形（实验）：在音频链上挂 astats 取响度。
   /// 关着时波形按播放态动画，音频链完全不碰
@@ -4216,11 +4257,11 @@ class PlayerController extends ChangeNotifier {
 
   /// dispose 明确失败的控制器：不阻塞当前流程，后续单次重试释放。
   /// release 自身幂等（_disposed 守卫），重复调用不会重复释放 native
-  final Set<OmiVideoController> _orphanControllers = <OmiVideoController>{};
+  final Set<OmiVideoBackend> _orphanControllers = <OmiVideoBackend>{};
 
   void _retryOrphanDispose() {
     if (_orphanControllers.isEmpty) return;
-    final list = List<OmiVideoController>.from(_orphanControllers);
+    final list = List<OmiVideoBackend>.from(_orphanControllers);
     _orphanControllers.clear();
     for (final c in list) {
       c.release().timeout(const Duration(seconds: 8)).then((_) {},

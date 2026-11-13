@@ -583,8 +583,35 @@ jobs:
           }
           GRADLE
 
+      # Gradle 缓存：mpv 原生库（4 个 jar + NDK/CMake 产物）每次冷编都要
+      # 全部重来，缓存后的第二个 ABI 与重试都能省下数分钟
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Build APK
-        run: flutter build apk --release --split-per-abi
+        run: |
+          # 只编两个真机 ABI（arm64-v8a + armeabi-v7a）。x86_64 只有模拟器
+          # 需要，但 mpv 的原生库每个 ABI 都要单独跑一遍 NDK + CMake，
+          # 多一个 ABI 就把作业从 ~6 分钟拖到 10 分钟以上；免费 runner 在
+          # 9~10 分钟处会被回收（runner shutdown / exit 143），此前几次
+          # 安卓红叉全是这个原因，不是代码问题。
+          for attempt in 1 2; do
+            if flutter build apk --release --split-per-abi \
+                 --target-platform android-arm64,android-arm; then
+              exit 0
+            fi
+            echo "::warning::APK 第 $attempt 次构建失败，缓存已热，重试一次"
+            sleep 5
+          done
+          echo "::error::APK 构建两次均失败"
+          exit 1
 
       - name: Rename APKs for release
         run: |

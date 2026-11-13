@@ -8,7 +8,7 @@ import '../models/channel.dart';
 import '../core/widgets/channel_badge.dart';
 import '../core/theme/app_colors.dart';
 import '../core/widgets/audio_wave.dart';
-import '../services/media/omi_video.dart';
+import '../services/media/omi_video_backend.dart';
 import '../services/player_controller.dart';
 
 /// 视频播放器显示组件
@@ -521,7 +521,7 @@ class _LiveDotState extends State<_LiveDot>
 class _TextureSurface extends StatefulWidget {
   const _TextureSurface({required this.controller});
 
-  final OmiVideoController controller;
+  final OmiVideoBackend controller;
 
   @override
   State<_TextureSurface> createState() => _TextureSurfaceState();

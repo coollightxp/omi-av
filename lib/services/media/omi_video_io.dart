@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import 'omi_video_backend.dart';
 import 'omi_video_value.dart';
 
 /// media_kit(libmpv) 内核实现：Android / Windows / Linux。
@@ -13,7 +14,8 @@ import 'omi_video_value.dart';
 /// - 与旧 video_player/fvp 栈保持同构 API，业务层零改动迁移；
 /// - libmpv 自带 HLS/DASH/RTSP 与断点续传，不再需要 fvp 注册与 MDK SDK；
 /// - 事件全部转成 [OmiVideoValue]，上层只依赖值对象。
-class OmiVideoController extends ChangeNotifier {
+class OmiVideoController extends ChangeNotifier
+    implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
     Map<String, String>? headers,
@@ -69,6 +71,7 @@ class OmiVideoController extends ChangeNotifier {
   int _meterMiss = 0;
   bool _meterDead = false; // af-metadata 拿不到：波形退回模拟
 
+  @override
   OmiVideoValue get value => _value;
 
   void _set(OmiVideoValue next) {

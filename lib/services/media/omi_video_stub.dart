@@ -4,10 +4,12 @@ import 'dart:ui' show Size;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import 'omi_video_backend.dart';
 import 'omi_video_value.dart';
 
 /// 既非 io 也非 web 的目标（理论上不存在）：编译占位。
-class OmiVideoController extends ChangeNotifier {
+class OmiVideoController extends ChangeNotifier
+    implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
     Map<String, String>? headers,

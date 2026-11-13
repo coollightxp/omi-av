@@ -17,6 +17,13 @@ class AppColors {
   /// 模态弹层表面（退出卡片/设置中心/线路菜单）：比面板再亮一档
   static const Color overlay = Color(0xF0222838);
 
+  /// 设置面板等"大块常驻弹层"用的不透明表面。
+  ///
+  /// `overlay` 带 6% 透明度，在 Windows 老显卡上做局部重绘时，内容变短
+  /// （例如删掉一行源）后会露出一块没被绘制的区域，看起来是纯白空白。
+  /// 常驻面板一律用这个不透明色，页面边缘的视觉差异几乎看不出来。
+  static const Color overlaySolid = Color(0xFF222838);
+
   /// 表面描边：白色 15%，让面板在纯暗画面上立得住
   static const Color stroke = Color(0x26FFFFFF);
 

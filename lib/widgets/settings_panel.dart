@@ -268,8 +268,10 @@ class _SettingsPanelState extends State<SettingsPanel>
             alignment: Alignment.bottomCenter,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 760),
-              child: Material(
-            color: AppColors.overlay,
+              // RepaintBoundary + 不透明底色：局部重绘漏洞的兜底
+              child: RepaintBoundary(
+                child: Material(
+            color: AppColors.overlaySolid,
             elevation: 28,
             shape: const RoundedRectangleBorder(
               borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -378,6 +380,7 @@ class _SettingsPanelState extends State<SettingsPanel>
                 );
               }),
             ),
+              ),
               ),
             ),
           ),
@@ -1835,6 +1838,34 @@ class _PlayerSettingsTab extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
             _buildQualitySelector(controller),
+            // 双引擎：mpv（功能全）/ MDK（D3D11 直出，老显卡不闪黑）
+            // 切换后立刻重开当前台生效；网页频道与内核无关，不受影响
+            ListTile(
+              leading: const Icon(Icons.memory, color: Colors.white70),
+              title: const Text('播放内核',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: Text(
+                controller.useMdkEngine
+                    ? 'MDK（libmdk / D3D11）：老显卡、老系统上画面不易闪黑；'
+                        '均衡器与真电平波形不可用'
+                    : 'MPV（libmpv）：默认，功能完整（滤镜/录制/实时电平）；'
+                        '个别老显卡叠加面板时会闪一下',
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              trailing: DropdownButton<String>(
+                value: controller.playEngine,
+                dropdownColor: const Color(0xFF1B1D22),
+                underline: const SizedBox.shrink(),
+                style: const TextStyle(color: Colors.white, fontSize: 13.5),
+                items: const [
+                  DropdownMenuItem(value: 'mpv', child: Text('MPV')),
+                  DropdownMenuItem(value: 'mdk', child: Text('MDK')),
+                ],
+                onChanged: (v) {
+                  if (v != null) controller.setPlayEngine(v);
+                },
+              ),
+            ),
             // 声音实验室（方案 12.3 第二档）：mpv lavfi 音频滤镜，
             // 内置播放器全局生效（电视伴音/电台都可用；网页频道不支持）
             ListTile(

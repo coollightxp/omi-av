@@ -6,13 +6,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:video_player/video_player.dart';
 
+import 'omi_video_backend.dart';
 import 'omi_video_value.dart';
 
 /// Web 端实现：HTML video 元素（video_player）。
 ///
 /// media_kit 的 web 支持尚不成熟，Web 保持原有 video_player 路径，
 /// 其余平台统一走 media_kit。两端 API 完全一致。
-class OmiVideoController extends ChangeNotifier {
+class OmiVideoController extends ChangeNotifier
+    implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
     Map<String, String>? headers,

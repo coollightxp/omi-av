@@ -95,6 +95,14 @@ class PlayerSettings {
   /// 稳定且不黑屏。绝大多数用户不需要开。
   final bool spectrumTexture;
 
+  /// 播放内核（'mpv' / 'mdk'，默认 mpv）。
+  ///
+  /// - mpv：media_kit + libmpv，功能最全（滤镜/录制/电平/截帧）
+  /// - mdk：fvp + libmdk（D3D11 直出纹理），老显卡/1607 上不易闪黑，
+  ///   但均衡器与真电平波形不生效（波形自动退回模拟）
+  /// 切换后换台生效（当前画面不会热切）
+  final String playEngine;
+
   /// 电台「真实电平波形」开关（默认关）。
   ///
   /// 开着时在 mpv 的 `af` 链上串一条 `astats` 电平表，波形跟着真实响度走；
@@ -131,6 +139,7 @@ class PlayerSettings {
     this.audioEqGains = const <double>[],
     this.spectrumTexture = false,
     this.radioMeter = false,
+    this.playEngine = 'mpv',
   });
 
   PlayerSettings copyWith({
@@ -160,6 +169,7 @@ class PlayerSettings {
     List<double>? audioEqGains,
     bool? spectrumTexture,
     bool? radioMeter,
+    String? playEngine,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -189,6 +199,7 @@ class PlayerSettings {
       audioEqGains: audioEqGains ?? this.audioEqGains,
       spectrumTexture: spectrumTexture ?? this.spectrumTexture,
       radioMeter: radioMeter ?? this.radioMeter,
+      playEngine: playEngine ?? this.playEngine,
     );
   }
 }
