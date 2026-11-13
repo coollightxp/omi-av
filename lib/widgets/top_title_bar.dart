@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart' show kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
@@ -34,14 +35,17 @@ class TopTitleBar extends StatelessWidget {
             child: Container(
               height: 44,
               color: Colors.black.withOpacity(0.72),
-              child: GestureDetector(
+              child: Listener(
                 behavior: HitTestBehavior.opaque,
-                // 手动拖动（setPosition 跟手）：startDragging 在部分
-                // Windows 环境下不生效，见 window_drag_io 注释
-                onPanStart: (d) => beginWindowDrag(d.globalPosition),
-                onPanUpdate: (d) => updateWindowDrag(d.globalPosition),
-                onPanEnd: (_) => endWindowDrag(),
-                onPanCancel: endWindowDrag,
+                // 拖动改 Listener 原始指针 + Win32 GetCursorPos 屏幕坐标，
+                // 见 window_drag_io 注释（pan 手势与 startDragging 都不可靠）
+                onPointerDown: (d) =>
+                    beginWindowDrag(enabled: d.buttons == kPrimaryButton),
+                onPointerMove: (_) => updateWindowDrag(),
+                onPointerUp: (_) => endWindowDrag(),
+                onPointerCancel: (_) => endWindowDrag(),
+                child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
                 onDoubleTap: () async {
                   // 全屏状态下双击标题栏先退出全屏（同步控制器状态）
                   if (context.mounted &&
@@ -50,11 +54,7 @@ class TopTitleBar extends StatelessWidget {
                           .exitFullscreenIfNeeded()) {
                     return;
                   }
-                  if (await windowManager.isMaximized()) {
-                    await windowManager.unmaximize();
-                  } else {
-                    await windowManager.maximize();
-                  }
+                  // 窗口固定尺寸（防拖变形/文字堆叠），不再最大化
                 },
                 child: Row(
                   children: [
@@ -102,32 +102,16 @@ class TopTitleBar extends StatelessWidget {
                     ),
                     _winButton(
                         Icons.minimize, '最小化', () => windowManager.minimize()),
-                    _winButton(Icons.crop_square, '最大化/还原', () async {
-                      // 小窗状态下先恢复原窗口：420×236 直接最大化会留下
-                      // miniWindow 标记与置顶状态，再次缩窗尺寸就乱了
-                      final pc = context.read<PlayerController>();
-                      if (pc.miniWindow) {
-                        await pc.toggleMiniWindow();
-                        return;
-                      }
-                      // 全屏状态下先退出全屏（同步控制器状态），否则在
-                      // 系统全屏层上做 maximize 视觉无变化，像按钮坏了
-                      if (await pc.exitFullscreenIfNeeded()) {
-                        return;
-                      }
-                      if (await windowManager.isMaximized()) {
-                        await windowManager.unmaximize();
-                      } else {
-                        await windowManager.maximize();
-                      }
-                    }),
+                    // 「最大化/还原」按钮已移除：窗口固定尺寸（用户要求，
+                    // 防止拖拽缩放导致面板变形、文字堆叠）。小窗/全屏入口不变
                     _winButton(Icons.close, '关闭', () => windowManager.close(),
                         hoverColor: Colors.red),
                     const SizedBox(width: 6),
                   ],
                 ),
               ),
-            ),
+              ), // GestureDetector
+            ), // Listener
           ),
         ),
       ),

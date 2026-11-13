@@ -1111,7 +1111,7 @@ class PlayerController extends ChangeNotifier {
       if (ahRaw != null) autoHide = ahRaw.clamp(1000, 10000);
       int tuneDwell = cur.tuneDwellMs;
       final tdRaw = ri('tuneDwellMs');
-      if (tdRaw != null && const {500, 800, 1200, 2000}.contains(tdRaw)) {
+      if (tdRaw != null && const {500, 800, 1200, 2000, 2500, 3000}.contains(tdRaw)) {
         tuneDwell = tdRaw;
       }
       int sourceTimeout = cur.sourceTimeoutSeconds;
@@ -3230,7 +3230,10 @@ class PlayerController extends ChangeNotifier {
           _sizeBeforeMini = cur;
         }
         await windowManager.setAlwaysOnTop(true);
+        // 固定尺寸：小窗 420×236 不可拖边缩放（防面板变形/文字堆叠）
+        await windowManager.setResizable(true);
         await windowManager.setSize(_miniSize);
+        await windowManager.setResizable(false);
       } else {
         if (_wasFullscreenBeforeMini) {
           // 原来就是全屏：直接回全屏（无需再 setSize）
@@ -3244,11 +3247,11 @@ class PlayerController extends ChangeNotifier {
           if (_isMiniLikeSize(_sizeBeforeMini)) {
             _sizeBeforeMini = const Size(1280, 720);
           }
+          await windowManager.setResizable(true);
           await windowManager.setSize(_sizeBeforeMini);
-          if (_wasMaximizedBeforeMini) {
-            _wasMaximizedBeforeMini = false;
-            await windowManager.maximize();
-          }
+          // 窗口固定尺寸（不再支持最大化），原最大化状态直接还原成普通窗口
+          _wasMaximizedBeforeMini = false;
+          await windowManager.setResizable(false);
           await _applyAlwaysOnTop();
         }
       }
@@ -3391,7 +3394,7 @@ class PlayerController extends ChangeNotifier {
         autoPlayNext: p.getBool(_kAutoPlayNext) ?? true,
         gestureSensitivity: p.getDouble(_kSensitivity) ?? 1.0,
         autoHideDelay: p.getInt(_kAutoHide) ?? 3000,
-        tuneDwellMs: p.getInt(_kTuneDwell) ?? 1200,
+        tuneDwellMs: p.getInt(_kTuneDwell) ?? 2500,
         launchAtStartup: p.getBool(_kLaunchAtStartup) ?? false,
         startFullscreen: p.getBool(_kStartFullscreen) ?? false,
         showClock: p.getBool(_kShowClock) ?? false,
@@ -4893,6 +4896,41 @@ class PlayerController extends ChangeNotifier {
   }
 
   @override
+  // ==================== 换台预读（↑/↓ 停留期间提前握手） ====================
+  // 用户语义：按 ↑/↓ 只是「把下一个台的地址读进来」，画面仍是当前台；
+  // 停顿超过换台停留时间才真正切流。这里对目标流地址做一次轻量
+  // HTTP 握手（DNS + TCP + TLS 预热，读几字节就断开），真正切台时
+  // mpv 建连能明显快一拍。同一频道只预读一次，避免长按连刷时打爆。
+
+  http.Client? _preconnectClient;
+  String? _preconnectUrl;
+
+  Future<void> preconnectChannel(Channel channel) async {
+    if (channel.isWebPage || channel.streamUrls.isEmpty) return;
+    final url = channel.streamUrls.first;
+    if (url == _preconnectUrl) return;
+    _preconnectUrl = url;
+    _preconnectClient?.close();
+    final client = http.Client();
+    _preconnectClient = client;
+    unawaited(() async {
+      try {
+        // 只要响应头（DNS/TCP/TLS 握手完成即达到预热目的），立刻断开
+        final res = await client
+            .get(Uri.parse(url),
+                headers: {'User-Agent': 'Mozilla/5.0 (OmiAV preconnect)'})
+            .timeout(const Duration(milliseconds: 2500));
+        // 主动废弃响应体，尽快释放连接
+        res.bodyBytes.length;
+      } catch (_) {
+        // 预读失败不影响正式切台
+      } finally {
+        client.close();
+        if (identical(_preconnectClient, client)) _preconnectClient = null;
+      }
+    }());
+  }
+
   /// App 是否在后台（安卓通知栏切台时关视频输出的判定，
   /// 见 _playCurrentSource 内的 setVideoOutputDisabled）
   bool _appBackgrounded = false;

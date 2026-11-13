@@ -2486,28 +2486,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                   ? (controller.isDesktop
                       ? const SizedBox.expand()
                       : GestureDetector(onTap: _toggleBottomPanel))
-                  : GestureDetector(
-                      onTap: _toggleBottomPanel,
-                      onDoubleTap: controller.isDesktop
-                          ? (controller.miniWindow
-                              ? controller.toggleMiniWindow
-                              : controller.toggleFullscreen)
-                          : controller.togglePlayPause,
+                  : Listener(
                       // 全屏状态下绝不能拖动窗口，否则窗口会掉到最底层、点击穿透。
-                      // 手动拖动（setPosition 跟手）而非 WM_NCLBUTTONDOWN：
-                      // window_manager 的 startDragging 在部分 Windows
-                      // 环境（置顶/小窗）下不生效，实测拖不动窗口
-                      onPanStart:
-                          (controller.isDesktop && !controller.isFullscreen)
-                              ? (d) => beginWindowDrag(d.globalPosition)
-                              : null,
-                      onPanUpdate:
-                          (controller.isDesktop && !controller.isFullscreen)
-                              ? (d) => updateWindowDrag(d.globalPosition)
-                              : null,
-                      onPanEnd: (controller.isDesktop && !controller.isFullscreen)
-                          ? (_) => endWindowDrag()
-                          : null,
+                      // Listener 原始指针事件（不进手势竞技场，抢不到也会回调）：
+                      // 屏幕坐标来自 Win32 GetCursorPos，见 window_drag_io 注释
+                      onPointerDown: (d) => beginWindowDrag(
+                          enabled:
+                              controller.isDesktop && !controller.isFullscreen),
+                      onPointerMove: (_) => updateWindowDrag(),
+                      onPointerUp: (_) => endWindowDrag(),
+                      onPointerCancel: (_) => endWindowDrag(),
+                      child: GestureDetector(
+                        onTap: _toggleBottomPanel,
+                        onDoubleTap: controller.isDesktop
+                            ? (controller.miniWindow
+                                ? controller.toggleMiniWindow
+                                : controller.toggleFullscreen)
+                            : controller.togglePlayPause,
+                      ),
                     ),
             ),
             // 右侧：音量调节 + 右边缘滑出 EPG；移动端右三分之一
@@ -2704,8 +2700,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _osdTimer = Timer(const Duration(seconds: 8), () {
       if (mounted) setState(() => _osdVisible = false);
     });
-    // 停留时间用户可调（设置 → 播放器 → 换台停留）：连续按 ↑/↓ 时
-    // 只刷新左上角预览、继续播当前台，停顿够才真正切流
+    // 停留期间把目标台的流地址「读进来」（DNS/TCP/TLS 预热），画面不动；
+    // 停顿超过换台停留时间才真正切流
+    unawaited(controller.preconnectChannel(target));
+    // 停留时间用户可调（设置 → 播放器 → 换台停留，默认 2.5 秒）：
+    // 连续按 ↑/↓ 时只刷新左上角预览、继续播当前台，停顿够才真正切流
     _tuneDebounce = Timer(Duration(milliseconds: controller.settings.tuneDwellMs), () {
       _tuneDebounce = null;
       controller.playChannel(target).whenComplete(() {

@@ -1975,8 +1975,8 @@ class _PlayerSettingsTab extends StatelessWidget {
               title: '换台停留',
               value: s.tuneDwellMs / 1000,
               min: 0.5,
-              max: 2.0,
-              divisions: 6,
+              max: 3.0,
+              divisions: 10,
               label: '${(s.tuneDwellMs / 1000).toStringAsFixed(1)} 秒',
               onChanged: (v) => controller
                   .updateSettings(s.copyWith(tuneDwellMs: (v * 1000).round())),

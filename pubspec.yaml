@@ -1,7 +1,7 @@
 name: omi
 description: 欧米视听 (Omi) — 跨平台直播视听应用：电视直播、电台、投屏接收。
 publish_to: 'none'
-version: 2.1.16+30
+version: 2.1.17+31
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

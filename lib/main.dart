@@ -88,6 +88,9 @@ void main() async {
         backgroundColor: Colors.black,
       ),
       () async {
+        // 窗口固定尺寸（1280×720）：不响应拖边缩放/最大化，
+        // 防止面板变形、文字堆叠（小窗模式在控制器里同样锁死尺寸）
+        await windowManager.setResizable(false);
         await windowManager.show();
         await windowManager.focus();
         // 窗口置顶（默认开）：避免被其它窗口抢焦点导致快捷键失灵；

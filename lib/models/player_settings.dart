@@ -19,7 +19,7 @@ class PlayerSettings {
   final int autoHideDelay;
 
   /// 换台停留（毫秒）：↑/↓ 连续按键时只更新左上角预览、继续播当前台，
-  /// 停顿超过该时间才真正切到预览的台。500 快切 / 800 / 1200 / 2000。
+  /// 停顿超过该时间才真正切到预览的台。500 快切 / 800 / 1200 / 2000 / 2500（默认）/ 3000。
   final int tuneDwellMs;
 
   /// 开机自启动
@@ -137,7 +137,7 @@ class PlayerSettings {
     this.preferredQuality = VideoQuality.auto,
     this.gestureSensitivity = 1.0,
     this.autoHideDelay = 3000,
-    this.tuneDwellMs = 1200,
+    this.tuneDwellMs = 2500,
     this.launchAtStartup = false,
     this.startFullscreen = false,
     this.showClock = false,
