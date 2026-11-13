@@ -242,7 +242,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       // 不够宽，台标是残缺的」）。横向给足空间后整张图能铺开
       width: size * 1.6,
       circular: false,
-      background: Colors.white10,
+      // 不加底衬：台标图自带底色/透明底，再叠一层 8% 白会在 logo 外围
+      // 多出一圈「框」，直接透明贴在面板上更干净（用户反馈）
+      background: Colors.transparent,
       extraLogoUrls: [c.currentLogo],
     );
   }

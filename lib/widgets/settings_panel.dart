@@ -922,7 +922,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                 );
               }),
             const Divider(height: 24, color: Colors.white12),
-            const _BuiltinUpdateSection(_BuiltinUpdateSection.cctv),
+            _BuiltinUpdateSection(_BuiltinUpdateSection.cctv),
           ],
         );
       },
@@ -1048,7 +1048,7 @@ class _RadioSourcesTab extends StatelessWidget {
               ),
             const Divider(height: 24, color: Colors.white12),
             // 内置电台清单更新区：与直播源页的「内置央视频道」同款
-            const _BuiltinUpdateSection(_BuiltinUpdateSection.radio),
+            _BuiltinUpdateSection(_BuiltinUpdateSection.radio),
             // ===== 方案 12.3 第一档：场景收藏 / 电台别名 / 录音库 =====
             // 默认收起：展开才构建列表，切到本页签首屏只画三行标题——
             // 以前这三块常驻展开，几十行控件 + 文件 stat 全量构建，

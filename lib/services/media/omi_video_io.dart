@@ -118,7 +118,7 @@ class OmiVideoController extends ChangeNotifier
     s = s.replaceAll(RegExp('(?<=$ctx)'), '');
     s = s.replaceAll(RegExp('(?=$ctx)'), '');
     // 服务器替换尾字节产生的孤立 ?（夹在中文/标点之间或行尾）
-    s = s.replaceAll(RegExp('\\?(?=$ctx|[-—–\\s]|$)'), '');
+    s = s.replaceAll(RegExp('\\?(?=$ctx|[-—–\\s]|\$)'), '');
     // 残渣清掉后可能留下 "中文 -  (x)" 之类的空洞，压掉多余空格
     s = s.replaceAll(RegExp(' {2,}'), ' ').replaceAll(RegExp(' ([)）])'), ')');
     return s.trim();
