@@ -558,7 +558,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
               // 小窗（420×236）：所有面板/OSD 都按大屏尺寸排版，在小窗里
               // 会把画面整个盖住，这里统一不渲染（只留左上角恢复按钮）
               final mini = controller.miniWindow;
-              final webUrl = controller.webPageActive
+              // 电台不渲染网页控件（双保险）：电台走 _RadioStage，
+              // 任何残留下来的 WebView2 都会变成一块白底盖住电台画面，
+              // 底部面板/双击全屏全被它挡住
+              final webUrl = controller.webPageActive &&
+                      !(controller.currentChannel?.isRadio ?? false)
                   ? controller.currentChannel?.webPageUrl ?? ''
                   : '';
               return Stack(
