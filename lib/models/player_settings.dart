@@ -95,11 +95,15 @@ class PlayerSettings {
   /// 稳定且不黑屏。绝大多数用户不需要开。
   final bool spectrumTexture;
 
-  /// 播放内核（'mpv' / 'mdk'，默认 mpv）。
+  /// 播放内核（'mpv' / 'mdk'，默认 mdk）。
   ///
-  /// - mpv：media_kit + libmpv，功能最全（滤镜/录制/电平/截帧）
-  /// - mdk：fvp + libmdk（D3D11 直出纹理），老显卡/1607 上不易闪黑，
-  ///   但均衡器与真电平波形不生效（波形自动退回模拟）
+  /// - mdk：fvp + libmdk（D3D11 直出纹理），画面最稳，老显卡/1607 上
+  ///   叠加面板不闪黑；均衡器与真电平波形不生效（波形自动退回模拟）
+  /// - mpv：media_kit + libmpv，功能最全（滤镜/录制/电平/截帧），但个别
+  ///   老显卡在面板动画时会闪一下
+  ///
+  /// 2026-11 用户实测：同机 MPV 闪黑、MDK 不闪，故默认取 MDK；MPV 保留
+  /// 作回退（设置可切，MDK 起播失败也会自动回落）
   /// 切换后换台生效（当前画面不会热切）
   final String playEngine;
 
@@ -139,7 +143,7 @@ class PlayerSettings {
     this.audioEqGains = const <double>[],
     this.spectrumTexture = false,
     this.radioMeter = false,
-    this.playEngine = 'mpv',
+    this.playEngine = 'mdk',
   });
 
   PlayerSettings copyWith({

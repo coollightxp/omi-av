@@ -2824,7 +2824,9 @@ class PlayerController extends ChangeNotifier {
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
         spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
         radioMeter: p.getBool(_kRadioMeter) ?? false,
-        playEngine: p.getString(_kPlayEngine) ?? 'mpv',
+        // 默认 MDK：实测同机 MPV 叠面板闪黑、MDK 不闪；已存过设置的用户
+        // 保持原选择（尊重手动切换），MDK 起播失败还有 _forceMpv 兜底
+        playEngine: p.getString(_kPlayEngine) ?? 'mdk',
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;

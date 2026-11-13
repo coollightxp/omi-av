@@ -1846,9 +1846,9 @@ class _PlayerSettingsTab extends StatelessWidget {
                   style: TextStyle(color: Colors.white, fontSize: 15)),
               subtitle: Text(
                 controller.useMdkEngine
-                    ? 'MDK（libmdk / D3D11）：老显卡、老系统上画面不易闪黑；'
+                    ? 'MDK（libmdk / D3D11）：默认，画面最稳，叠面板不闪黑；'
                         '均衡器与真电平波形不可用'
-                    : 'MPV（libmpv）：默认，功能完整（滤镜/录制/实时电平）；'
+                    : 'MPV（libmpv）：功能完整（滤镜/录制/实时电平）；'
                         '个别老显卡叠加面板时会闪一下',
                 style: const TextStyle(color: Colors.white54, fontSize: 12),
               ),
