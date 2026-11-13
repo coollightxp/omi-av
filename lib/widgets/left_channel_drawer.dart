@@ -656,8 +656,11 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   /// 第一级：分类列表（收藏场景排在最前）
   Widget _buildCategoryList(PlayerController controller) {
     final t = AppTypography.of(context);
-    final cats = _l1Categories(controller);
-    if (cats.isEmpty) {
+    // 收藏场景单独算，真实分类单独算——不能拿 _l1Categories 再拼一次
+    // 收藏，否则「我的收藏」会在列表里出现两遍（第二遍图标还是文件夹）
+    final favCats = _favCatsOf(controller);
+    final cats = _catsOf(controller);
+    if (cats.isEmpty && favCats.isEmpty) {
       if (_mediaTab == 1 && !controller.radioCatalogLoaded) {
         return const Center(
           child: SizedBox(
@@ -668,33 +671,57 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         );
       }
       final isRadioTab = _mediaTab == 1;
+      // 当前源全是电台（如内置电台精选）：电视标签本来就没有东西可列，
+      // 别说成"暂无频道列表"让人以为源坏了，直接引导过去
+      final radioOnlySource = !isRadioTab &&
+          controller.categories.isEmpty &&
+          controller.radioCategories.isNotEmpty;
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(isRadioTab ? Icons.radio : Icons.playlist_add,
-                  size: 56, color: Colors.white38),
+              Icon(
+                  radioOnlySource
+                      ? Icons.radio
+                      : (isRadioTab ? Icons.radio : Icons.playlist_add),
+                  size: 56,
+                  color: Colors.white38),
               const SizedBox(height: 16),
               Text(
-                isRadioTab ? '还没有电台' : '暂无频道列表',
+                radioOnlySource
+                    ? '当前源只有电台'
+                    : (isRadioTab ? '还没有电台' : '暂无频道列表'),
                 style: TextStyle(color: Colors.white54, fontSize: t.listHeader),
               ),
               const SizedBox(height: 8),
               Text(
-                isRadioTab ? '点这里搜全国/地方台，加进来就在这一列' : '请在设置中添加 M3U/TXT 播放列表',
+                radioOnlySource
+                    ? '这套源里没有电视直播频道，切到「电台」标签即可收听'
+                    : (isRadioTab
+                        ? '点这里搜全国/地方台，加进来就在这一列'
+                        : '请在设置中添加 M3U/TXT 播放列表'),
                 style: TextStyle(color: Colors.white38, fontSize: t.listSub),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 20),
               OutlinedButton.icon(
-                onPressed: isRadioTab
-                    ? () => RadioSearchDialog.show(context)
-                    : widget.onOpenSettings,
-                icon: Icon(isRadioTab ? Icons.travel_explore : Icons.settings,
+                onPressed: radioOnlySource
+                    ? () => _switchTab(1)
+                    : (isRadioTab
+                        ? () => RadioSearchDialog.show(context)
+                        : widget.onOpenSettings),
+                icon: Icon(
+                    radioOnlySource
+                        ? Icons.radio
+                        : (isRadioTab
+                            ? Icons.travel_explore
+                            : Icons.settings),
                     size: 18),
-                label: Text(isRadioTab ? '搜索电台' : '去设置添加'),
+                label: Text(radioOnlySource
+                    ? '去电台标签'
+                    : (isRadioTab ? '搜索电台' : '去设置添加')),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.white70,
                 ),
@@ -705,7 +732,6 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       );
     }
     // 收藏场景（非空的）占最前 N 项，其后为真实分类
-    final favCats = _favCatsOf(controller);
     return ListView.builder(
       controller: _categoryScroll,
       padding: const EdgeInsets.symmetric(vertical: 8),

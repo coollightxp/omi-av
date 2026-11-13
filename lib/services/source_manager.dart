@@ -258,8 +258,24 @@ class SourceManager {
       final content = _decodePlaylistBytes(bytes);
       // 三级解析：m3u/txt 直接解析；HTML 聚合页提取 data-copy 接口地址；
       // TVBox 配置 JSON（lives）/多仓 JSON（urls）递归展开合并
-      final cats =
+      var cats =
           await _resolveContent(content, source.url, 2, {source.url});
+      // 内置电台精选整份都是电台流：按地址/分组猜类型会漏判（音频 HLS
+      // 的 m3u8 会落到 tv），必须整体强制 radio——否则这 60 个台会漏进
+      // 电视域，左侧两个标签看到一模一样的列表
+      if (source.type == PlaylistSourceType.builtin) {
+        cats = [
+          for (final c in cats)
+            c.copyWith(
+              channels: [
+                for (final ch in c.channels)
+                  ch.channelType == ChannelType.radio
+                      ? ch
+                      : ch.copyWith(channelType: ChannelType.radio),
+              ],
+            ),
+        ];
+      }
       // 导入过滤（方案 12.3）：只留 group-title/频道名命中关键字的频道
       _cachedChannels = applyGroupFilter(cats, source.groupFilter);
       _channelsLoaded = true;
@@ -464,7 +480,28 @@ class SourceManager {
       final bytes = await _fetchPlaylistBytes(u,
           timeout: const Duration(seconds: 15));
       final content = _decodePlaylistBytes(bytes);
-      return await _resolveContent(content, u, depth, visited);
+      final cats = await _resolveContent(content, u, depth, visited);
+      if (cats.isNotEmpty) return cats;
+      // 多仓里的条目常是「目录地址」（以 / 结尾，直接访问只是一张
+      // 网页门户），TVBox 客户端约定自己拼配置文件。按惯例挨个试：
+      // index.json → demo.json → config.json，命中第一个有频道的即止
+      if (u.endsWith('/')) {
+        for (final f in const ['index.json', 'demo.json', 'config.json']) {
+          final sub = '$u$f';
+          if (visited.contains(sub)) continue;
+          visited.add(sub);
+          try {
+            final b = await _fetchPlaylistBytes(sub,
+                timeout: const Duration(seconds: 12));
+            final r = await _resolveContent(
+                _decodePlaylistBytes(b), sub, depth, visited);
+            if (r.isNotEmpty) return r;
+          } catch (_) {
+            // 该文件名不存在：继续试下一个
+          }
+        }
+      }
+      return cats;
     } catch (_) {
       return const [];
     }

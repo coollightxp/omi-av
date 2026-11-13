@@ -249,7 +249,12 @@ class PlayerController extends ChangeNotifier {
   double get brightness => _brightness;
   PlayerSettings get settings => _settings;
   OmiVideoController? get videoController => _videoController;
-  List<ChannelCategory> get categories => _categories;
+  /// 电视域分类：整组都是电台的分组不进来（内置电台源已整体标 radio，
+  /// 这里再兜一层，防其它源里"广播"分组漏进电视标签）
+  List<ChannelCategory> get categories => [
+        for (final c in _categories)
+          if (!c.channels.every((ch) => ch.isRadio)) c,
+      ];
   bool get isLoadingPlaylist => _isLoadingPlaylist;
   bool get isLoadingEpg => _isLoadingEpg;
   String? get lastError => _lastError;
@@ -1165,7 +1170,18 @@ class PlayerController extends ChangeNotifier {
     }
     try {
       final vol = await VolumeController.instance.getVolume();
-      _volume = vol;
+      if (vol <= 0.01) {
+        // 系统音量停在 0：多半是上次静音/摸鱼异常退出没还原。
+        // 不写回去用户会以为"播放器坏了"，这里一次性修好并提示
+        _volume = _settings.defaultVolume;
+        try {
+          await VolumeController.instance.setVolume(_volume);
+        } catch (_) {}
+        OsdBus.show('检测到系统音量被静音，已恢复',
+            icon: Icons.volume_up);
+      } else {
+        _volume = vol;
+      }
     } catch (_) {
       _volume = _settings.defaultVolume;
     }
@@ -2091,6 +2107,9 @@ class PlayerController extends ChangeNotifier {
     // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
     // （'custom' 走自定义均衡器增益构建）
     unawaited(c.applyAudioFilter(filterForPreset(_settings.audioPreset)));
+    // 新内核的音量对齐应用音量：mpv 默认 100，不设的话静音/调音量
+    // 在换台后会失效（新实例满音量）
+    unawaited(c.setVolume(_volume));
     // 关键：initialize 完成前绝不能把 c 挂到 _videoController。
     // 4K 等高码率台 initialize 很慢，用户此时切台会进入
     // _disposeVideoController，对仍在初始化的实例调 pause/dispose，
@@ -2434,8 +2453,12 @@ class PlayerController extends ChangeNotifier {
       // 音频叠加会造成双重衰减；且不动系统音量，不影响其它程序
       _applyWebVolume();
     } else {
+      // 只调播放器自身增益，**不动系统音量**：
+      // ① 摸鱼/静音以前调系统音量，进程异常退出后整机音量停在 0，
+      //    下次启动读到 0 就"播放没有声音"（用户实测踩过）；
+      // ② 也不该影响用户其它程序的声音
       try {
-        await VolumeController.instance.setVolume(_volume);
+        await _videoController?.setVolume(_volume);
       } catch (_) {}
     }
     notifyListeners();
@@ -3890,6 +3913,13 @@ class PlayerController extends ChangeNotifier {
     // 首个播放列表自动选中并加载频道，让左侧列表立即可读
     if (sourceManager.currentPlaylistId == null) {
       await selectPlaylist(source.id);
+      // 解析结果是 0 频道：盒子生态里很常见——地址其实是影视点播分发页，
+      // 或直播配置已下架。明确告知，别让用户以为卡住了
+      final total = _categories.fold<int>(0, (a, c) => a + c.channels.length);
+      if (total == 0) {
+        OsdBus.show('该地址没有解析到直播频道（影视点播站或已失效的源）',
+            icon: Icons.warning_amber_rounded);
+      }
     } else {
       notifyListeners();
     }
@@ -3907,9 +3937,10 @@ class PlayerController extends ChangeNotifier {
 
   bool get radioCatalogLoaded => _radioCatalogLoaded;
 
-  /// 当前电视源的频道（给「电视伴音」自动匹配用）
+  /// 当前电视源的频道（给「电视伴音」自动匹配用）——
+  /// 用电视域（已剔除纯电台分组），电台台不该参与伴音匹配
   List<Channel> get _tvSourceChannels =>
-      [for (final c in _categories) ...c.channels];
+      [for (final c in categories) ...c.channels];
 
   Future<void> ensureRadioCatalog() async {
     if (_radioCatalogLoaded) return;
