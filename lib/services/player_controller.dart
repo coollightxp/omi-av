@@ -2113,8 +2113,11 @@ class PlayerController extends ChangeNotifier {
     // 新台前播、旧台后台出声的双路直播
     if (gen != _playGeneration) return;
 
-    // MDK 起播失败过就锁回 MPV，避免用户在坏环境里反复撞同一面墙
-    final useMdk = _settings.playEngine == 'mdk' && !_forceMpv;
+    // MDK 起播失败过就锁回 MPV，避免用户在坏环境里反复撞同一面墙。
+    // 电台固定走 MPV：纯音频流的 ICY 曲目、录音、真电平都依赖 libmpv，
+    // 而电台没有画面，MDK 的「不闪黑」在这里没有收益，不走这条新路径
+    final useMdk =
+        _settings.playEngine == 'mdk' && !_forceMpv && !channel.isRadio;
     final c = createOmiVideoBackend(
       url: Uri.parse(streamUrl),
       useMdk: useMdk,
@@ -2282,8 +2285,11 @@ class PlayerController extends ChangeNotifier {
     }
     if (v.hasError) {
       // MDK 引擎在本机起不来（老显卡缺 D3D11 特性/MDK 运行库缺失）：
-      // 自动切回 MPV 重开当前台，用户至少能看到画面，不用手动去设置里改
-      if (_settings.playEngine == 'mdk' && !_forceMpv) {
+      // 自动切回 MPV 重开当前台，用户至少能看到画面，不用手动去设置里改。
+      // 电台本来就固定走 MPV，出错不能算到 MDK 头上（否则误报 + 白重开）
+      if (_settings.playEngine == 'mdk' &&
+          !_forceMpv &&
+          !(_currentChannel?.isRadio ?? false)) {
         _forceMpv = true;
         OsdBus.show('MDK 内核起播失败，已自动切回 MPV', icon: Icons.memory);
         final ch = _currentChannel;
