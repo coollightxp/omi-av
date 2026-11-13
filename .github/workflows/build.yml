@@ -672,11 +672,17 @@ jobs:
           name: android-apk
           path: build/app/outputs/flutter-apk/*.apk
 
+      # 上传改走 gh CLI：softprops/action-gh-release 找到已有 Release 后
+      # 会先 PATCH 一次元数据（实测 2026-11-13 v2.1.14 三平台齐挂
+      # 「Resource not accessible by integration」），gh release upload
+      # 只传资产不动元数据，GITHUB_TOKEN 的 contents:write 足够
       - name: Upload to Release
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/app/outputs/flutter-apk/Omi-android-*.apk
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/Omi-android-*.apk \
+            --clobber --repo "$GITHUB_REPOSITORY"
 
   # ==================== Web ====================
   build-web:
@@ -1162,11 +1168,14 @@ jobs:
           name: windows-build
           path: Omi-windows.zip
 
+      # 上传改走 gh CLI（原因见 Android 同名步骤注释）
       - name: Upload to Release
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: Omi-windows.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" Omi-windows.zip \
+            --clobber --repo "$GITHUB_REPOSITORY"
 
   # ==================== Linux Desktop ====================
   build-linux:
@@ -1215,11 +1224,14 @@ jobs:
           name: linux-build
           path: Omi-linux.zip
 
+      # 上传改走 gh CLI（原因见 Android 同名步骤注释）
       - name: Upload to Release
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: Omi-linux.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" Omi-linux.zip \
+            --clobber --repo "$GITHUB_REPOSITORY"
 
   # ==================== 打 tag 自动建 Release（方案 14.2） ====================
   # 版本号唯一来源 = git 标签（14.1）：
