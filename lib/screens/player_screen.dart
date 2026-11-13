@@ -869,44 +869,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       },
                     ),
 
-                  // 【临时诊断 v2.1.4】排查「呼出面板后整窗发白」
-                  // 白屏时只看这行小字：
-                  //   字还在、t 还在跳 → Flutter 仍在绘制，白块是某个 widget
-                  //   字还在、t 停住    → UI 线程卡死（布局/绘制死循环）
-                  //   字没了            → 整帧没提交（引擎/窗口层）
-                  // pnl 后面括号里是底部面板的真实尺寸，撑满屏就是布局炸了
-                  if (controller.isDesktop)
-                    Positioned(
-                      left: 8,
-                      top: 8,
-                      child: IgnorePointer(
-                        child: StreamBuilder<int>(
-                          stream: Stream<int>.periodic(
-                              const Duration(seconds: 1), (i) => i),
-                          builder: (context, snap) {
-                            final ps = _bottomPanelKey.currentContext?.size;
-                            final mq = MediaQuery.sizeOf(context);
-                            return Container(
-                              color: const Color(0xE6000000),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 3),
-                              child: Text(
-                                't=${snap.data ?? 0} '
-                                '${mq.width.round()}x${mq.height.round()} '
-                                'pnl=${_bottomPanelVisible ? 1 : 0}'
-                                '${ps == null ? '?' : '(${ps.width.round()}x${ps.height.round()})'} '
-                                'web=${controller.webPageActive ? 1 : 0} '
-                                'radio=${controller.currentChannel?.isRadio == true ? 1 : 0}',
-                                style: const TextStyle(
-                                    color: Color(0xFF00E676),
-                                    fontSize: 11),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-
                   // 鼠标右键 = 遥控器返回：按层级关闭 投屏→抽屉→面板，
                   // 再按弹退出确认（网页频道前台时右键被 WebView 消费，
                   // 网页区内不触发；网页菜单已在 JS 层禁用）。

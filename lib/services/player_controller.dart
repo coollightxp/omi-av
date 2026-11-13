@@ -1597,6 +1597,16 @@ class PlayerController extends ChangeNotifier {
       // 白底——用户看到的就是「切台时冒出一大块白框，鼠标在框里也不
       // 消失，挪到窗口边缘那块小缝才慢慢没有」。提前把网页背景刷黑，
       // 窗口即便还在，露出来的也是黑的。
+      // 釜底抽薪：WebView2 的原生子窗口销毁要 2.5 秒，这期间它一直浮在
+      // Flutter 画布最上层，吃掉鼠标与双击，白底还会把底部面板整块盖住。
+      // 光刷黑网页背景不够——页面空白、加载失败或 about:blank 本身就是白。
+      // 直接把原生窗口缩成 0×0，白块立刻消失，也不再参与命中测试。
+      try {
+        // ignore: avoid_dynamic_calls
+        await webController?.setSize(const Size(0, 0));
+      } catch (_) {
+        // 控制器已销毁 / 平台不支持时忽略，下面的刷黑仍然生效
+      }
       try {
         // ignore: avoid_dynamic_calls
         webController?.evaluateJavascript(
@@ -1956,6 +1966,13 @@ class PlayerController extends ChangeNotifier {
     if (!_webPageActive) return;
     _resetWebRecording();
     _webViewClosedAt = DateTime.now();
+    // 同 playChannel：原生窗口先缩到 0×0 再走销毁，否则这 2.5 秒里
+    // 它会一直盖在画面上（白底 + 吃鼠标 + 吃双击）
+    try {
+      // ignore: avoid_dynamic_calls
+      unawaited(webController?.setSize(const Size(0, 0)) ??
+          Future<void>.value());
+    } catch (_) {}
     _webPageActive = false;
     _webPageForeground = false;
     WinHotkeys().setCursorHide(false);
