@@ -1253,5 +1253,12 @@ jobs:
             exit 1
           fi
           echo "$FILES"
-          gh release create "$TAG" $FILES \
-            --title "欧米视听 $TAG" --generate-notes $PRERELEASE
+          # 各平台的 "Upload to Release" 步骤可能已经先把 Release 建出来了
+          # （softprops/action-gh-release 首次上传即创建），这里必须幂等，
+          # 否则 create 会报 already_exists，整个 job 红叉、看起来像没发出去
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" $FILES --clobber
+          else
+            gh release create "$TAG" $FILES \
+              --title "欧米视听 $TAG" --generate-notes $PRERELEASE
+          fi
