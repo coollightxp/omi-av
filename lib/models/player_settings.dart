@@ -70,6 +70,16 @@ class PlayerSettings {
   /// 方案 3.7 五档。
   final int castEndWaitSeconds;
 
+  /// 定时关闭到点做什么（跨启动记住）：
+  /// - 'pause'：暂停播放，程序留着（听电台睡着，第二天接着听）
+  /// - 'exit'：退出应用（看电视睡着，没必要挂一整夜）
+  /// - 'shutdown'：退出应用并关闭电脑（桌面端，睡前看片常用）
+  final String sleepActionKey;
+
+  /// 定时关闭的目标时刻（epoch 毫秒，0 = 未设定）。
+  /// 持久化后重启仍能续上；启动时若已过期自动清除。
+  final int sleepAtMs;
+
   /// 启动时恢复上次频道（默认开）。
   /// 关闭后启动进入「待选台」画面，不发起任何网络请求，
   /// 按 OK/方向键/点屏幕才打开频道列表。方案第九节。
@@ -137,6 +147,8 @@ class PlayerSettings {
     this.autoReloadStall = true,
     this.retryTimes = 3,
     this.castEndWaitSeconds = 0,
+    this.sleepActionKey = 'pause',
+    this.sleepAtMs = 0,
     this.resumeLastChannel = true,
     this.closeToTray = false,
     this.audioPreset = '',
@@ -167,6 +179,8 @@ class PlayerSettings {
     bool? autoReloadStall,
     int? retryTimes,
     int? castEndWaitSeconds,
+    String? sleepActionKey,
+    int? sleepAtMs,
     bool? resumeLastChannel,
     bool? closeToTray,
     String? audioPreset,
@@ -197,6 +211,8 @@ class PlayerSettings {
       autoReloadStall: autoReloadStall ?? this.autoReloadStall,
       retryTimes: retryTimes ?? this.retryTimes,
       castEndWaitSeconds: castEndWaitSeconds ?? this.castEndWaitSeconds,
+      sleepActionKey: sleepActionKey ?? this.sleepActionKey,
+      sleepAtMs: sleepAtMs ?? this.sleepAtMs,
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
       closeToTray: closeToTray ?? this.closeToTray,
       audioPreset: audioPreset ?? this.audioPreset,

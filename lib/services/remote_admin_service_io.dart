@@ -544,6 +544,7 @@ function renderSettings(){
     +ceOpts.map(function(o){return '<button class="'+(ce===o[0]?'on':'')+'" onclick="setChoice(\'castEndWaitSeconds\','+o[0]+')">'+o[1]+'</button>'}).join('')
     +'</div></div>';
   // 界面缩放：开启自动适配时按屏幕宽度算字号，关闭后才出现手动滑块
+  html+=sleepCard(s);
   html+='<div class="group-title">显示</div>';
   var autoOn=s.uiScaleAuto!==false;
   html+='<div class="sw-row" onclick="toggleSetting(\'uiScaleAuto\')">'
@@ -563,6 +564,77 @@ function renderSettings(){
   el.innerHTML=html;
 }
 var scaleTimer;
+function sleepHm(ms){var d=new Date(ms);var h=d.getHours(),m=d.getMinutes();return (h<10?'0':'')+h+':'+(m<10?'0':'')+m}
+function sleepLeft(ms){var s=Math.round((ms-Date.now())/1000);if(s<0)s=0;var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h>0?(h+' 小时 '+m+' 分'):(m+' 分')}
+function sleepBase(){if(!state.settings)state.settings={};if(!state.settings.sleepActionKey)state.settings.sleepActionKey='pause';return state.settings}
+function persistSleep(msg){
+  return persist().then(function(){
+    return fetch('/api/snapshot').then(function(r){return r.json()}).then(function(d){
+      state=d;render();toast(msg||'已保存');
+    });
+  });
+}
+function setSleepAction(k){
+  var s=sleepBase();s.sleepActionKey=k;
+  persist().then(function(){
+    render();
+    toast('到点动作：'+({pause:'暂停播放',exit:'退出应用',shutdown:'退出并关机'}[k]||k));
+  });
+}
+function setSleepIn(min){
+  var s=sleepBase();s.sleepAtMs=Date.now()+min*60000;
+  persistSleep(min+' 分钟后关闭');
+}
+function setSleepAt(h,m){
+  var s=sleepBase();var now=new Date();
+  var t=new Date(now.getFullYear(),now.getMonth(),now.getDate(),h,m,0,0);
+  if(t.getTime()<=Date.now())t=new Date(t.getTime()+86400000);
+  s.sleepAtMs=t.getTime();
+  persistSleep(sleepHm(s.sleepAtMs)+' 关闭');
+}
+function setSleepCustom(){
+  var def=sleepHm(Date.now()+3600000);
+  var v=prompt('几点关闭？格式 HH:MM（24 小时制），例如 23:30',def);
+  if(!v)return;
+  var m=v.replace(/：/g,':').match(/^(\d{1,2}):(\d{1,2})$/);
+  if(!m){toast('格式不对，试试 23:30');return}
+  var h=parseInt(m[1],10),mi=parseInt(m[2],10);
+  if(h>23||mi>59){toast('时间不合法');return}
+  setSleepAt(h,mi);
+}
+function cancelSleep(){
+  var s=sleepBase();s.sleepAtMs=0;
+  persistSleep('已取消定时关闭');
+}
+/// 定时关闭卡片：动作 + 倒计时 + 固定时刻
+function sleepCard(s){
+  var at=typeof s.sleepAtMs==='number'?s.sleepAtMs:0;
+  var act=s.sleepActionKey||'pause';
+  var desktop=s.isDesktop!==false;
+  var stateTxt=at>0?(sleepHm(at)+' 关闭 · 还剩 '+sleepLeft(at)):'未设定';
+  var html='<div class="group-title">定时关闭</div>';
+  html+='<div class="sw-row col"><div class="sw-text">'
+    +'<div class="sw-title">到点做什么 <span style="color:#9fb2e8;font-weight:600;font-size:12.5px">'+stateTxt+'</span></div>'
+    +'<div class="sw-sub">暂停=留着画面；退出=关程序；关机=退出后关电脑（桌面端）</div></div>'
+    +'<div class="seg" style="margin-top:10px">'
+    +[['pause','暂停播放'],['exit','退出应用']].concat(desktop?[['shutdown','退出并关机']]:[])
+      .map(function(o){return '<button class="'+(act===o[0]?'on':'')+'" onclick="setSleepAction(\''+o[0]+'\')">'+o[1]+'</button>'}).join('')
+    +'</div>';
+  html+='<div class="sw-sub" style="margin-top:14px">倒计时</div><div class="seg" style="margin-top:8px">'
+    +[30,60,90,120].map(function(m){return '<button onclick="setSleepIn('+m+')">'+m+' 分钟</button>'}).join('')
+    +'</div>';
+  html+='<div class="sw-sub" style="margin-top:14px">固定时刻（最近一次）</div><div class="seg" style="margin-top:8px">'
+    +[[22,0],[23,0],[23,30],[0,0]].map(function(o){
+      var lab=(o[0]<10?'0':'')+o[0]+':'+(o[1]<10?'0':'')+o[1];
+      return '<button onclick="setSleepAt('+o[0]+','+o[1]+')">'+lab+'</button>'}).join('')
+    +'</div>';
+  html+='<div class="seg" style="margin-top:8px">'
+    +'<button onclick="setSleepCustom()">自定义时刻…</button>'
+    +(at>0?'<button onclick="cancelSleep()" style="-webkit-flex:0 0 38%;flex:0 0 38%;color:#ff8a95;border-color:#5b2733">取消定时</button>':'')
+    +'</div>';
+  html+='</div>';
+  return html;
+}
 function onScaleInput(v){
   if(!state.settings)state.settings={};
   state.settings.uiScale=parseFloat(v);

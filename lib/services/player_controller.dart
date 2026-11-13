@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Icons;
 import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:volume_controller/volume_controller.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -46,9 +47,16 @@ import 'network_monitor.dart';
 import 'exit_guard.dart';
 import 'osd_bus.dart';
 import 'pip.dart';
+import 'system_power.dart';
 
 /// 播放器状态
 enum PlayerState { idle, loading, playing, paused, error, ended, waitingForNetwork }
+
+/// 定时关闭到点后做什么。三者是不同概念，别混：
+/// - [pause]：停止播放、保留当前画面（电台听着睡着，第二天接着听）
+/// - [exit]：退出应用（看电视睡着，没必要让程序挂一整夜）
+/// - [shutdown]：退出应用并关闭电脑（桌面端睡前看片的常规操作）
+enum SleepAction { pause, exit, shutdown }
 
 /// 播放器控制器 - 使用 ChangeNotifier 进行状态管理
 class PlayerController extends ChangeNotifier {
@@ -813,6 +821,9 @@ class PlayerController extends ChangeNotifier {
         'launchAtStartup': s.launchAtStartup,
         'uiScale': s.uiScale,
         'uiScaleAuto': s.uiScaleAuto,
+        // 定时关闭（手机端可远程设定；到点动作 shutdown 仅桌面生效）
+        'sleepActionKey': s.sleepActionKey,
+        'sleepAtMs': s.sleepAtMs,
         'isDesktop': isDesktop,
       },
     };
@@ -894,6 +905,27 @@ class PlayerController extends ChangeNotifier {
       final launchAtStartup = isDesktop
           ? (rb('launchAtStartup') ?? cur.launchAtStartup)
           : cur.launchAtStartup;
+      // 定时关闭：手机端也能设定/取消。动作先落，再按目标时刻重装定时器
+      final sleepKeyRaw = rawSettings['sleepActionKey'];
+      if (sleepKeyRaw is String &&
+          const {'pause', 'exit', 'shutdown'}.contains(sleepKeyRaw) &&
+          sleepKeyRaw != cur.sleepActionKey) {
+        final act = sleepKeyRaw == 'exit'
+            ? SleepAction.exit
+            : sleepKeyRaw == 'shutdown'
+                ? SleepAction.shutdown
+                : SleepAction.pause;
+        setSleepAction(act);
+      }
+      final sleepAtRaw = rawSettings['sleepAtMs'];
+      if (sleepAtRaw is num) {
+        final ms = sleepAtRaw.toInt();
+        if (ms != _settings.sleepAtMs) {
+          await setSleepAt(
+            ms <= 0 ? null : DateTime.fromMillisecondsSinceEpoch(ms),
+          );
+        }
+      }
       if (dlna != cur.dlnaEnabled ||
           autoPlayNext != cur.autoPlayNext ||
           autoReloadStall != cur.autoReloadStall ||
@@ -905,7 +937,9 @@ class PlayerController extends ChangeNotifier {
           startFullscreen != cur.startFullscreen ||
           alwaysOnTop != cur.alwaysOnTop ||
           launchAtStartup != cur.launchAtStartup) {
-        updateSettings(cur.copyWith(
+        // 用 _settings 而非 cur：上面的定时关闭可能已经改过设置对象，
+        // 拿旧快照 copyWith 会把刚写入的 sleep* 覆盖回去
+        updateSettings(_settings.copyWith(
           dlnaEnabled: dlna,
           autoPlayNext: autoPlayNext,
           autoReloadStall: autoReloadStall,
@@ -2422,6 +2456,13 @@ class PlayerController extends ChangeNotifier {
 
   Timer? _sleepTimer;
   DateTime? _sleepAt;
+  SleepAction _sleepAction = SleepAction.pause;
+
+  /// 到点动作（设置面板可切换，写进 PlayerSettings 跨启动记住）
+  SleepAction get sleepAction => _sleepAction;
+
+  /// 定时目标时刻（固定时间点时界面显示「23:30 关闭」）
+  DateTime? get sleepAt => _sleepAt;
 
   /// 每秒刷新的剩余时间（界面倒计时徽标用；不走 notifyListeners，
   /// 免得整棵播放树每秒重建）
@@ -2446,35 +2487,167 @@ class PlayerController extends ChangeNotifier {
     return d.isNegative ? Duration.zero : d;
   }
 
-  /// 定时关闭：[d] 为 null 表示取消。到点只暂停播放，不退出程序
-  /// （电台用户多半是听着睡着，第二天还想接着听）。
-  void setSleepTimer(Duration? d) {
+  static SleepAction _parseSleepAction(String? k) {
+    switch (k) {
+      case 'exit':
+        return SleepAction.exit;
+      case 'shutdown':
+        return SleepAction.shutdown;
+      default:
+        return SleepAction.pause;
+    }
+  }
+
+  static String sleepActionKey(SleepAction a) {
+    switch (a) {
+      case SleepAction.exit:
+        return 'exit';
+      case SleepAction.shutdown:
+        return 'shutdown';
+      case SleepAction.pause:
+        return 'pause';
+    }
+  }
+
+  /// 只改到点动作，不动已设定的时间（设置面板里单独切换时用）
+  void setSleepAction(SleepAction action) {
+    // 移动端没有关机权限，静默降级为退出（界面也不显示关机项）
+    if (action == SleepAction.shutdown && !isDesktop) {
+      action = SleepAction.exit;
+    }
+    if (action == _sleepAction) return;
+    _sleepAction = action;
+    updateSettings(_settings.copyWith(
+      sleepActionKey: sleepActionKey(action),
+    ));
+    notifyListeners();
+  }
+
+  /// 定时关闭：[d] 为 null 表示取消。
+  Future<void> setSleepTimer(Duration? d, {SleepAction? action}) =>
+      setSleepAt(d == null ? null : DateTime.now().add(d), action: action);
+
+  /// 定时关闭到「某个时刻」（固定时间点，例如今晚 23:30）。
+  ///
+  /// 到点动作由 [action] 决定（不传则沿用上次选择）：
+  /// - [SleepAction.pause]：只暂停播放，程序留着（电台用户多半听着睡着，
+  ///   第二天还想接着听）
+  /// - [SleepAction.exit]：直接退出应用（看电视睡着不必挂一整夜）
+  /// - [SleepAction.shutdown]：先发系统关机命令再退出（桌面端独有）
+  Future<void> setSleepAt(DateTime? at, {SleepAction? action}) async {
+    if (action != null) _sleepAction = action;
+    // 移动端没有「关机」语义（iOS/安卓应用无权关机），降级为退出
+    if (_sleepAction == SleepAction.shutdown && !isDesktop) {
+      _sleepAction = SleepAction.exit;
+    }
     _sleepTimer?.cancel();
     _sleepTimer = null;
     _sleepTickTimer?.cancel();
-    if (d == null) {
+
+    if (at == null) {
       _sleepAt = null;
       sleepCountdown.value = null;
+      updateSettings(_settings.copyWith(sleepAtMs: 0));
       OsdBus.show('已取消定时关闭', icon: Icons.bedtime_outlined);
       notifyListeners();
       return;
     }
-    _sleepAt = DateTime.now().add(d);
-    _startSleepTick();
-    _sleepTimer = Timer(d, () async {
-      _sleepTimer = null;
-      _sleepTickTimer?.cancel();
-      _sleepAt = null;
-      sleepCountdown.value = null;
-      if (isPlaying) {
-        await togglePlayPause();
-      }
-      OsdBus.show('定时关闭：已暂停播放', icon: Icons.bedtime);
-      notifyListeners();
-    });
-    final m = d.inMinutes;
-    OsdBus.show('$m 分钟后自动暂停', icon: Icons.bedtime_outlined);
+
+    // 已经过了的时刻（手动选到今天凌晨）顺延到明天，别立刻触发
+    var target = at;
+    if (!target.isAfter(DateTime.now())) {
+      target = target.add(const Duration(days: 1));
+    }
+    _sleepAt = target;
+    updateSettings(_settings.copyWith(
+      sleepAtMs: target.millisecondsSinceEpoch,
+      sleepActionKey: sleepActionKey(_sleepAction),
+    ));
+    _armSleepTimer(target, announce: true);
     notifyListeners();
+  }
+
+  /// 装定时器（设定/重启恢复共用）。
+  /// [announce] 为 false 时只静默恢复，不弹 OSD。
+  void _armSleepTimer(DateTime target, {bool announce = false}) {
+    _sleepTimer?.cancel();
+    _startSleepTick();
+    final d = target.difference(DateTime.now());
+    _sleepTimer = Timer(d.isNegative ? Duration.zero : d, _runSleepAction);
+    if (announce) {
+      final tail = switch (_sleepAction) {
+        SleepAction.pause => '暂停播放',
+        SleepAction.exit => '退出应用',
+        SleepAction.shutdown => '退出并关机',
+      };
+      // 一小时内报「45 分钟后」，更远的直接报时刻「23:30」
+      final when = d.inMinutes < 60
+          ? '${d.inMinutes < 1 ? 1 : d.inMinutes} 分钟后'
+          : '${_hhmm(target)}';
+      OsdBus.show('$when自动$tail', icon: Icons.bedtime_outlined);
+    }
+  }
+
+  Future<void> _runSleepAction() async {
+    _sleepTimer = null;
+    _sleepTickTimer?.cancel();
+    _sleepAt = null;
+    sleepCountdown.value = null;
+    // 先清持久化，避免"到点后又重启"重复触发（退出前必须落盘：
+    // ExitGuard 走的是 runner 快速结束进程，dispose 未必来得及写）
+    updateSettings(_settings.copyWith(sleepAtMs: 0));
+    await flushSettings();
+
+    switch (_sleepAction) {
+      case SleepAction.shutdown:
+        OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
+        notifyListeners();
+        // 先发系统命令再退程序：进程先死也不影响系统照常关闭，
+        // 15 秒内还能在命令行 `shutdown /a` 撤销
+        if (isDesktop) {
+          await shutdownSystem(delaySeconds: 15);
+        }
+        if (isDesktop) {
+          await ExitGuard.quit();
+        } else if (!kIsWeb) {
+          await SystemNavigator.pop();
+        }
+        return;
+      case SleepAction.exit:
+        OsdBus.show('定时关闭：退出应用', icon: Icons.bedtime);
+        notifyListeners();
+        if (isDesktop) {
+          await ExitGuard.quit();
+        } else if (!kIsWeb) {
+          await SystemNavigator.pop();
+        }
+        return;
+      case SleepAction.pause:
+        break;
+    }
+    if (isPlaying) {
+      await togglePlayPause();
+    }
+    OsdBus.show('定时关闭：已暂停播放', icon: Icons.bedtime);
+    notifyListeners();
+  }
+
+  static String _hhmm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  /// 启动时恢复上次的定时关闭（重启服务器/客户端都不该把闹钟弄丢）。
+  /// 已过期的目标时刻直接清掉，不补触发。
+  void _restoreSleepTimer() {
+    _sleepAction = _parseSleepAction(_settings.sleepActionKey);
+    final ms = _settings.sleepAtMs;
+    if (ms <= 0) return;
+    final at = DateTime.fromMillisecondsSinceEpoch(ms);
+    if (!at.isAfter(DateTime.now())) {
+      updateSettings(_settings.copyWith(sleepAtMs: 0));
+      return;
+    }
+    _sleepAt = at;
+    _armSleepTimer(at);
   }
 
   /// 播放/暂停切换
@@ -2800,6 +2973,8 @@ class PlayerController extends ChangeNotifier {
   static const _kAutoReloadStall = 'settings_auto_reload_stall';
   static const _kRetryTimes = 'settings_retry_times';
   static const _kCastEndWait = 'settings_cast_end_wait_seconds';
+  static const _kSleepAction = 'settings_sleep_action';
+  static const _kSleepAt = 'settings_sleep_at_ms';
   static const _kResumeLastChannel = 'settings_resume_last_channel';
   static const _kAudioPreset = 'settings_audio_preset';
   static const _kAudioEqGains = 'settings_audio_eq_gains';
@@ -2843,6 +3018,8 @@ class PlayerController extends ChangeNotifier {
         autoReloadStall: p.getBool(_kAutoReloadStall) ?? true,
         retryTimes: p.getInt(_kRetryTimes) ?? 3,
         castEndWaitSeconds: _normalizeCastWait(p.getInt(_kCastEndWait) ?? 0),
+        sleepActionKey: p.getString(_kSleepAction) ?? 'pause',
+        sleepAtMs: p.getInt(_kSleepAt) ?? 0,
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
         audioPreset: p.getString(_kAudioPreset) ?? '',
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
@@ -2862,6 +3039,8 @@ class PlayerController extends ChangeNotifier {
           unawaited(windowManager.setPreventClose(true));
         }
       }
+      // 定时关闭跨启动续上（过期则直接清掉）
+      _restoreSleepTimer();
     } catch (_) {}
   }
 
@@ -2957,6 +3136,8 @@ class PlayerController extends ChangeNotifier {
       await putBool(_kAutoReloadStall, _settings.autoReloadStall);
       await putInt(_kRetryTimes, _settings.retryTimes);
       await putInt(_kCastEndWait, _settings.castEndWaitSeconds);
+      await putString(_kSleepAction, _settings.sleepActionKey);
+      await putInt(_kSleepAt, _settings.sleepAtMs);
       await putBool(_kResumeLastChannel, _settings.resumeLastChannel);
     } catch (_) {}
   }
@@ -4303,6 +4484,8 @@ class PlayerController extends ChangeNotifier {
     _castEndedTimer?.cancel();
     _castWaitTimer?.cancel();
     _autoRetryTimer?.cancel();
+    _sleepTimer?.cancel();
+    _sleepTickTimer?.cancel();
     _resetWebRecording();
     if (_isRecording && _videoController != null) {
       unawaited(_videoController!.stopRecord());

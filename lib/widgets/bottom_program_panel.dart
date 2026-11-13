@@ -12,6 +12,7 @@ import '../core/widgets/ghost_button.dart';
 import '../player/widgets/source_stepper.dart';
 import '../services/player_controller.dart';
 import 'scaled_panel.dart';
+import 'sleep_timer_dialog.dart';
 
 /// 底部信息/控制面板
 /// 布局（参考电视播放器）：台标 | 当前节目(大字)+时段/频道/分辨率/线路 | 控制按钮
@@ -504,15 +505,17 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isRadioRecording ? '停止录音' : '录音',
           hasChannel ? c.toggleRadioRecord : null,
         ),
-        _KbAction(
-          'sleep',
-          Icons.bedtime_outlined,
-          sleepRemain == null
-              ? '定时关闭'
-              : '定时关闭（剩 ${_fmtRemain(sleepRemain)}）',
-          () => _showSleepMenu(context),
-        ),
       ],
+      // 定时关闭：电台（听着睡着）和电视（看着睡着）都需要。
+      // 到点动作可选暂停/退出/退出并关机，固定时刻见 showSleepTimerDialog
+      _KbAction(
+        'sleep',
+        Icons.bedtime_outlined,
+        sleepRemain == null
+            ? '定时关闭'
+            : '定时关闭（剩 ${_fmtRemain(sleepRemain)}）',
+        hasChannel ? () => showSleepTimerDialog(context) : null,
+      ),
       if (c.isDesktop && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
@@ -532,19 +535,19 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                 ? '旋转画面'
                 : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
             hasVideo ? c.cycleVideoRotation : null),
-      // 静音 / 全屏（与 OMTV 底部栏一致，鼠标直接可点）
-      if (c.isDesktop) ...[
-        _KbAction(
-            'mute',
-            c.isMuted ? Icons.volume_off : Icons.volume_up,
-            c.isMuted ? '取消静音' : '静音',
-            c.toggleMute),
+      // 静音：手机/平板也要（侧滑调音量之外给一个一键静音）；
+      // 全屏仍只在桌面端（移动端全屏由系统/手势接管）
+      _KbAction(
+          'mute',
+          c.isMuted ? Icons.volume_off : Icons.volume_up,
+          c.isMuted ? '取消静音' : '静音',
+          c.toggleMute),
+      if (c.isDesktop)
         _KbAction(
             'fullscreen',
             c.isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
             c.isFullscreen ? '退出全屏' : '全屏',
             c.toggleFullscreen),
-      ],
       // 手动重载当前频道：网页卡死/黑屏时不必等自动看门狗；
       // 投屏中播放会话由发送端控制，重载无意义（置灰），
       // 断开投屏后自动恢复可用
@@ -658,54 +661,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       return '$h:${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
     }
     return '$m:${sec.toString().padLeft(2, '0')}';
-  }
-
-  /// 定时关闭菜单：30/60/90 分钟、取消定时。
-  /// 只暂停播放不退出——听着睡着的人第二天还想接着听。
-  Future<void> _showSleepMenu(BuildContext context) async {
-    final c = context.read<PlayerController>();
-    final remain = c.sleepRemain;
-    final picked = await showDialog<int>(
-      context: context,
-      barrierColor: AppColors.scrim,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.overlay,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: const BorderSide(color: AppColors.stroke),
-        ),
-        title: const Text('定时关闭',
-            style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              remain == null ? '到点自动暂停播放' : '剩余 ${_fmtRemain(remain)}',
-              style:
-                  const TextStyle(color: AppColors.textSecondary, fontSize: 12.5),
-            ),
-            const SizedBox(height: 10),
-            for (final m in const [30, 60, 90])
-              ListTile(
-                dense: true,
-                title: Text('$m 分钟后',
-                    style: const TextStyle(
-                        color: AppColors.textPrimary, fontSize: 14)),
-                onTap: () => Navigator.pop(ctx, m),
-              ),
-            if (remain != null)
-              ListTile(
-                dense: true,
-                title: const Text('取消定时',
-                    style: TextStyle(color: AppColors.live, fontSize: 14)),
-                onTap: () => Navigator.pop(ctx, 0),
-              ),
-          ],
-        ),
-      ),
-    );
-    if (picked == null || !mounted) return;
-    c.setSleepTimer(picked == 0 ? null : Duration(minutes: picked));
   }
 
   /// 面板按钮：统一走 [GhostButton]（全 App 唯一圆形操作钮）。
@@ -855,3 +810,4 @@ class _SeekBarState extends State<_SeekBar> {
     );
   }
 }
+
