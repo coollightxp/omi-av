@@ -1256,9 +1256,10 @@ jobs:
           # 各平台的 "Upload to Release" 步骤可能已经先把 Release 建出来了
           # （softprops/action-gh-release 首次上传即创建），这里必须幂等，
           # 否则 create 会报 already_exists，整个 job 红叉、看起来像没发出去
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" $FILES --clobber
+          # 没有 checkout，gh 需要 -R 才知道是哪个仓库（否则报 not a git repository）
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" $FILES --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" $FILES \
+            gh release create "$TAG" $FILES --repo "$GITHUB_REPOSITORY" \
               --title "欧米视听 $TAG" --generate-notes $PRERELEASE
           fi
