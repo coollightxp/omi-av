@@ -507,18 +507,6 @@ input:focus{border-color:#3b82f6}
     </div>
   </div>
 </div>
-<div class="sheet-mask" id="time-mask" onclick="if(event.target===this)closeTimeSheet()">
-  <div class="sheet">
-    <div class="handle"></div>
-    <h2>设置关闭时刻</h2>
-    <label>几点关闭（今天已过则算明天）</label>
-    <input type="time" id="f-time" value="23:30">
-    <div class="sheet-actions">
-      <button class="btn" onclick="closeTimeSheet()">取消</button>
-      <button class="btn primary" onclick="saveTimeSheet()">确定</button>
-    </div>
-  </div>
-</div>
 <div class="toast" id="toast"></div>
 <script>
 var hostEl=document.getElementById('host');
@@ -855,7 +843,7 @@ function renderPlayer(){
 // ==================== 系统 ====================
 function renderSystem(){
   var s=state.settings||{}, desktop=s.isDesktop!==false;
-  var html='<div class="group-title">定时关闭</div>'+sleepCard(s);
+  var html='';
   if(desktop){
     html+='<div class="group-title">桌面端</div>';
     html+=switchCard('alwaysOnTop','窗口置顶','窗口始终在最前，快捷键不被别的窗口抢走');
@@ -906,98 +894,11 @@ function renderHelp(){
     +'<div class="group-title">小贴士</div>'
     +'<div class="card"><div class="help-card">'
     +'<div class="help-item"><div class="help-k">·</div><div class="help-v">安卓电视/电视盒子按遥控器 ← → ↑ ↓ OK 操作，长按 OK 呼出控制面板；底部「小窗播放」可缩成系统画中画</div></div>'
-    +'<div class="help-item"><div class="help-k">·</div><div class="help-v">定时关闭到了会先弹倒计时提示，按返回键可取消（视频/电台都有）</div></div>'
+    +'<div class="help-item"><div class="help-k">·</div><div class="help-v">定时关闭在设备上「退出」卡片里设置（视频/电台都生效），到点前 60 秒画面弹提示，按返回键可取消</div></div>'
     +'<div class="help-item"><div class="help-k">·</div><div class="help-v">「窗口置顶 / 开机启动 / 启动全屏 / 最小化到托盘」仅桌面端生效</div></div>'
     +'<div class="help-item"><div class="help-k">·</div><div class="help-v">EPG 每天自动拉取一次，断网时用上次缓存；切换 EPG 源需先设为当前</div></div>'
     +'</div></div>';
 }
-
-// ==================== 定时关闭 ====================
-function sleepHm(ms){var d=new Date(ms);var h=d.getHours(),m=d.getMinutes();return (h<10?'0':'')+h+':'+(m<10?'0':'')+m}
-function sleepLeft(ms){var s=Math.round((ms-Date.now())/1000);if(s<0)s=0;var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h>0?(h+' 小时 '+m+' 分'):(m+' 分')}
-function sleepBase(){if(!state.settings)state.settings={};if(!state.settings.sleepActionKey)state.settings.sleepActionKey='pause';return state.settings}
-function persistSleep(msg){
-  return persist().then(function(){
-    return fetch('/api/snapshot').then(function(r){return r.json()}).then(function(d){
-      state=d;render();toast(msg||'已保存');
-    });
-  });
-}
-function setSleepAction(k){
-  var s=sleepBase();s.sleepActionKey=k;
-  persist().then(function(){
-    render();
-    toast('到点动作：'+({pause:'暂停播放',exit:'退出应用',shutdown:'退出并关机'}[k]||k));
-  });
-}
-function setSleepIn(min){
-  var s=sleepBase();s.sleepAtMs=Date.now()+min*60000;
-  persistSleep(min+' 分钟后关闭');
-}
-function setSleepAt(h,m){
-  var s=sleepBase();var now=new Date();
-  var t=new Date(now.getFullYear(),now.getMonth(),now.getDate(),h,m,0,0);
-  if(t.getTime()<=Date.now())t=new Date(t.getTime()+86400000);
-  s.sleepAtMs=t.getTime();
-  persistSleep(sleepHm(s.sleepAtMs)+' 关闭');
-}
-function openTimeSheet(){
-  var at=state.settings&&state.settings.sleepAtMs;
-  el('f-time').value=at>0?sleepHm(at):'23:30';
-  el('time-mask').className='sheet-mask show';
-}
-function closeTimeSheet(){el('time-mask').className='sheet-mask'}
-function saveTimeSheet(){
-  var v=el('f-time').value||'';
-  var m=v.match(/^(\d{1,2}):(\d{1,2})$/);
-  if(!m){toast('请选择时间');return}
-  var h=parseInt(m[1],10),mi=parseInt(m[2],10);
-  if(h>23||mi>59){toast('时间不合法');return}
-  closeTimeSheet();
-  setSleepAt(h,mi);
-}
-function cancelSleep(){
-  var s=sleepBase();s.sleepAtMs=0;
-  persistSleep('已取消定时关闭');
-}
-function sleepCard(s){
-  var at=typeof s.sleepAtMs==='number'?s.sleepAtMs:0;
-  var act=s.sleepActionKey||'pause';
-  var desktop=s.isDesktop!==false;
-  var stateTxt=at>0?(sleepHm(at)+' 关闭 · 还剩 '+sleepLeft(at)):'未设定';
-  var html='<div class="sw-row col"><div class="sw-text">'
-    +'<div class="sw-title">到点做什么 <span id="sleep-state" style="color:#9fb2e8;font-weight:600;font-size:12.5px">'+stateTxt+'</span></div>'
-    +'<div class="sw-sub">暂停=留着画面；退出=关程序；关机=退出后关电脑（桌面端）</div></div>'
-    +'<div class="seg" style="margin-top:10px">'
-    +[['pause','暂停播放'],['exit','退出应用']].concat(desktop?[['shutdown','退出并关机']]:[])
-      .map(function(o){return '<button class="'+(act===o[0]?'on':'')+'" onclick="setSleepAction(\''+o[0]+'\')">'+o[1]+'</button>'}).join('')
-    +'</div>';
-  html+='<div class="sw-sub" style="margin-top:14px">倒计时</div><div class="seg" style="margin-top:8px">'
-    +[30,60,90,120].map(function(m){return '<button onclick="setSleepIn('+m+')">'+m+' 分钟</button>'}).join('')
-    +'</div>';
-  // 固定时刻：只显示一个时刻 + 「设置」，点开时间选择器自己挑；
-  // 不像倒计时那样列一排档位（列表太长反而看不清）
-  var atHm=at>0?sleepHm(at):'23:30';
-  html+='<div class="sw-sub" style="margin-top:14px">固定时刻（今天已过算明天）</div>'
-    +'<div class="seg" style="margin-top:8px">'
-    +'<button onclick="openTimeSheet()" style="font-weight:600;font-size:15px;color:#9fb2e8">'+atHm+'</button>'
-    +'<button onclick="openTimeSheet()" style="-webkit-flex:0 0 34%;flex:0 0 34%">设置…</button>'
-    +'</div>';
-  if(at>0){
-    html+='<div class="seg" style="margin-top:8px">'
-      +'<button onclick="cancelSleep()" style="color:#ff8a95;border-color:#5b2733">取消定时</button>'
-      +'</div>';
-  }
-  html+='<div class="sw-sub" style="margin-top:12px">到点前 60 秒，播放画面会弹倒计时提示，按遥控器返回键可取消</div>';
-  html+='</div>';
-  return html;
-}
-setInterval(function(){
-  var l=el('sleep-state');
-  if(!l)return;
-  var at=state.settings&&state.settings.sleepAtMs;
-  l.textContent=at>0?(sleepHm(at)+' 关闭 · 还剩 '+sleepLeft(at)):'未设定';
-},1000);
 
 // ==================== 直播源/EPG 增删改 ====================
 function setType(t){

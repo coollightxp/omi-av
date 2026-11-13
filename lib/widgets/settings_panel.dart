@@ -2470,27 +2470,6 @@ class _SystemSettingsTab extends StatelessWidget {
                 activeColor: Colors.blueAccent,
               ),
             ],
-            // 定时关闭：倒计时 / 固定时刻，到点可暂停、退出或退出并关机
-            // （关机只在桌面端出现，移动端降级为退出）
-            ListTile(
-              leading: Icon(
-                controller.sleepRemain == null
-                    ? Icons.bedtime_outlined
-                    : Icons.bedtime,
-                color: controller.sleepRemain == null
-                    ? Colors.white70
-                    : Colors.amberAccent,
-              ),
-              title: const Text('定时关闭',
-                  style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: Text(
-                _sleepSubtitle(controller),
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-              trailing:
-                  const Icon(Icons.chevron_right, color: Colors.white38),
-              onTap: () => showSleepTimerDialog(context),
-            ),
             // 开关状态由独立 clockVisible 驱动：切换只重建时钟，不触发
             // 整棵播放 Stack 重建（旧做法反复切换会灰屏）
             ValueListenableBuilder<bool>(
@@ -2697,26 +2676,8 @@ class _SystemSettingsTab extends StatelessWidget {
       },
     );
   }
-
-  /// 定时关闭的状态文案：未设定时说明玩法，已设定时报时刻+剩余+动作
-  static String _sleepSubtitle(PlayerController c) {
-    final remain = c.sleepRemain;
-    final at = c.sleepAt;
-    final tail = switch (c.sleepAction) {
-      SleepAction.pause => '暂停播放',
-      SleepAction.exit => '退出应用',
-      SleepAction.shutdown => '退出并关机',
-    };
-    if (remain == null || at == null) {
-      return '未设定：可选 30/60/90/120 分钟，或固定时刻（如每晚 23:30）';
-    }
-    final h = remain.inHours;
-    final m = remain.inMinutes % 60;
-    final left = h > 0 ? '$h 小时 $m 分' : '$m 分';
-    return '${at.hour.toString().padLeft(2, '0')}:'
-        '${at.minute.toString().padLeft(2, '0')} $tail · 还剩 $left';
-  }
 }
+
 
 // ==================== 说明标签页 ====================
 
