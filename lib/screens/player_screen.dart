@@ -3744,6 +3744,224 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
 })();
 ''';
 
+  /// ===== 通用网页频道适配脚本（无专用脚本的站点全部走这份）=====
+  /// 站点脚本只覆盖了芒果/央视频/央视/咪咕四家，网页源里长尾有上百个
+  /// 站点（各省台自建站、融媒体中心），这些站点的共同特征是：
+  ///   ① 同一个页面 URL 承载多个频道（左侧或右侧列表点台），App 侧
+  ///      切换频道时 URL 不变、WebView 不重建，页面却不会跟着换台；
+  ///   ② 进页面后停在封面图/暂停态，需要点一下播放键；
+  ///   ③ 播放器被页头、侧栏、活动浮层挤成一小块。
+  /// 这份脚本只做三件低风险的事：按台名在页内找可点击节点点台、
+  /// 视频暂停时助推一次 play()、把起播状态交给 _bootJs 的 omPlaying。
+  /// 不装 hook、不改页面 DOM 结构，站点脚本存在时自动让位（__omSiteGo
+  /// 已被占用就直接返回）。
+  static const String _genericJs = r'''
+(function () {
+  if (window.__omSiteGo || window.__omGenInstalled) return;
+  window.__omGenInstalled = 1;
+
+  function norm(s) {
+    return String(s == null ? '' : s)
+      .replace(/[\s\u00a0\-\u2014\u2013_\u00b7:：|,，.。、()（）\[\]【】<>《》"'\/\\~]/g, '')
+      .toLowerCase();
+  }
+  function rectOf(el) {
+    try { return el.getBoundingClientRect(); } catch (e) { return null; }
+  }
+  function shown(el) {
+    var r = rectOf(el);
+    if (!r || r.width < 10 || r.height < 8) return false;
+    var st;
+    try { st = getComputedStyle(el); } catch (e) { return false; }
+    if (st.display === 'none' || st.visibility === 'hidden') return false;
+    if (parseFloat(st.opacity || '1') < 0.1) return false;
+    return true;
+  }
+  function collectVideos() {
+    var out = [];
+    try {
+      var vs = document.querySelectorAll('video');
+      for (var i = 0; i < vs.length; i++) out.push(vs[i]);
+    } catch (e) {}
+    // 播放器常被塞进同源 iframe 或 Web Component
+    try {
+      var frames = document.querySelectorAll('iframe');
+      for (var i = 0; i < frames.length; i++) {
+        try {
+          var d = frames[i].contentDocument;
+          if (!d) continue;
+          var iv = d.querySelectorAll('video');
+          for (var j = 0; j < iv.length; j++) out.push(iv[j]);
+        } catch (e) {}
+      }
+    } catch (e) {}
+    try {
+      var all = document.querySelectorAll('*');
+      for (var i = 0; i < all.length && i < 4000; i++) {
+        var sr = all[i].shadowRoot;
+        if (!sr) continue;
+        var sv = sr.querySelectorAll('video');
+        for (var j = 0; j < sv.length; j++) out.push(sv[j]);
+      }
+    } catch (e) {}
+    return out;
+  }
+  function mainVideo() {
+    var vs = collectVideos(), best = null, bestScore = -1;
+    for (var i = 0; i < vs.length; i++) {
+      var v = vs[i], r = rectOf(v);
+      var s = r ? r.width * r.height : 0;
+      if (!v.paused && v.readyState >= 2) s += 100000000;
+      s += (v.readyState || 0) * 1000;
+      if (s > bestScore) { bestScore = s; best = v; }
+    }
+    return best;
+  }
+
+  // ---- 页内点台：按台名在可点击节点里找最像频道入口的那个 ----
+  var CLICKABLE = 'a,button,li,dd,dt,span,div,p,strong,em,label,[role="option"],[role="tab"],[onclick],[class*="item"],[class*="channel"],[class*="tab"],[class*="menu"],[class*="nav"],[class*="list"]';
+  function pickNode(key) {
+    var nodes, best = null, bestScore = -1;
+    try { nodes = document.querySelectorAll(CLICKABLE); } catch (e) { return null; }
+    for (var i = 0; i < nodes.length && i < 6000; i++) {
+      var el = nodes[i];
+      var t = norm(el.innerText || el.textContent);
+      if (!t || t.length > 30) continue;
+      var score;
+      if (t === key) score = 100;
+      else if (t.indexOf(key) >= 0) {
+        // 台名只是长文本的一小段（页头"××广电 首页 新闻 直播"）时降权，
+        // 避免把导航条当成频道条目点掉
+        score = t.length <= key.length + 8 ? 82 : 58;
+      } else if (key.length >= 3 && key.indexOf(t) >= 0 && t.length >= 2) {
+        score = 52;
+      } else continue;
+      if (!shown(el)) continue;
+      // 越深、越小、越靠文字节点越像条目；大容器（整块导航）扣分
+      var r = rectOf(el);
+      var area = r ? r.width * r.height : 0;
+      if (area > 400 * 120) score -= 30;
+      var kids = el.querySelectorAll('*').length;
+      if (kids > 60) score -= 12;
+      var cs;
+      try { cs = getComputedStyle(el); } catch (e) { cs = null; }
+      if (cs && (cs.cursor === 'pointer' || cs.cursor === 'hand')) score += 12;
+      try { if (el.tagName === 'A' || el.tagName === 'BUTTON') score += 10; } catch (e) {}
+      if (score > bestScore) { bestScore = score; best = el; }
+    }
+    return best;
+  }
+  function fireClick(el) {
+    try {
+      var r = rectOf(el);
+      var x = r ? r.left + r.width / 2 : 0, y = r ? r.top + r.height / 2 : 0;
+      var opt = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+      el.dispatchEvent(new PointerEvent('pointerdown', opt));
+      el.dispatchEvent(new MouseEvent('mousedown', opt));
+      el.dispatchEvent(new PointerEvent('pointerup', opt));
+      el.dispatchEvent(new MouseEvent('mouseup', opt));
+      el.dispatchEvent(new MouseEvent('click', opt));
+    } catch (e) {
+      try { el.click(); } catch (e2) {}
+    }
+  }
+
+  // 点台后确认是否真的换了台：video src 变 / 时间轴被重置 / 出现新 video
+  function snapshot() {
+    var v = mainVideo();
+    return {
+      el: v,
+      src: v ? String(v.currentSrc || v.src || '') : '',
+      t: v ? v.currentTime : 0
+    };
+  }
+  function changed(before) {
+    var now = snapshot();
+    if (!now.el) return false;
+    if (now.src && before.src && now.src !== before.src) return true;
+    if (now.el !== before.el && now.el.readyState >= 1) return true;
+    // 换台后播放器通常从头开始，时间轴回到 0~3 秒；原视频已暂停也算
+    if (before.t > 8 && now.t < 3) return true;
+    if (before.el && before.el !== now.el) return true;
+    return false;
+  }
+
+  window.__omSiteGo = function (url, name) {
+    var key = norm(name);
+    if (!key) return false;
+    var want = key;
+    // 台名常带后缀（"CCTV1综合高清"vs"CCTV-1 综合"），先整名匹配，
+    // 再退一步只取前 4 个字，避免命中不到
+    var tries = [want];
+    if (want.length > 4) tries.push(want.substring(0, 4));
+    var simple = want.replace(/(高清|标清|超清|蓝光|hd|fhd|uhd)$/g, '');
+    if (simple && simple !== want) tries.push(simple);
+    var node = null;
+    for (var i = 0; i < tries.length; i++) {
+      node = pickNode(tries[i]);
+      if (node) break;
+    }
+    if (!node) return false;
+    var before = snapshot();
+    if (node) {
+      try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+      fireClick(node);
+    }
+    var gen = (window.__omGenGoSeq || 0) + 1;
+    window.__omGenGoSeq = gen;
+    var tries2 = 0;
+    var timer = setInterval(function () {
+      if (window.__omGenGoSeq !== gen) { clearInterval(timer); return; }
+      if (changed(before)) {
+        clearInterval(timer);
+        window.__omPlayingFired = false;
+        return;
+      }
+      // 第一次点击没反应（可能点到了外层容器）：再点一次内层文字节点
+      if (++tries2 === 6) {
+        try {
+          var inner = node.querySelector('span,em,strong,a,i,b');
+          if (inner) fireClick(inner); else fireClick(node);
+        } catch (e) {}
+      }
+      if (tries2 > 24) clearInterval(timer);
+    }, 400);
+    return true;
+  };
+
+  // ---- 起播助推：进页面停在封面/暂停态时补一脚 ----
+  var nudges = 0;
+  function nudge() {
+    if (window.__omUserPaused) return;
+    var v = mainVideo();
+    if (!v) return;
+    if (!v.paused) return;
+    if (v.readyState >= 2) {
+      try { v.play(); } catch (e) {}
+      if (++nudges > 8) nudges = 0;
+      return;
+    }
+    // 连 video 都没起播：找播放键按一下（只在有播放器容器时做，
+    // 且总次数受控，避免在页面里乱点）
+    if (nudges >= 4) return;
+    var box = v.parentElement;
+    var btn = null;
+    try {
+      btn = box && box.querySelector('[class*="play"],[class*="Play"],[id*="play"],[id*="Play"]');
+    } catch (e) {}
+    if (btn && shown(btn)) {
+      nudges++;
+      fireClick(btn);
+    }
+  }
+  if (!window.__omGenBoot) {
+    window.__omGenBoot = 1;
+    setInterval(function () { try { nudge(); } catch (e) {} }, 2500);
+    setTimeout(function () { try { nudge(); } catch (e) {} }, 800);
+  }
+})();
+''';
+
   /// ===== 站点专用脚本（移植自 NewBox 2.0.7 站点脚本库，零 hook 纯 DOM）=====
   /// 命中站点时自行接管铺满/点台/起播确认：首行置 __omSkipPin 让 _bootJs
   /// 的通用铺满让位，起播就绪统一走 omPlaying 桥（与 _bootJs 同一通道，
@@ -5608,11 +5826,20 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     return null;
   }
 
-  /// 站点页是否允许安装轻嗅探：央视直播真实流为 m3u8（经 CDN 别名域名
-  /// 分发），装嗅探才有机会接管为内置播放；芒果/咪咕/央视频带完整性
-  /// 检测保持零 hook 纯净环境，仍只在 8 秒兜底时才装
-  static bool _siteSniffAllowed(String url) =>
-      url.contains('cctv.com') || url.contains('cctv.cn');
+  /// 站点页是否允许安装轻嗅探（拿 m3u8 接管为内置播放）。
+  ///
+  /// 从"仅央视白名单"放宽为"除完整性检测站点外全开"：网页源里各省台
+  /// 自建站、融媒体中心基本都用标准 HLS，嗅探到直连流就能切内置播放，
+  /// 拿到后台只听声、倍速、均衡器这些网页播放给不了的能力。
+  /// 芒果/咪咕/央视频有播放器完整性检测，装 hook 会被判异常，保持零
+  /// hook 纯净环境（只在 8 秒兜底时才装）。
+  static bool _siteSniffAllowed(String url) {
+    final u = url.toLowerCase();
+    if (u.contains('mgtv.com')) return false;
+    if (u.contains('migu.cn') || u.contains('miguvideo.com')) return false;
+    if (u.contains('yangshipin.cn')) return false;
+    return true;
+  }
 
   /// 央视网（tv.cctv.com/live/* 等）：整体架构照搬央视频同款——
   /// 钉播放器容器（#player，px 矩形+幂等键）、沿祖先链隐藏兄弟节点、
@@ -6073,6 +6300,14 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       await one('site', siteJs);
       await one('sitego', _siteGoCall());
       WebDiag.log('sitego', 'via=inject|title=${widget.title}');
+    } else {
+      // 长尾站点：通用脚本走运行时补注（document-start 已被站点内联
+      // 脚本清掉 window 时兜底），再按台名点一次
+      await one('generic', _genericJs);
+      if (widget.title.trim().isNotEmpty) {
+        await one('sitego', _siteGoCall());
+        WebDiag.log('sitego', 'via=generic|title=${widget.title}');
+      }
     }
     // 嗅探脚本默认只在兜底重载后注入（页面保持零 hook 纯净环境）；
     // 央视等白名单站点为拿到接管机会立即安装
@@ -6113,7 +6348,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       if (!playing &&
           _pageVideoCount == 0 &&
           !_webPlayReady &&
-          _siteJsFor(widget.url) != null) {
+          widget.title.trim().isNotEmpty) {
         if (++_siteRetryTick % 3 == 0) _retrySiteGo();
       }
       if (playing && mounted && !widget.foreground) {
@@ -6157,8 +6392,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 同 URL 页内切台：频道名变化时让站点脚本按新频道名重新点台。
     // 不整页重载——重载会把央视频已起播的播放器一并摧毁（日志实测
     // 央视频 7 秒已起播，被 8 秒兜底重载拖到 29 秒），且芒果重载后
-    // 偶发永久空白。页内点台失败由 _probe 的每 3 秒重试兜底
-    if (widget.title != oldWidget.title && _siteJsFor(widget.url) != null) {
+    // 偶发永久空白。页内点台失败由 _probe 的每 3 秒重试兜底。
+    // 没有专用脚本的站点由 _genericJs 提供的 __omSiteGo 接管（按台名
+    // 在页内列表里点），未命中的节点返回 null 即静默跳过，不会乱点
+    if (widget.title != oldWidget.title &&
+        widget.title.trim().isNotEmpty) {
       WebDiag.log('sitego', 'via=title|title=${widget.title}');
       _siteRetryCount = 0;
       _webController
@@ -6192,6 +6430,15 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
             // onLoadStop/计时器的运行时注入，彻底免疫加载竞态与单次
             // 注入失败导致的全屏失效；脚本内部有安装守卫，与运行时
             // 注入并存不会重复执行
+            if (_siteJsFor(widget.url) == null)
+              UserScript(
+                // 没有专用脚本的长尾站点（各省台自建站/融媒体中心）：
+                // 通用点台 + 起播助推，document-start 装上，慢站首屏
+                // 列表渲染完就能点，不必等 onLoadStop
+                source: _genericJs,
+                injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                forMainFrameOnly: false,
+              ),
             if (_siteJsFor(widget.url) != null)
               UserScript(
                 source: _siteJsFor(widget.url)!,
