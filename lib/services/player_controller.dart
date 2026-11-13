@@ -37,6 +37,7 @@ import 'scene_favorites.dart';
 import 'radio_recorder.dart';
 import 'tray_service.dart';
 import 'radio_catalog.dart';
+import 'radio_directory.dart';
 import 'radio_logo.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
@@ -781,10 +782,36 @@ class PlayerController extends ChangeNotifier {
           refresh: (kind) async {
             if (kind == 'epgs') {
               await refreshEpg();
+            } else if (kind == 'radio') {
+              await _afterRadioLibraryChanged();
             } else {
               await refreshChannels();
             }
           },
+          // 电台：搜索在电脑侧发请求，手机不必能直连外网目录
+          searchRadio: (q, tag) async {
+            final list = await RadioDirectory.search(query: q, tag: tag);
+            return list.map((e) => e.toJson()).toList();
+          },
+          addRadio: (m) async {
+            final st = RadioStation.fromJson(m);
+            if (st.id.isEmpty || st.url.isEmpty) return;
+            await addRadioStation(st);
+          },
+          removeRadio: (id) => removeRadioStation(id),
+          playRadio: (id) async {
+            for (final st in RadioLibrary.items) {
+              if (st.id == id) {
+                await playChannel(RadioLibrary.toChannel(st));
+                return;
+              }
+            }
+          },
+          selectPlaylist: (id) async {
+            await sourceManager.selectPlaylist(id);
+            await refreshChannels();
+          },
+          restoreBuiltinRadio: () => restoreBuiltinRadio(),
         ),
       );
       _remoteAdminUrl = remoteAdminService.endpoint;
@@ -800,17 +827,39 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  static bool _isRadioPlaylistId(String id) =>
+      id == PlaylistSource.builtinRadioId ||
+      id == PlaylistSource.radioLibraryId;
+
   Future<Map<String, dynamic>> _remoteAdminSnapshot() async {
     final s = settings;
     return {
-      'playlists': sourceManager.playlists.map((e) => e.toJson()).toList(),
+      'playlists': sourceManager.playlists
+          .map((e) => {
+                ...e.toJson(),
+                // 网页「直播源」页要滤掉电台源，靠这个标记
+                'radio': _isRadioPlaylistId(e.id),
+              })
+          .toList(),
       'currentPlaylistId': sourceManager.currentPlaylistId,
       'epgs': sourceManager.epgs.map((e) => e.toJson()).toList(),
       'currentEpgId': sourceManager.currentEpgId,
-      // 手机端常用开关（不放 remoteAdminEnabled：关掉会断开自己）
+      // 电台页：我的电台 + 内置源状态
+      'radios': RadioLibrary.items.map((e) => e.toJson()).toList(),
+      'radioBuiltin': {
+        'id': PlaylistSource.builtinRadioId,
+        'exists': sourceManager.playlists
+            .any((p) => p.id == PlaylistSource.builtinRadioId),
+        'current':
+            sourceManager.currentPlaylistId == PlaylistSource.builtinRadioId,
+      },
+      // 手机端设置：与设备「设置」面板一一对应（网页里改不动的
+      // 只在设备上做，这里不出现）
       'settings': {
         'showClock': s.showClock,
         'dlnaEnabled': s.dlnaEnabled,
+        'dlnaRunning': _dlnaRunning,
+        'dlnaName': _dlnaName,
         'alwaysOnTop': s.alwaysOnTop,
         'autoPlayNext': s.autoPlayNext,
         'autoReloadStall': s.autoReloadStall,
@@ -821,21 +870,48 @@ class PlayerController extends ChangeNotifier {
         'launchAtStartup': s.launchAtStartup,
         'uiScale': s.uiScale,
         'uiScaleAuto': s.uiScaleAuto,
+        // 播放器页
+        'preferredQuality': s.preferredQuality.name,
+        'playEngine': s.playEngine,
+        'audioPreset': s.audioPreset,
+        'spectrumTexture': s.spectrumTexture,
+        'radioMeter': s.radioMeter,
+        'gestureSensitivity': s.gestureSensitivity,
+        'autoHideDelay': s.autoHideDelay,
+        'sourceTimeoutSeconds': s.sourceTimeoutSeconds,
+        'bufferSeconds': s.bufferSeconds,
+        'resumeLastChannel': s.resumeLastChannel,
+        'closeToTray': s.closeToTray,
         // 定时关闭（手机端可远程设定；到点动作 shutdown 仅桌面生效）
         'sleepActionKey': s.sleepActionKey,
         'sleepAtMs': s.sleepAtMs,
         'isDesktop': isDesktop,
+        'isWindows': kIsWindowsDesktop,
       },
     };
   }
 
   Future<void> _remoteAdminApply(Map<String, dynamic> data) async {
     final rawPl = (data['playlists'] as List?) ?? const [];
-    final playlists = rawPl
+    final posted = rawPl
         .whereType<Map>()
         .map((m) => PlaylistSource.fromJson(
             _normalizeRemoteItem(m.cast<String, dynamic>())))
         .toList();
+    // 网页「直播源」页只列电视源（电台在「电台」页）：保存时按原位置回填
+    // 现有的电台源，否则手机点一次保存就把内置电台/我的电台删了
+    final playlists = <PlaylistSource>[];
+    var pi = 0;
+    for (final old in sourceManager.playlists) {
+      if (_isRadioPlaylistId(old.id)) {
+        playlists.add(old);
+      } else if (pi < posted.length) {
+        playlists.add(posted[pi++]);
+      }
+    }
+    while (pi < posted.length) {
+      playlists.add(posted[pi++]);
+    }
     final newPlId = data['currentPlaylistId']?.toString();
     final oldPlId = sourceManager.currentPlaylistId;
     final oldPlUrl = sourceManager.currentPlaylist?.url;
@@ -866,11 +942,28 @@ class PlayerController extends ChangeNotifier {
       await refreshEpg();
     }
 
-    // 手机端常用开关（settings 段缺省时跳过，兼容旧版页面的请求）
+    // 设置项（settings 段缺省时跳过，兼容旧版页面的请求）
     final rawSettings = data['settings'];
     if (rawSettings is Map) {
       bool? rb(String key) =>
           rawSettings[key] is bool ? rawSettings[key] as bool : null;
+      int? ri(String key) {
+        final v = rawSettings[key];
+        if (v is num) return v.toInt();
+        if (v is String) return int.tryParse(v);
+        return null;
+      }
+
+      double? rd(String key) {
+        final v = rawSettings[key];
+        if (v is num) return v.toDouble();
+        if (v is String) return double.tryParse(v);
+        return null;
+      }
+
+      String? rs(String key) =>
+          rawSettings[key] is String ? rawSettings[key] as String : null;
+
       final cur = _settings;
 
       // 时钟走独立通道，避免整棵播放树重建（见 setShowClock 注释）
@@ -878,26 +971,72 @@ class PlayerController extends ChangeNotifier {
       if (clock != null && clock != cur.showClock) {
         setShowClock(clock);
       }
+      // 播放内核：换台生效（setPlayEngine 内部会重开当前台）
+      final engine = rs('playEngine');
+      if (engine != null &&
+          (engine == 'mpv' || engine == 'mdk') &&
+          engine != cur.playEngine) {
+        await setPlayEngine(engine);
+      }
+      // 声音实验室：只认内置预设，'custom' 的自定义增益留在设备上调
+      final preset = rs('audioPreset');
+      if (preset != null &&
+          preset != cur.audioPreset &&
+          (preset.isEmpty || kAudioPresets.containsKey(preset))) {
+        await setAudioPreset(preset);
+      }
+      final spectrum = rb('spectrumTexture');
+      if (spectrum != null && spectrum != cur.spectrumTexture) {
+        await setSpectrumTexture(spectrum);
+      }
+      final meter = rb('radioMeter');
+      if (meter != null && meter != cur.radioMeter) {
+        await setRadioMeter(meter);
+      }
+      VideoQuality? quality;
+      final qName = rs('preferredQuality');
+      for (final v in VideoQuality.values) {
+        if (v.name == qName) quality = v;
+      }
 
       final dlna = rb('dlnaEnabled') ?? cur.dlnaEnabled;
       final autoPlayNext = rb('autoPlayNext') ?? cur.autoPlayNext;
       final autoReloadStall = rb('autoReloadStall') ?? cur.autoReloadStall;
       final webEnabled = rb('webEnabled') ?? cur.webEnabled;
       final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
+      final resumeLast = rb('resumeLastChannel') ?? cur.resumeLastChannel;
+      final closeToTray = kIsWindowsDesktop
+          ? (rb('closeToTray') ?? cur.closeToTray)
+          : cur.closeToTray;
       double uiScale = cur.uiScale;
-      if (rawSettings['uiScale'] is num) {
-        uiScale = (rawSettings['uiScale'] as num).toDouble().clamp(0.8, 3.0);
+      final uiRaw = rd('uiScale');
+      if (uiRaw != null) uiScale = uiRaw.clamp(0.8, 3.0);
+      double gesture = cur.gestureSensitivity;
+      final gRaw = rd('gestureSensitivity');
+      if (gRaw != null) gesture = gRaw.clamp(0.5, 2.0);
+      int autoHide = cur.autoHideDelay;
+      final ahRaw = ri('autoHideDelay');
+      if (ahRaw != null) autoHide = ahRaw.clamp(1000, 10000);
+      int sourceTimeout = cur.sourceTimeoutSeconds;
+      final soRaw = ri('sourceTimeoutSeconds');
+      if (soRaw != null && soRaw >= 5 && soRaw <= 30) {
+        sourceTimeout = soRaw;
+      }
+      int buffer = cur.bufferSeconds;
+      final bufRaw = ri('bufferSeconds');
+      if (bufRaw != null && const {5, 10, 20, 30}.contains(bufRaw)) {
+        buffer = bufRaw;
       }
       // 数值型选项：只接受界面提供的档位，防止旧/异常页面写入非法值
       int retryTimes = cur.retryTimes;
-      final rt = rawSettings['retryTimes'];
-      if (rt is num && const {3, 5, 10}.contains(rt.toInt())) {
-        retryTimes = rt.toInt();
+      final rt = ri('retryTimes');
+      if (rt != null && const {3, 5, 10}.contains(rt)) {
+        retryTimes = rt;
       }
       int castEndWait = cur.castEndWaitSeconds;
-      final ce = rawSettings['castEndWaitSeconds'];
-      if (ce is num && const {-1, 0, 60, 300, 600}.contains(ce.toInt())) {
-        castEndWait = ce.toInt();
+      final ce = ri('castEndWaitSeconds');
+      if (ce != null && const {-1, 0, 60, 300, 600}.contains(ce)) {
+        castEndWait = ce;
       }
       final startFullscreen = rb('startFullscreen') ?? cur.startFullscreen;
       final alwaysOnTop =
@@ -926,19 +1065,26 @@ class PlayerController extends ChangeNotifier {
           );
         }
       }
-      if (dlna != cur.dlnaEnabled ||
-          autoPlayNext != cur.autoPlayNext ||
-          autoReloadStall != cur.autoReloadStall ||
-          webEnabled != cur.webEnabled ||
-          retryTimes != cur.retryTimes ||
-          castEndWait != cur.castEndWaitSeconds ||
-          uiScaleAuto != cur.uiScaleAuto ||
-          uiScale != cur.uiScale ||
-          startFullscreen != cur.startFullscreen ||
-          alwaysOnTop != cur.alwaysOnTop ||
-          launchAtStartup != cur.launchAtStartup) {
-        // 用 _settings 而非 cur：上面的定时关闭可能已经改过设置对象，
-        // 拿旧快照 copyWith 会把刚写入的 sleep* 覆盖回去
+      if (dlna != _settings.dlnaEnabled ||
+          autoPlayNext != _settings.autoPlayNext ||
+          autoReloadStall != _settings.autoReloadStall ||
+          webEnabled != _settings.webEnabled ||
+          retryTimes != _settings.retryTimes ||
+          castEndWait != _settings.castEndWaitSeconds ||
+          uiScaleAuto != _settings.uiScaleAuto ||
+          uiScale != _settings.uiScale ||
+          startFullscreen != _settings.startFullscreen ||
+          alwaysOnTop != _settings.alwaysOnTop ||
+          launchAtStartup != _settings.launchAtStartup ||
+          resumeLast != _settings.resumeLastChannel ||
+          closeToTray != _settings.closeToTray ||
+          gesture != _settings.gestureSensitivity ||
+          autoHide != _settings.autoHideDelay ||
+          sourceTimeout != _settings.sourceTimeoutSeconds ||
+          buffer != _settings.bufferSeconds ||
+          (quality != null && quality != _settings.preferredQuality)) {
+        // 用 _settings 而非 cur：上面的定时关闭/内核切换可能已经改过设置
+        // 对象，拿旧快照 copyWith 会把刚写入的 sleep*/playEngine 覆盖回去
         updateSettings(_settings.copyWith(
           dlnaEnabled: dlna,
           autoPlayNext: autoPlayNext,
@@ -951,6 +1097,13 @@ class PlayerController extends ChangeNotifier {
           startFullscreen: startFullscreen,
           alwaysOnTop: alwaysOnTop,
           launchAtStartup: launchAtStartup,
+          resumeLastChannel: resumeLast,
+          closeToTray: closeToTray,
+          gestureSensitivity: gesture,
+          autoHideDelay: autoHide,
+          sourceTimeoutSeconds: sourceTimeout,
+          bufferSeconds: buffer,
+          preferredQuality: quality,
         ));
       }
     }
@@ -2472,6 +2625,11 @@ class PlayerController extends ChangeNotifier {
 
   void _startSleepTick() {
     _sleepTickTimer?.cancel();
+    // 先立刻算一次：徽标/卡片不必等第一个整秒才出现
+    final first = sleepRemain;
+    sleepCountdown.value = (first == null || first <= Duration.zero)
+        ? null
+        : first;
     _sleepTickTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       final r = sleepRemain;
       sleepCountdown.value = (r == null || r <= Duration.zero) ? null : r;

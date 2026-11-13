@@ -696,6 +696,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                   if (controller.isDesktop && controller.miniWindow)
                     _buildMiniRestoreButton(controller),
 
+                  // 定时关闭：视频/直播画面右上角（时间下方）常显倒计时，
+                  // 最后 60 秒弹大卡片提示并可按返回键取消——电台画面里
+                  // 台名一行已有同款徽标，那边不再重复
+                  if (!mini) const SleepBadgeOverlay(),
+                  if (!mini) const SleepFinalCard(),
+
                   // 移动端：屏幕分三区，单击左/中/右分别呼出频道菜单/
                   // 控制面板/EPG（见 _buildGestureLayer），不再使用贴边
                   // 窄热区；桌面端保留 hover 边缘自动弹出
@@ -989,6 +995,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       // 与设置面板右上角关闭、S 键切换保持一致：恢复低级钩子的数字键
       // 拦截，否则网页前台时数字选台会失灵
       _winHotkeys.setCapture(true);
+      return;
+    }
+    // 定时关闭已进入最后 60 秒（画面里有倒计时卡片）：返回键 = 取消定时，
+    // 不往下走退出确认——睡着前想接着看，按一下返回就好
+    final sleepRemain = c.sleepRemain;
+    if (sleepRemain != null && sleepRemain.inSeconds <= 60) {
+      await c.setSleepAt(null);
       return;
     }
     if (c.castWaiting) {
@@ -6795,6 +6808,177 @@ class _ClockOverlayState extends State<ClockOverlay> {
       ),
     );
   }
+}
+
+/// 播放画面上的「定时关闭」倒计时徽标（右上角，系统时间下面）。
+///
+/// 电台画面在台名一行已经有同款徽标，这里只服务视频/直播；点一下
+/// 直接打开定时设置，方便躺床上改时间或取消。
+class SleepBadgeOverlay extends StatelessWidget {
+  const SleepBadgeOverlay({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.read<PlayerController>();
+    return ValueListenableBuilder<Duration?>(
+      valueListenable: c.sleepCountdown,
+      builder: (context, remain, _) {
+        final ch = c.currentChannel;
+        if (remain == null || ch == null || ch.isRadio) {
+          return const SizedBox.shrink();
+        }
+        return ValueListenableBuilder<bool>(
+          valueListenable: c.clockVisible,
+          builder: (context, clockOn, __) => Positioned(
+            // 开着时钟就让它占上面一行；关着时钟贴顶
+            top: clockOn ? 56 : 20,
+            right: 28,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => showSleepTimerDialog(context),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.42),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.22)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      c.sleepAction == SleepAction.pause
+                          ? Icons.pause_circle_outline
+                          : Icons.bedtime_outlined,
+                      size: 13,
+                      color: const Color(0xCCFFFFFF),
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _sleepRemainText(remain),
+                      style: const TextStyle(
+                        color: Color(0xE6FFFFFF),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 定时关闭最后 60 秒的提示卡片（视频/直播/电台都显示）。
+///
+/// 只在最后 1 分钟出现：不挡画面太久，又能让人知道"马上要退了"。
+/// 按返回键或点「继续观看」都是取消定时，接着看。
+class SleepFinalCard extends StatelessWidget {
+  const SleepFinalCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.read<PlayerController>();
+    return ValueListenableBuilder<Duration?>(
+      valueListenable: c.sleepCountdown,
+      builder: (context, remain, _) {
+        if (remain == null || remain.inSeconds > 60) {
+          return const SizedBox.shrink();
+        }
+        final sec = remain.inSeconds;
+        final label = switch (c.sleepAction) {
+          SleepAction.pause => '暂停播放',
+          SleepAction.exit => '退出应用',
+          SleepAction.shutdown => '退出并关机',
+        };
+        return Positioned(
+          left: 0,
+          right: 0,
+          top: 0,
+          bottom: 0,
+          child: Align(
+            alignment: const Alignment(0, -0.42),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 26, vertical: 20),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.82),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.white24),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black54, blurRadius: 18),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.bedtime_outlined,
+                          color: Colors.amberAccent, size: 20),
+                      const SizedBox(width: 8),
+                      Text(
+                        '$sec 秒后$label',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '$sec',
+                    style: TextStyle(
+                      color: sec <= 10 ? Colors.redAccent : Colors.blueAccent,
+                      fontSize: 40,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    '按返回键取消，继续看',
+                    style:
+                        TextStyle(color: Colors.white70, fontSize: 12.5),
+                  ),
+                  const SizedBox(height: 14),
+                  OutlinedButton.icon(
+                    onPressed: () => c.setSleepAt(null),
+                    icon: const Icon(Icons.play_arrow, size: 17),
+                    label: const Text('继续观看'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: Colors.white38),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 8),
+                      minimumSize: const Size(0, 34),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+String _sleepRemainText(Duration d) {
+  final h = d.inHours;
+  final m = d.inMinutes % 60;
+  final s = d.inSeconds % 60;
+  final two = (int v) => v.toString().padLeft(2, '0');
+  return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
 }
 
 /// 退出确认面板的一个操作项（方块图标按钮）

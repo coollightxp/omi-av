@@ -9,7 +9,7 @@ import '../services/player_controller.dart';
 /// 三段：
 /// 1. 到点动作：暂停播放 / 退出应用 / 退出并关机（桌面端独有）
 /// 2. 倒计时：30 / 60 / 90 / 120 分钟
-/// 3. 固定时刻：22:00 ~ 00:00 常用档 + 自定义（最近一次，过了就顺延到明天）
+/// 3. 固定时刻：显示一个时刻（默认 23:30）+「设置」，点开系统时间选择器
 Future<void> showSleepTimerDialog(BuildContext context) async {
   final c = context.read<PlayerController>();
   final remain = c.sleepRemain;
@@ -100,30 +100,23 @@ Future<void> showSleepTimerDialog(BuildContext context) async {
                     }),
                 ]),
                 const SizedBox(height: 10),
-                const Text('固定时刻（最近一次）',
+                const Text('固定时刻（点「设置」选几点，今天已过算明天）',
                     style: TextStyle(
                         color: AppColors.textSecondary, fontSize: 11.5)),
                 const SizedBox(height: 6),
-                Wrap(children: [
-                  for (final hm in const [
-                    [22, 0],
-                    [22, 30],
-                    [23, 0],
-                    [23, 30],
-                    [0, 0],
-                  ])
-                    chip(
-                      '${hm[0].toString().padLeft(2, '0')}:'
-                      '${hm[1].toString().padLeft(2, '0')}',
-                      false,
-                      () => Navigator.pop(ctx, _SleepPick(_nextAt(hm[0], hm[1]), action)),
-                    ),
-                  chip('自定义…', false, () async {
-                    final now = DateTime.now();
+                Row(children: [
+                  Text(setAt != null ? _hhmm(setAt) : '23:30',
+                      style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 12),
+                  chip('设置…', false, () async {
                     final t = await showTimePicker(
                       context: ctx,
-                      initialTime:
-                          TimeOfDay(hour: now.hour, minute: now.minute),
+                      initialTime: setAt != null
+                          ? TimeOfDay(hour: setAt.hour, minute: setAt.minute)
+                          : const TimeOfDay(hour: 23, minute: 30),
                     );
                     if (t == null || !ctx.mounted) return;
                     Navigator.pop(
