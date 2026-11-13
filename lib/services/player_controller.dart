@@ -1307,6 +1307,12 @@ class PlayerController extends ChangeNotifier {
     _webPageForeground = false;
     _currentChannel = channel;
     _sourceIndex = 0;
+    // 网页→流方向同样要等 WebView2 销毁完成：网页播不出去往外退时，
+    // 紧跟着就建 mpv 内核，与 WebView2 的 COM 释放竞争会撞出
+    // 0xc0000005（页面加载失败状态下销毁更容易崩）。进入方向早有
+    // 2500ms 间隔，退出方向一直漏着
+    await _waitWebViewRebuildGap();
+    if (_currentChannel?.id != channel.id) return;
     await _playCurrentSource();
   }
 

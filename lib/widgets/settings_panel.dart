@@ -24,7 +24,12 @@ import '../services/radio_recorder.dart';
 import '../services/recording_share.dart';
 import '../services/radio_library.dart';
 import '../services/web_diag.dart';
+import 'ime_safe_text_field.dart';
 import 'scaled_panel.dart';
+
+export 'ime_safe_text_field.dart' show ImeSafeTextField;
+
+typedef _ImeSafeTextField = ImeSafeTextField;
 
 /// 选择本地文件。
 /// Windows 上主窗口默认置顶（全屏时强制置顶），而 file_picker 的系统
@@ -50,77 +55,6 @@ Future<PlatformFile?> _pickLocalFileWithTopmostFix() async {
         await windowManager.setAlwaysOnTop(true);
       } catch (_) {}
     }
-  }
-}
-
-/// Windows 输入框 IME 保险：在两个输入框之间切换焦点后，Windows 引擎的
-/// 输入法（TSF）连接偶发失效——表现为无法键入字符、程序对按键不响应
-/// （系统相关，部分系统没有；其他 Flutter 程序同样存在）。
-/// 点击时先卸载焦点再延时补挂，强制重建 IME 连接，规避该引擎缺陷。
-/// 2026-11：Windows 10 1607（RS1）上 onTap 里 unfocus→延迟 re-focus 会
-/// 让应用挂起（AppHangB1，粘贴后点名称框触发），老系统不做该重连。
-class _ImeSafeTextField extends StatefulWidget {
-  final TextEditingController controller;
-  final InputDecoration? decoration;
-  final TextStyle? style;
-  final bool autofocus;
-  final ValueChanged<String>? onChanged;
-
-  const _ImeSafeTextField({
-    required this.controller,
-    this.decoration,
-    this.style,
-    this.autofocus = false,
-    this.onChanged,
-  });
-
-  @override
-  State<_ImeSafeTextField> createState() => _ImeSafeTextFieldState();
-}
-
-class _ImeSafeTextFieldState extends State<_ImeSafeTextField> {
-  late final FocusNode _focus = FocusNode();
-
-  /// Win10 1607 及更老系统上，onTap 里 unfocus→延时 re-focus 的 IME 重连
-  /// 会让应用挂起（AppHangB1），老系统直接跳过该规避
-  static bool get _needsImeWorkaround {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
-      return true; // 非 Windows：保持原行为（仅 Windows 有 IME 缺陷与挂起报告）
-    }
-    try {
-      final m =
-          RegExp(r'(\d+)\.(\d+)\.(\d+)').firstMatch(Platform.operatingSystemVersion);
-      final build = m != null ? int.tryParse(m.group(3) ?? '0') ?? 0 : 0;
-      return build >= 17763; // 1809 起才做重连；1607(build 14393) 跳过
-    } catch (_) {
-      return true;
-    }
-  }
-
-  @override
-  void dispose() {
-    _focus.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return TextField(
-      controller: widget.controller,
-      focusNode: _focus,
-      style: widget.style,
-      decoration: widget.decoration,
-      autofocus: widget.autofocus,
-      onChanged: widget.onChanged,
-      onTap: !_needsImeWorkaround
-          ? null
-          : () {
-              _focus.unfocus();
-              Future.delayed(const Duration(milliseconds: 30), () {
-                if (mounted && !_focus.hasFocus) _focus.requestFocus();
-              });
-            },
-    );
   }
 }
 
@@ -933,6 +867,27 @@ class _PlaylistTabState extends State<_PlaylistTab> {
 class _RadioSourcesTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
+  /// 管理区块统一收进折叠条：收起时不构建内容
+  Widget _manageSection(
+      {required IconData icon, required String title, required Widget child}) {
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        leading: Icon(icon, size: 18, color: Colors.white54),
+        title: Text(title,
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.bold)),
+        iconColor: Colors.white54,
+        collapsedIconColor: Colors.white54,
+        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+        childrenPadding: const EdgeInsets.only(bottom: 8),
+        children: [child],
+      ),
+    );
+  }
+
     return Consumer<PlayerController>(
       builder: (context, controller, _) {
         final playlists = controller.sourceManager.playlists;
@@ -1019,9 +974,21 @@ class _RadioSourcesTab extends StatelessWidget {
                 ),
               ),
             // ===== 方案 12.3 第一档：场景收藏 / 电台别名 / 录音库 =====
-            const _SceneManageSection(),
-            const _AliasSection(),
-            const _RecordingsSection(),
+            // 默认收起：展开才构建列表，切到本页签首屏只画三行标题——
+            // 以前这三块常驻展开，几十行控件 + 文件 stat 全量构建，
+            // 是「切页签卡一两秒」的大头
+            _manageSection(
+                icon: Icons.star,
+                title: '收藏场景管理',
+                child: _SceneManageSection()),
+            _manageSection(
+                icon: Icons.label_outline,
+                title: '电台别名',
+                child: _AliasSection()),
+            _manageSection(
+                icon: Icons.graphic_eq,
+                title: '录音库',
+                child: _RecordingsSection()),
           ],
         );
       },
@@ -1423,6 +1390,11 @@ class _RecordingsSection extends StatefulWidget {
 class _RecordingsSectionState extends State<_RecordingsSection> {
   List<File> _files = const [];
 
+  /// 文件元数据缓存：一次批量 stat。以前每个文件挂一个 FutureBuilder，
+  /// 每次面板重建（拨开关/切页签/播放状态变化）都重发一轮 stat IO，
+  /// 录多了之后就是「切到这页签卡一两秒」的主因之一
+  final Map<String, FileStat?> _statCache = {};
+
   @override
   void initState() {
     super.initState();
@@ -1431,6 +1403,16 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
 
   Future<void> _refresh() async {
     final files = await RadioRecorder.list();
+    for (final f in files) {
+      if (_statCache.containsKey(f.path)) continue;
+      try {
+        _statCache[f.path] = await f.stat();
+      } catch (_) {
+        _statCache[f.path] = null;
+      }
+    }
+    // 只留现存文件的缓存
+    _statCache.removeWhere((k, _) => files.every((f) => f.path != k));
     if (mounted) setState(() => _files = files);
   }
 
@@ -1541,65 +1523,60 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
             else
               ..._files.map((f) {
                 final name = f.path.split(Platform.pathSeparator).last;
-                return FutureBuilder<FileStat>(
-                  future: f.stat(),
-                  builder: (context, snap) {
-                    final size = snap.data?.size ?? 0;
-                    final modified = snap.data?.modified;
-                    final when = modified == null
-                        ? ''
-                        : '${modified.year}-${modified.month.toString().padLeft(2, '0')}-${modified.day.toString().padLeft(2, '0')} '
-                            '${modified.hour.toString().padLeft(2, '0')}:${modified.minute.toString().padLeft(2, '0')}';
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 6),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.04),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        color: Color(0xDDFFFFFF), fontSize: 13)),
-                                Text(
-                                  '${RadioRecorder.humanSize(size)}  $when',
-                                  style: const TextStyle(
-                                      color: Colors.white38, fontSize: 11.5),
-                                ),
-                              ],
+                final snapData = _statCache[f.path];
+                final size = snapData?.size ?? 0;
+                final modified = snapData?.modified;
+                final when = modified == null
+                    ? ''
+                    : '${modified.year}-${modified.month.toString().padLeft(2, '0')}-${modified.day.toString().padLeft(2, '0')} '
+                        '${modified.hour.toString().padLeft(2, '0')}:${modified.minute.toString().padLeft(2, '0')}';
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 6),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.04),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: Color(0xDDFFFFFF), fontSize: 13)),
+                            Text(
+                              '${RadioRecorder.humanSize(size)}  $when',
+                              style: const TextStyle(
+                                  color: Colors.white38, fontSize: 11.5),
                             ),
-                          ),
-                          IconButton(
-                            tooltip: '播放',
-                            icon: const Icon(Icons.play_circle_outline,
-                                size: 19, color: Colors.blueAccent),
-                            onPressed: () => _play(f),
-                          ),
-                          IconButton(
-                            tooltip: '分享',
-                            icon: const Icon(Icons.ios_share,
-                                size: 17, color: Color(0xCCFFFFFF)),
-                            onPressed: () =>
-                                RecordingShare.share(f.path, name),
-                          ),
-                          IconButton(
-                            tooltip: '删除',
-                            icon: const Icon(Icons.delete_outline,
-                                size: 17, color: Colors.redAccent),
-                            onPressed: () => _delete(f),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    );
-                  },
+                      IconButton(
+                        tooltip: '播放',
+                        icon: const Icon(Icons.play_circle_outline,
+                            size: 19, color: Colors.blueAccent),
+                        onPressed: () => _play(f),
+                      ),
+                      IconButton(
+                        tooltip: '分享',
+                        icon: const Icon(Icons.ios_share,
+                            size: 17, color: Color(0xCCFFFFFF)),
+                        onPressed: () => RecordingShare.share(f.path, name),
+                      ),
+                      IconButton(
+                        tooltip: '删除',
+                        icon: const Icon(Icons.delete_outline,
+                            size: 17, color: Colors.redAccent),
+                        onPressed: () => _delete(f),
+                      ),
+                    ],
+                  ),
                 );
               }),
           ],
@@ -3316,7 +3293,7 @@ class _BlacklistDialogState extends State<_BlacklistDialog> {
                 ],
               ),
             const SizedBox(height: 14),
-            TextField(
+            _ImeSafeTextField(
               controller: _ctl,
               style: const TextStyle(
                   color: AppColors.textPrimary, fontSize: 13.5),

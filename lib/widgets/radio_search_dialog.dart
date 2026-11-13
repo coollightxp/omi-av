@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'ime_safe_text_field.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme/app_colors.dart';
@@ -370,7 +371,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
           Expanded(
             child: SizedBox(
               height: 44,
-              child: TextField(
+              child: ImeSafeTextField(
                 controller: _queryCtl,
                 focusNode: _queryFocus,
                 textInputAction: TextInputAction.search,
