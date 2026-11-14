@@ -2385,7 +2385,11 @@ class PlayerController extends ChangeNotifier {
   /// 与当前节目源无关，所以从左侧电台标签起的台也能一直往下翻。
   List<Channel> get _switchDomainChannels {
     final isRadio = _currentChannel?.isRadio ?? false;
-    if (isRadio && _radioCategories.isNotEmpty) {
+    if (isRadio) {
+      // 电台域只在电台目录里循环。目录没准备好就返回空（本次不换台）——
+      // 绝不能退到电视列表：在通知栏按「下一台」会切进需要画面的电视频道，
+      // 后台拿不到 Surface，起播就停在等纹理上（用户实测「按了没反应，
+      // 回 App 才跳台」）。不换台总比换错域强。
       return [for (final cat in _radioCategories) ...cat.channels];
     }
     return [for (final cat in _categories) ...cat.channels];
@@ -2563,11 +2567,14 @@ class PlayerController extends ChangeNotifier {
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
     c.addListener(closure);
-    // 后台切台（通知栏上一台/下一台）：安卓侧没有 Surface，新播放器
-    // 等纹理会卡住起播（用户实测：通知栏切台声音停了，回到界面才
-    // 接着放）。App 在后台时先关视频输出（vid=no），回前台由
-    // 生命周期监听统一恢复
-    if (_appBackgrounded) {
+    // 后台切台（通知栏上一台/下一台）：只有**电台**在后台是纯音频。
+    // 安卓侧后台没有 Surface，视频管线一挂着，open 就会停在等纹理上
+    // （用户实测：通知栏切台声音停了，回到界面才接着放），所以电台
+    // 要提前把视频轨摘掉。
+    //
+    // 视频台绝不能这么做：视频在后台是画中画小窗，画面还要用，
+    // 关掉视频轨等于给小窗一块黑布（v2.1.28 曾无条件关，已修）。
+    if (channel.isRadio && _isBackgroundNow) {
       unawaited(c.setVideoOutputDisabled(true));
     }
     // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
@@ -2908,13 +2915,16 @@ class PlayerController extends ChangeNotifier {
 
   /// 通知栏按钮回调：只在本域内换台，播完关卡片
   void _onAudioCommand(String cmd) {
+    // 卡片只属于电台域。万一有残留卡片（刚切到视频台、原生还没收到
+    // stop），上一台/下一台也不能把视频台切走
+    final radio = _currentChannel?.isRadio ?? false;
     switch (cmd) {
       case 'playpause':
         unawaited(togglePlayPause());
       case 'prev':
-        unawaited(playAdjacentChannel(-1));
+        if (radio) unawaited(playAdjacentChannel(-1));
       case 'next':
-        unawaited(playAdjacentChannel(1));
+        if (radio) unawaited(playAdjacentChannel(1));
       case 'stop':
         if (isPlaying) unawaited(togglePlayPause());
         _lastAudioSig = '';
@@ -3255,35 +3265,60 @@ class PlayerController extends ChangeNotifier {
   }
 
   /// 切换全屏（仅桌面端）
+  /// 全屏切换进行中：窗口样式连续变更期间（mpv 渲染线程/WebView2 子
+  /// 窗口都在响应 WM_SIZE），再次切换极易把渲染端打出访问冲突
+  /// （实测：网页直播里遥控器 OK 全屏，0xc0000005 直接退进程）
+  bool _fsToggling = false;
+
   Future<void> toggleFullscreen() async {
     if (!isDesktop) return;
-    // 小窗状态下按 F/F11 或双击画面：全屏没有意义（窗口只有 420×236），
-    // 先恢复原窗口，避免 miniWindow 与全屏状态并存
-    // （否则全屏后左上角仍挂着「恢复窗口」按钮、双击又变成缩窗）
-    if (_miniWindow) {
-      await toggleMiniWindow();
-      return;
+    if (_fsToggling) return; // 切换未落地前的连按全部忽略
+    _fsToggling = true;
+    try {
+      // 先让按键回调这轮事件循环走完：在输入分发的调用栈里直接改窗口
+      // 样式，等于一边处理消息一边销毁/重建窗口结构，是崩溃的高发姿势
+      await Future<void>.delayed(Duration.zero);
+      // 小窗状态下按 F/F11 或双击画面：全屏没有意义（窗口只有 420×236），
+      // 先恢复原窗口，避免 miniWindow 与全屏状态并存
+      // （否则全屏后左上角仍挂着「恢复窗口」按钮、双击又变成缩窗）
+      if (_miniWindow) {
+        await toggleMiniWindow();
+        return;
+      }
+      _isFullscreen = !_isFullscreen;
+      await windowManager.setFullScreen(_isFullscreen);
+      // 三个原生窗口操作之间各隔一帧，让 WM_SIZE/WM_STYLECHANGED 消息
+      // 排队处理完再动下一个，不再一次性全砸进同一轮消息循环
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await _applyAlwaysOnTop();
+      if (!_isFullscreen) {
+        // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      }
+      notifyListeners();
+    } finally {
+      _fsToggling = false;
     }
-    _isFullscreen = !_isFullscreen;
-    await windowManager.setFullScreen(_isFullscreen);
-    await _applyAlwaysOnTop();
-    if (!_isFullscreen) {
-      // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
-      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-    }
-    notifyListeners();
   }
 
   /// 若当前处于全屏则退出全屏（用于返回键/ESC）
   Future<bool> exitFullscreenIfNeeded() async {
-    if (!_isFullscreen) return false;
-    _isFullscreen = false;
-    await windowManager.setFullScreen(false);
-    await _applyAlwaysOnTop();
-    // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
-    await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-    notifyListeners();
-    return true;
+    if (!_isFullscreen || _fsToggling) return false;
+    _fsToggling = true;
+    try {
+      _isFullscreen = false;
+      await windowManager.setFullScreen(false);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await _applyAlwaysOnTop();
+      // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      notifyListeners();
+      return true;
+    } finally {
+      _fsToggling = false;
+    }
   }
 
   // ==================== 锁定 / 小窗 / 重载 ====================
@@ -5084,18 +5119,42 @@ class PlayerController extends ChangeNotifier {
     unawaited(warmHost(uri.host, port));
   }
 
-  /// App 是否在后台（安卓通知栏切台时关视频输出的判定，
+  /// App 是否在后台（安卓电台后台切台时关视频输出的判定，
   /// 见 _playCurrentSource 内的 setVideoOutputDisabled）
   bool _appBackgrounded = false;
+
+  /// 现在是否处于后台。
+  ///
+  /// 不只看 AppLifecycleListener 标记：某些系统/通知栏交互下 onHide
+  /// 不一定及时到，直接问 WidgetsBinding 的当前生命周期兜底，
+  /// 免得该关视频轨的时候没关（电台后台起播就会卡住等 Surface）
+  bool get _isBackgroundNow {
+    if (_appBackgrounded) return true;
+    final s = WidgetsBinding.instance.lifecycleState;
+    return s == AppLifecycleState.paused || s == AppLifecycleState.hidden;
+  }
+
   AppLifecycleListener? _lifecycleListener;
 
+  /// 切后台/回前台时的视频轨策略——**只有电台**关。
+  ///
+  /// 两个域在后台走的是两条完全不同的路：
+  /// - 电台：没有画面，后台就是纯音频。安卓后台拿不到 Surface，视频管线
+  ///   挂着会让 open 卡在等纹理上（表现：通知栏切台后声音停住，回到界面
+  ///   才接着放），所以把视频轨摘掉。
+  /// - 视频：后台是画中画小窗，画面还得显示。这里绝不能关视频轨，
+  ///   否则小窗里只有一块黑布。
   void _onAppHidden() {
     _appBackgrounded = true;
-    unawaited(_videoController?.setVideoOutputDisabled(true));
+    if (_currentChannel?.isRadio ?? false) {
+      unawaited(_videoController?.setVideoOutputDisabled(true));
+    }
   }
 
   void _onAppShown() {
     _appBackgrounded = false;
+    // 回前台一律恢复视频轨：电台可能要用真波形纹理，
+    // 视频台更要画面
     unawaited(_videoController?.setVideoOutputDisabled(false));
   }
 

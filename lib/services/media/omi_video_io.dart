@@ -176,21 +176,39 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     // 必须在 open 之前设：这是 demuxer 的 AVOption，open 时读一次
     await _applyFaultTolerance();
     if (_radioSpectrum) await _applySpectrumFilter();
-    // 后台起播（安卓通知栏切台）：open 前就把视频轨关掉。
+    // 后台起播（安卓通知栏切台）：尽量把视频管线摘掉。
     //
-    // 只在 open 之后设 vid=no 是没用的——新文件打开时 mpv 会重新选轨，
-    // 视频解码仍要拿 Surface，后台拿不到就卡在起播（实测：通知栏按
-    // 下一台，声音停着不动，回到界面才接着放）。open 前设才真正跳过
-    // 视频管线，纯音频立刻出声。
+    // 注意 mpv 的 `vid` 是「每文件选项」：open 之前设的会被新文件重置，
+    // 所以光靠下面这一次不够（v2.1.26 就是这么做的，用户实测后台切台
+    // 仍然停住）。这里再加一刀：open 发起后 200ms 再补设一次，抢在
+    // 首帧解码之前把视频轨关掉——后台没有 Surface，只要视频管线还在，
+    // open 就会一直卡着不返回，声音自然也不出。
     if (_videoDisabled) {
       try {
         await _player.setVideoTrack(VideoTrack.no());
       } catch (_) {}
     }
-    await _player.open(
+    final opening = _player.open(
       Media(_url.toString(), httpHeaders: _headers),
       play: false,
     );
+    if (_videoDisabled) {
+      Timer(const Duration(milliseconds: 200), () async {
+        if (_disposed) return;
+        try {
+          await _player.setVideoTrack(VideoTrack.no());
+        } catch (_) {}
+      });
+    }
+    try {
+      // 后台给 open 加个上限：万一视频管线还是没跳过，也不能让整个
+      // 起播流程挂死在 await 上（回前台才恢复 = 用户看到的现象）
+      await (_videoDisabled
+          ? opening.timeout(const Duration(seconds: 6))
+          : opening);
+    } on TimeoutException {
+      debugPrint('[OmiVideo] 后台 open 超时：按已起播继续（音频优先）');
+    }
     _playerOpened = true;
     // open 返回即 demuxer 就绪；画面尺寸可能稍后才上报，
     // 这里用当前已知值兜底，后续由 stream 持续修正。

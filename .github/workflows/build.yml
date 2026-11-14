@@ -232,9 +232,28 @@ jobs:
                   super.onUserLeaveHint()
               }
 
-              private fun isTv(): Boolean =
-                  packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
-                      packageManager.hasSystemFeature(PackageManager.FEATURE_TELEVISION)
+              // 是否电视/盒子：决定「小窗播放」与「信息栏/锁屏卡片」是否启用。
+              // 除了标准的 Leanback / TELEVISION 特性，再补两条国产盒子上
+              // 常见的判定——很多盒子（当贝、部分定制系统）既没声明 leanback，
+              // 也没声明 television，只靠前两条会被当成手机，于是给遥控器
+              // 用户弹出一堆没用的通知栏按钮：
+              //   · UiModeManager 的当前模式是 TELEVISION
+              //   · 既没有触摸屏、也没有通话能力（手机/平板必有一项）
+              private fun isTv(): Boolean {
+                  val pm = packageManager
+                  if (pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+                      pm.hasSystemFeature(PackageManager.FEATURE_TELEVISION) ||
+                      pm.hasSystemFeature("android.hardware.type.television")) {
+                      return true
+                  }
+                  try {
+                      val um = getSystemService(UI_MODE_SERVICE) as android.app.UiModeManager
+                      if (um.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION) return true
+                  } catch (e: Exception) {}
+                  val noTouch = !pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+                  val noTelephony = !pm.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
+                  return noTouch && noTelephony
+              }
 
               override fun onPictureInPictureModeChanged(
                   isInPictureInPictureMode: Boolean,
@@ -307,13 +326,12 @@ jobs:
                   }
 
                   fun stop(ctx: android.content.Context) {
-                      val s = live
-                      if (s != null) {
-                          s.stopCard()
-                      } else {
-                          val i = Intent(ctx, MediaService::class.java).setAction("omi.audio.STOP")
-                          ctx.startService(i)
-                      }
+                      // 服务没活着 = 本来就没有卡片，直接返回。
+                      // 以前这里会为了"关卡片"再 startService 把服务拉起来，
+                      // 新实例 onCreate 又把 MediaSession 激活一次，
+                      // 视频播放时反而闪一下锁屏/媒体控件。
+                      val s = live ?: return
+                      s.stopCard()
                   }
 
                   private fun send(cmd: String) {
@@ -475,6 +493,21 @@ jobs:
               }
 
               fun stopCard() {
+                  // 锁屏和下拉栏的媒体控件是 MediaSession 驱动的：
+                  // 只 cancel 通知不够——session 还 active、播放态还停在
+                  // PLAYING 时，系统的媒体面板和锁屏封面会继续挂着上一张
+                  // 电台卡片（用户实测：视频播放时锁屏仍有电台控制）。
+                  // 先把会话置为 STATE_NONE 再反激活，控件才会真正消失。
+                  try {
+                      session?.setPlaybackState(
+                          android.support.v4.media.session.PlaybackStateCompat.Builder()
+                              .setState(android.support.v4.media.session.PlaybackStateCompat
+                                  .STATE_NONE, 0, 0f)
+                              .build())
+                  } catch (e: Exception) {}
+                  try {
+                      session?.isActive = false
+                  } catch (e: Exception) {}
                   try {
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                           stopForeground(STOP_FOREGROUND_REMOVE)

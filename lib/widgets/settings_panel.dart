@@ -140,6 +140,23 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   int _lastTabIndex = 0;
 
+  /// 打开设置时的初始定位（用户反馈：以前进来焦点不知所踪，要乱按
+  /// 好几下才摸到左栏）。现在打开即三件事：
+  /// ① 分类回到第一个「直播源」；② 焦点直接落在左栏分类上——
+  /// 上/下键立刻就能循环切分类，OK / 右键才进右栏，与两区模型一致；
+  /// ③ post-frame 再取焦点，等首帧把面板布局出来，避免焦点被
+  /// 动画中途的树吃掉。关闭时不做任何事，焦点自然还给播放页。
+  @override
+  void didUpdateWidget(covariant SettingsPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isOpen && widget.isOpen) {
+      if (_tabController.index != 0) _tabController.index = 0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && widget.isOpen) _navFocus.requestFocus();
+      });
+    }
+  }
+
   void _onTabIndexChanged() {
     if (_tabController.index == _lastTabIndex) return;
     _lastTabIndex = _tabController.index;
@@ -188,8 +205,10 @@ class _SettingsPanelState extends State<SettingsPanel>
     if (event is KeyDownEvent || event is KeyRepeatEvent) {
       if (event.logicalKey == LogicalKeyboardKey.arrowLeft &&
           !_navFocus.hasFocus &&
+          // 输入框里按左是移光标，不能把焦点抢回分类栏
           !_focusInEditableText &&
-          _contentStops().any((n) => n.hasFocus)) {
+          _stopIndexOf(_contentStops(), FocusManager.instance.primaryFocus) >=
+              0) {
         _navFocus.requestFocus();
         return KeyEventResult.handled;
       }
@@ -202,21 +221,48 @@ class _SettingsPanelState extends State<SettingsPanel>
           ?.findAncestorWidgetOfExactType<EditableText>() !=
       null;
 
-  /// 内容区所有可聚焦节点的树顺序（不含分类栏）
+  /// 内容区所有可聚焦节点的树顺序（不含分类栏）。
+  ///
+  /// 两条规则，都是为了"上下键一格一格按视觉顺序走"：
+  /// 1. **输入框也要算停靠点**：直播源的名称/地址、分组过滤这些都必须
+  ///    能按到（用户反馈：一路往下跳，输入框被整个跳过）；
+  /// 2. **只留最外层**：SwitchListTile / Slider / InkWell 内部还会再建
+  ///    焦点节点，不去重就会出现同一行停两次、顺序看起来乱蹦。
   List<FocusNode> _contentStops() {
-    final stops = <FocusNode>[];
+    final all = <FocusNode>[];
     for (final n in _panelFocusNode.traversalDescendants) {
       if (n == _navFocus) continue;
       if (!n.canRequestFocus || n.context == null) continue;
-      // 输入框不作为上下导航的停靠点：遥控器/键盘的上下要能一路走完
-      // 所有设置项，一旦落在输入框上就再也走不动（用户实测"上下进到
-      // 输入框里就出不来了"）。输入框仍可用鼠标点/OK 键进入编辑
-      final inField =
-          n.context!.findAncestorWidgetOfExactType<EditableText>() != null;
-      if (inField) continue;
-      stops.add(n);
+      all.add(n);
     }
-    return stops;
+    final keep = <FocusNode>[];
+    for (final n in all) {
+      var p = n.parent;
+      var nested = false;
+      while (p != null) {
+        if (keep.contains(p)) {
+          nested = true;
+          break;
+        }
+        p = p.parent;
+      }
+      if (!nested) keep.add(n);
+    }
+    return keep;
+  }
+
+  /// 当前焦点在 [stops] 里的位置：焦点可能落在某个停靠点的**子节点**上
+  /// （输入框内的 EditableText、按钮内部的 InkWell 焦点等），
+  /// 这时要沿祖先链找最近的那个停靠点，否则会误判成"不在列表里"
+  /// 而把头/尾当成目标——表现就是跳得很乱。
+  int _stopIndexOf(List<FocusNode> stops, FocusNode? from) {
+    var cur = from;
+    while (cur != null) {
+      final i = stops.indexOf(cur);
+      if (i >= 0) return i;
+      cur = cur.parent;
+    }
+    return -1;
   }
 
   /// 上下键在设置里移动焦点：
@@ -235,6 +281,9 @@ class _SettingsPanelState extends State<SettingsPanel>
     final isUp = key == LogicalKeyboardKey.arrowUp;
     if (!isUp && key != LogicalKeyboardKey.arrowDown) return false;
 
+    // 输入法正在组词：上下键归输入法（中文候选词），面板不许抢
+    if (_imeComposing) return false;
+
     // 分类栏持有焦点：上下循环切换分类
     if (_navFocus.hasFocus) {
       final n = _tabController.length;
@@ -248,11 +297,10 @@ class _SettingsPanelState extends State<SettingsPanel>
       _navFocus.requestFocus();
       return true;
     }
-    final focus = FocusManager.instance.primaryFocus;
-    final idx = stops.indexWhere((n) => n == focus || n.hasFocus);
+    final idx = _stopIndexOf(stops, FocusManager.instance.primaryFocus);
     if (idx < 0) {
-      // 焦点停在输入框等"非停靠点"上：上下各取一头，直接回到内容区
-      (isUp ? stops.last : stops.first).requestFocus();
+      // 焦点确实不在面板里（刚打开）：从内容区第一项开始
+      stops.first.requestFocus();
       _scrollFocusedIntoView();
       return true;
     }
@@ -261,6 +309,16 @@ class _SettingsPanelState extends State<SettingsPanel>
     stops[target].requestFocus();
     _scrollFocusedIntoView();
     return true;
+  }
+
+  /// 输入法是否正在组词（组词期间上下键要留给候选词）
+  bool get _imeComposing {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    final et = ctx.findAncestorWidgetOfExactType<EditableText>();
+    if (et == null) return false;
+    final c = et.controller.value.composing;
+    return c.isValid && !c.isCollapsed;
   }
 
   /// 把当前焦点滚到可视区（设置内容是可滚动的长列表）。
@@ -307,124 +365,135 @@ class _SettingsPanelState extends State<SettingsPanel>
               constraints: const BoxConstraints(maxWidth: 760),
               // RepaintBoundary + 不透明底色：局部重绘漏洞的兜底
               child: RepaintBoundary(
-                child: Material(
-                  color: AppColors.overlaySolid,
-                  elevation: 28,
-                  shape: const RoundedRectangleBorder(
-                    borderRadius:
-                        BorderRadius.vertical(top: Radius.circular(16)),
-                    side: BorderSide(color: AppColors.stroke),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: SafeArea(
-                    top: false,
-                    child: Builder(builder: (context) {
-                      // 横屏手机等矮屏（高度<500）时面板几乎占满全高，避免太短无法操作
-                      final screenH = MediaQuery.of(context).size.height;
-                      return SizedBox(
-                        key: _panelKey,
-                        height: screenH * (screenH < 500 ? 0.95 : 0.7),
-                        // 焦点遍历圈定在设置面板内（按控件树顺序上下走）：
-                        // 否则方向键会穿到播放页底部面板的按钮上
-                        child: FocusTraversalGroup(
-                          policy: WidgetOrderTraversalPolicy(),
-                          child: Focus(
-                            focusNode: _panelFocusNode,
-                            onKeyEvent: _onPanelKeyEvent,
-                            child: Column(
-                              children: [
-                                // 顶部拖拽条 + 标题
-                                Container(
-                                  padding:
-                                      const EdgeInsets.only(top: 10, bottom: 8),
-                                  child: Column(
-                                    children: [
-                                      Container(
-                                        width: 40,
-                                        height: 4,
-                                        decoration: BoxDecoration(
-                                          color: Colors.white30,
-                                          borderRadius:
-                                              BorderRadius.circular(2),
+                // 鼠标右键 = 返回上一级（与遥控器返回、Esc 同一语义）。
+                // 播放页那层全屏右键监听在设置打开时是摘掉的（否则会盖在
+                // 卡片上面、把输入框的全选/复制菜单也一起吞掉），所以这
+                // 里必须在卡片自身上接住。卡片里的输入框自带右键处理，
+                // 命中输入框时由它赢下手势竞技场，右键仍是系统菜单。
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onSecondaryTapUp: (_) => widget.onClose(),
+                  child: Material(
+                    color: AppColors.overlaySolid,
+                    elevation: 28,
+                    shape: const RoundedRectangleBorder(
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(16)),
+                      side: BorderSide(color: AppColors.stroke),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: SafeArea(
+                      top: false,
+                      child: Builder(builder: (context) {
+                        // 横屏手机等矮屏（高度<500）时面板几乎占满全高，避免太短无法操作
+                        final screenH = MediaQuery.of(context).size.height;
+                        return SizedBox(
+                          key: _panelKey,
+                          height: screenH * (screenH < 500 ? 0.95 : 0.7),
+                          // 焦点遍历圈定在设置面板内（按控件树顺序上下走）：
+                          // 否则方向键会穿到播放页底部面板的按钮上
+                          child: FocusTraversalGroup(
+                            policy: WidgetOrderTraversalPolicy(),
+                            child: Focus(
+                              focusNode: _panelFocusNode,
+                              onKeyEvent: _onPanelKeyEvent,
+                              child: Column(
+                                children: [
+                                  // 顶部拖拽条 + 标题
+                                  Container(
+                                    padding: const EdgeInsets.only(
+                                        top: 10, bottom: 8),
+                                    child: Column(
+                                      children: [
+                                        Container(
+                                          width: 40,
+                                          height: 4,
+                                          decoration: BoxDecoration(
+                                            color: Colors.white30,
+                                            borderRadius:
+                                                BorderRadius.circular(2),
+                                          ),
                                         ),
-                                      ),
-                                      const SizedBox(height: 10),
-                                      Row(
-                                        children: [
-                                          const SizedBox(width: 16),
-                                          const Text(
-                                            '设置',
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 18,
-                                              fontWeight: FontWeight.bold,
+                                        const SizedBox(height: 10),
+                                        Row(
+                                          children: [
+                                            const SizedBox(width: 16),
+                                            const Text(
+                                              '设置',
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.bold,
+                                              ),
                                             ),
-                                          ),
-                                          const Spacer(),
-                                          // 关闭按钮只给鼠标用（遥控器用 Esc 关闭），
-                                          // 不参与焦点遍历，保证内容区往上走落到页签栏
-                                          ExcludeFocus(
-                                            child: IconButton(
-                                              icon: const Icon(Icons.close,
-                                                  color: Colors.white70),
-                                              onPressed: widget.onClose,
+                                            const Spacer(),
+                                            // 关闭按钮只给鼠标用（遥控器用 Esc 关闭），
+                                            // 不参与焦点遍历，保证内容区往上走落到页签栏
+                                            ExcludeFocus(
+                                              child: IconButton(
+                                                icon: const Icon(Icons.close,
+                                                    color: Colors.white70),
+                                                onPressed: widget.onClose,
+                                              ),
                                             ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
+                                          ],
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                                const Divider(
-                                    color: AppColors.divider, height: 1),
-                                // 双栏设置中心（方案 4.1）：宽屏 = 左栏分类 + 右栏内容；
-                                // 手机窄屏 = 左栏折成顶部横滑胶囊，其余不变
-                                Expanded(
-                                  child: LayoutBuilder(builder: (context, box) {
-                                    final narrow = box.maxWidth < 620;
-                                    final nav = _SettingsNav(
-                                      index: _tabController.index,
-                                      axis: narrow
-                                          ? Axis.horizontal
-                                          : Axis.vertical,
-                                      focusNode: _navFocus,
-                                      onChanged: (i) {
-                                        if (i == _tabController.index) return;
-                                        _tabController.index = i;
-                                      },
-                                      onEnterContent: _focusFirstContent,
-                                    );
-                                    final content =
-                                        _tabPage(_tabController.index);
-                                    if (narrow) {
-                                      return Column(
+                                  const Divider(
+                                      color: AppColors.divider, height: 1),
+                                  // 双栏设置中心（方案 4.1）：宽屏 = 左栏分类 + 右栏内容；
+                                  // 手机窄屏 = 左栏折成顶部横滑胶囊，其余不变
+                                  Expanded(
+                                    child:
+                                        LayoutBuilder(builder: (context, box) {
+                                      final narrow = box.maxWidth < 620;
+                                      final nav = _SettingsNav(
+                                        index: _tabController.index,
+                                        axis: narrow
+                                            ? Axis.horizontal
+                                            : Axis.vertical,
+                                        focusNode: _navFocus,
+                                        onChanged: (i) {
+                                          if (i == _tabController.index) return;
+                                          _tabController.index = i;
+                                        },
+                                        onEnterContent: _focusFirstContent,
+                                      );
+                                      final content =
+                                          _tabPage(_tabController.index);
+                                      if (narrow) {
+                                        return Column(
+                                          children: [
+                                            nav,
+                                            const Divider(
+                                                color: AppColors.divider,
+                                                height: 1),
+                                            Expanded(child: content),
+                                          ],
+                                        );
+                                      }
+                                      return Row(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
                                         children: [
                                           nav,
-                                          const Divider(
-                                              color: AppColors.divider,
-                                              height: 1),
+                                          const VerticalDivider(
+                                              width: 1,
+                                              color: AppColors.divider),
                                           Expanded(child: content),
                                         ],
                                       );
-                                    }
-                                    return Row(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.stretch,
-                                      children: [
-                                        nav,
-                                        const VerticalDivider(
-                                            width: 1, color: AppColors.divider),
-                                        Expanded(child: content),
-                                      ],
-                                    );
-                                  }),
-                                ),
-                              ],
+                                    }),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    }),
+                        );
+                      }),
+                    ),
                   ),
                 ),
               ),
@@ -612,6 +681,165 @@ class _SettingsNav extends StatelessWidget {
 
 // ==================== 播放列表管理标签页 ====================
 
+/// 「网络地址 / 本地文件」两段开关（遥控器版）。
+///
+/// 不用 SegmentedButton：它内部把每个段都建成焦点节点，遥控器要按
+/// 好几下才落得进去，而且左右是「移焦点」不是「改选中」，用户按完
+/// 不知道到底选了哪个（对号跟着焦点还是跟着选中也说不清）。
+///
+/// 这里整排只占**一个**焦点停靠点：
+/// - 左右 = 直接切换选中（选中态和对号永远一致，不再飘）
+/// - OK = 确认并把焦点送到「列表名称」
+/// - 上下 = 交给设置面板统一走位（本组件不拦）
+class _TypeSwitch extends StatefulWidget {
+  const _TypeSwitch({
+    required this.value,
+    required this.onChanged,
+    required this.onConfirm,
+  });
+
+  final PlaylistSourceType value;
+  final ValueChanged<PlaylistSourceType> onChanged;
+  final VoidCallback onConfirm;
+
+  @override
+  State<_TypeSwitch> createState() => _TypeSwitchState();
+}
+
+class _TypeSwitchState extends State<_TypeSwitch> {
+  final FocusNode _node = FocusNode(debugLabel: 'playlistTypeSwitch');
+
+  static const _items = [
+    (PlaylistSourceType.url, '网络地址', Icons.cloud_outlined),
+    (PlaylistSourceType.local, '本地文件', Icons.folder_outlined),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    // 焦点进出要重画外框
+    _node.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _node.dispose();
+    super.dispose();
+  }
+
+  int get _index => _items.indexWhere((e) => e.$1 == widget.value);
+
+  void _move(int d) {
+    final n = _items.length;
+    final i = ((_index < 0 ? 0 : _index) + d) % n;
+    widget.onChanged(_items[(i + n) % n].$1);
+    _node.requestFocus();
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final k = event.logicalKey;
+    if (k == LogicalKeyboardKey.arrowLeft) {
+      // 已经在第一项（网络地址）上：左键交还给设置面板 → 回左栏分类，
+      // 与"任何列表往左都回分类栏"一致
+      if (_index <= 0) return KeyEventResult.ignored;
+      _move(-1);
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.arrowRight) {
+      _move(1);
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA ||
+        k == LogicalKeyboardKey.space) {
+      widget.onConfirm();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final focused = _node.hasFocus;
+    return Focus(
+      focusNode: _node,
+      onKeyEvent: _onKey,
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.03),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: focused ? Colors.white : AppColors.stroke,
+            width: focused ? 1.6 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            for (final (value, label, icon) in _items)
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    widget.onChanged(value);
+                    _node.requestFocus();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 9),
+                    decoration: BoxDecoration(
+                      color: value == widget.value
+                          ? AppColors.accent.withValues(alpha: 0.20)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          icon,
+                          size: 16,
+                          color: value == widget.value
+                              ? AppColors.accent
+                              : AppColors.textSecondary,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          label,
+                          style: TextStyle(
+                            color: value == widget.value
+                                ? Colors.white
+                                : AppColors.textSecondary,
+                            fontSize: 13,
+                            fontWeight: value == widget.value
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                          ),
+                        ),
+                        // 对号只跟选中走，不跟焦点走
+                        if (value == widget.value) ...[
+                          const SizedBox(width: 4),
+                          const Icon(Icons.check,
+                              size: 14, color: AppColors.accent),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _PlaylistTab extends StatefulWidget {
   @override
   State<_PlaylistTab> createState() => _PlaylistTabState();
@@ -624,8 +852,16 @@ class _PlaylistTabState extends State<_PlaylistTab> {
   PlaylistSourceType _type = PlaylistSourceType.url;
   bool _isLoading = false;
 
+  /// 类型开关按 OK 后把焦点送到名称框（用户定的顺序）
+  final FocusNode _nameFocus = FocusNode(debugLabel: 'playlistName');
+
+  /// 底栏「立即检查更新」按钮：最后一行源按右直接落过去
+  final FocusNode _updateCtaFocus = FocusNode(debugLabel: 'builtinUpdateCta');
+
   @override
   void dispose() {
+    _nameFocus.dispose();
+    _updateCtaFocus.dispose();
     _nameController.dispose();
     _urlController.dispose();
     _groupFilterController.dispose();
@@ -858,18 +1094,12 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   Row(
                     children: [
                       Expanded(
-                        child: SegmentedButton<PlaylistSourceType>(
-                          segments: const [
-                            ButtonSegment(
-                                value: PlaylistSourceType.url,
-                                label: Text('网络地址')),
-                            ButtonSegment(
-                                value: PlaylistSourceType.local,
-                                label: Text('本地文件')),
-                          ],
-                          selected: {_type},
-                          onSelectionChanged: (s) =>
-                              setState(() => _type = s.first),
+                        child: _TypeSwitch(
+                          value: _type,
+                          onChanged: (t) => setState(() => _type = t),
+                          // OK 确认后直接把焦点送到「列表名称」：
+                          // 用户定义的顺序是 类型 → 名称 → 地址 → 分组 → 添加
+                          onConfirm: () => _nameFocus.requestFocus(),
                         ),
                       ),
                     ],
@@ -877,6 +1107,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   const SizedBox(height: 8),
                   _ImeSafeTextField(
                     controller: _nameController,
+                    focusNode: _nameFocus,
                     style: const TextStyle(color: Colors.white),
                     decoration: _inputDecoration('列表名称（如：我的电视）'),
                   ),
@@ -950,8 +1181,13 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   // 行上按 OK = 选定该播放列表；左右键进入行尾按钮
                   onSelect:
                       isCurrent ? null : () => controller.selectPlaylist(p.id),
+                  // 最后一行按右直接落到「立即检查更新」
+                  onRightEdge: index == tvPlaylists.length - 1
+                      ? () => _updateCtaFocus.requestFocus()
+                      : null,
                   actions: [
-                    // 内置源/我的电台地址都不是可编辑的字符串：不给编辑入口
+                    // 内置源地址不是可编辑的字符串、也无需诊断：右键只留
+                    // 「刷新 / 删除」两项（用户实测要求就是这个顺序）
                     if (!p.isBuiltin &&
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
@@ -960,7 +1196,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
                           () => _copyPlaylist(p)),
-                    if (p.type == PlaylistSourceType.url)
+                    if (p.type == PlaylistSourceType.url && !p.isBuiltin)
                       _RowAction(Icons.network_check, Colors.tealAccent, '诊断地址',
                           () => _diagnoseSource(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
@@ -971,7 +1207,8 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                 );
               }),
             const Divider(height: 24, color: Colors.white12),
-            _BuiltinUpdateSection(_BuiltinUpdateSection.cctv),
+            _BuiltinUpdateSection(_BuiltinUpdateSection.cctv,
+                ctaFocusNode: _updateCtaFocus),
           ],
         );
       },
@@ -2924,6 +3161,7 @@ class _SourceRow extends StatefulWidget {
     required this.isCurrent,
     required this.onSelect,
     required this.actions,
+    this.onRightEdge,
   });
 
   final String title;
@@ -2934,6 +3172,10 @@ class _SourceRow extends StatefulWidget {
   /// null＝已是当前源，选定无效果
   final VoidCallback? onSelect;
   final List<_RowAction> actions;
+
+  /// 行尾最后一个按钮上再按右的去处（目前只有最后一行用到：
+  /// 直接落到「立即检查更新」，不用再按一下下键）
+  final VoidCallback? onRightEdge;
 
   @override
   State<_SourceRow> createState() => _SourceRowState();
@@ -2982,6 +3224,19 @@ class _SourceRowState extends State<_SourceRow> {
     final k = event.logicalKey;
     if (k == LogicalKeyboardKey.arrowLeft ||
         k == LogicalKeyboardKey.arrowRight) {
+      // 列表行处在最左（整行）时，左键不再是"到头停住"，而是交还给
+      // 设置面板 → 直接退回左栏分类（用户要求：任何列表往左都回分类）
+      if (k == LogicalKeyboardKey.arrowLeft && _index == 0) {
+        return KeyEventResult.ignored;
+      }
+      // 最后一个行内按钮上再按右：交出去（落「立即检查更新」）
+      if (k == LogicalKeyboardKey.arrowRight &&
+          _index == widget.actions.length &&
+          widget.actions.isNotEmpty &&
+          widget.onRightEdge != null) {
+        widget.onRightEdge!();
+        return KeyEventResult.handled;
+      }
       final target =
           (k == LogicalKeyboardKey.arrowLeft ? _index - 1 : _index + 1)
               .clamp(0, widget.actions.length)
@@ -3562,7 +3817,11 @@ class _BuiltinListConfig {
 /// 远程 m3u → 存本地缓存。这里只做展示与手动触发，真正的定时在启动时跑。
 class _BuiltinUpdateSection extends StatefulWidget {
   final _BuiltinListConfig config;
-  const _BuiltinUpdateSection(this.config);
+
+  /// 「立即检查更新」按钮的焦点节点：上一行列表按右直接落过来
+  final FocusNode? ctaFocusNode;
+
+  const _BuiltinUpdateSection(this.config, {this.ctaFocusNode});
 
   static final cctv = _BuiltinListConfig(
     icon: Icons.live_tv,
@@ -3717,6 +3976,7 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
               ),
               const Spacer(),
               TextButton.icon(
+                focusNode: widget.ctaFocusNode,
                 onPressed: _busy ? null : _update,
                 icon: _busy
                     ? const SizedBox(

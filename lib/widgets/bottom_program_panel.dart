@@ -97,8 +97,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           return;
         }
         final play = enabled.where((a) => a.id == 'playpause');
-        setState(() =>
-            _kbId = play.isNotEmpty ? play.first.id : enabled.first.id);
+        setState(
+            () => _kbId = play.isNotEmpty ? play.first.id : enabled.first.id);
       });
     }
   }
@@ -159,7 +159,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             alignment: Alignment.bottomCenter,
             // 手机保持铺满宽度（scale=1 由上方 padding 逻辑控制），
             // 桌面窗口变小时整体等比缩，卡片不变形
-            scale: panelScaleOf(context) < 1.0 ? 1.0 : windowFitScaleOf(context),
+            scale:
+                panelScaleOf(context) < 1.0 ? 1.0 : windowFitScaleOf(context),
             child: Container(
               decoration: BoxDecoration(
                 // 与设置面板 / 左右抽屉同一套表面色：深蓝灰 + 细描边
@@ -351,8 +352,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           AnimatedBuilder(
             animation: Listenable.merge([c.videoController]),
             builder: (context, _) {
-              final icy =
-                  (c.videoController?.value.mediaTitle ?? '').trim();
+              final icy = (c.videoController?.value.mediaTitle ?? '').trim();
               final text = icy.isNotEmpty ? '♪ $icy' : radioGroup;
               if (text.isEmpty) return const SizedBox.shrink();
               return Text(
@@ -452,11 +452,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     // 投屏态：播放会话由发送端控制，只保留必要操作
     if (c.isCasting) {
       final castActions = <_KbAction>[
-        _KbAction(
-            'playpause',
-            c.isPlaying ? Icons.pause : Icons.play_arrow,
-            c.isPlaying ? '暂停' : '播放',
-            widget.onTogglePlayPause),
+        _KbAction('playpause', c.isPlaying ? Icons.pause : Icons.play_arrow,
+            c.isPlaying ? '暂停' : '播放', widget.onTogglePlayPause),
         if (c.isDesktop)
           _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
               c.isMuted ? '取消静音' : '静音', c.toggleMute),
@@ -467,8 +464,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                 ? '旋转画面'
                 : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
             c.cycleVideoRotation),
-        _KbAction('cast', Icons.cast_connected, '断开投屏',
-            c.stopCastAndRestore),
+        _KbAction('cast', Icons.cast_connected, '断开投屏', c.stopCastAndRestore),
       ];
       _actions = castActions;
       if (_kbId != null && !castActions.any((a) => a.id == _kbId)) {
@@ -483,6 +479,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     }
     // 电台变体（方案 13.3）：音频没有画面，截图/旋转/小窗都不出现
     final isRadio = c.currentChannel?.isRadio ?? false;
+    // 【顺序红线】这里必须与下方 children 的拼装顺序逐项一致——
+    // 遥控器 ←/→ 按本列表的声明顺序走高亮，声明和显示不一致时
+    // 焦点会"跳到最后一个又跳回来"（电台录音按钮实测踩过）。
     // 可用动作：禁用按钮不进列表，遥控器只会高亮能点的按钮
     final actions = <_KbAction>[
       // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
@@ -502,15 +501,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isPlaying ? Icons.pause : Icons.play_arrow,
           c.isPlaying ? '暂停' : '播放',
           hasChannel ? widget.onTogglePlayPause : null),
-      if (isRadio) ...[
-        // 电台录音（方案 12.3）：边听边录，流内直抓不转码
-        _KbAction(
-          'radioRec',
-          c.isRadioRecording ? Icons.stop_rounded : Icons.fiber_manual_record,
-          c.isRadioRecording ? '停止录音' : '录音',
-          hasChannel ? c.toggleRadioRecord : null,
-        ),
-      ],
       if (c.isDesktop && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
@@ -520,8 +510,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             c.isRecording ? '停止录制' : '开始录制',
             hasVideo ? widget.onToggleRecord : null),
       ],
-      // 顺序必须与界面从左到右一致：旋转在小窗/静音/全屏之前，
-      // 否则遥控器 ←/→ 会在「全屏 ↔ 旋转 ↔ 小窗」之间来回跳
+      // 旋转在小窗/静音/全屏之前，与界面一致
       if (!isRadio)
         _KbAction(
             'rotate',
@@ -532,11 +521,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             hasVideo ? c.cycleVideoRotation : null),
       // 静音：手机/平板也要（侧滑调音量之外给一个一键静音）；
       // 全屏仍只在桌面端（移动端全屏由系统/手势接管）
-      _KbAction(
-          'mute',
-          c.isMuted ? Icons.volume_off : Icons.volume_up,
-          c.isMuted ? '取消静音' : '静音',
-          c.toggleMute),
+      _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
+          c.isMuted ? '取消静音' : '静音', c.toggleMute),
       if (c.isDesktop)
         _KbAction(
             'fullscreen',
@@ -561,13 +547,17 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.webPageActive ? '内置播放器播放' : '网页播放器播放',
           c.canToggleWebNative ? widget.onSwitchWebNative : null,
         ),
-      // 后台播放（桌面端）：窗口缩到托盘只听声，托盘图标恢复
-      if (c.isDesktop)
-        _KbAction('background', Icons.dock, '后台播放（缩到托盘只听声）',
-            c.enterBackgroundAudio),
       if (c.isCasting)
-        _KbAction('cast', Icons.cast_connected, '断开投屏',
-            c.stopCastAndRestore),
+        _KbAction('cast', Icons.cast_connected, '断开投屏', c.stopCastAndRestore),
+      // 电台录音（电台专属）：边听边录，流内直抓不转码——
+      // 显示在面板最尾部，声明也必须放在最后
+      if (isRadio)
+        _KbAction(
+          'radioRec',
+          c.isRadioRecording ? Icons.stop_rounded : Icons.fiber_manual_record,
+          c.isRadioRecording ? '停止录音' : '录音',
+          hasChannel ? c.toggleRadioRecord : null,
+        ),
     ];
     _actions = actions;
     // 当前高亮的动作若已消失（如断开投屏），清除高亮，等下次方向键重选
@@ -762,10 +752,8 @@ class _SeekBarState extends State<_SeekBar> {
           child: SliderTheme(
             data: SliderThemeData(
               trackHeight: 3,
-              thumbShape:
-                  const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape:
-                  const RoundSliderOverlayShape(overlayRadius: 12),
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
               activeTrackColor: Colors.blueAccent,
               inactiveTrackColor: Colors.white24,
               thumbColor: Colors.blueAccent,
@@ -790,4 +778,3 @@ class _SeekBarState extends State<_SeekBar> {
     );
   }
 }
-

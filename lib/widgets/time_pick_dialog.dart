@@ -12,8 +12,11 @@ import '../core/theme/app_colors.dart';
 /// （实测反馈）。这里换成电视盒子式的两列数字：
 ///
 /// - **上下** = 当前列 ±1（按住连发，遥控器长按自然加速）
-/// - **左右** = 在「时 / 分」两列之间切换
-/// - **OK / 确定** = 确认；**返回 / Esc** = 取消
+/// - **左右** = 在「时 / 分」两列之间切换；**在分钟上再按右**出到
+///   「确定 / 取消」这一排（用户实测要求：上下在数字里循环，只有
+///   左右才能跳出去，否则出不来）
+/// - **OK** = 数字区里=直接确定；按钮上=执行当前按钮
+/// - **返回 / Esc** = 取消
 /// - 鼠标：点数字列选中该列，点 ▲▼ 或直接点数字增减
 ///
 /// 返回值语义与 `showTimePicker` 一致：取消返回 null。
@@ -52,8 +55,11 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
   late int _hour = widget.initial.hour;
   late int _minute = widget.initial.minute;
 
-  /// 0 = 正在调小时，1 = 正在调分钟
+  /// 0 = 正在调小时，1 = 正在调分钟，2 = 在「确定 / 取消」按钮上
   int _col = 0;
+
+  /// 按钮行里选中的是哪一个：0 = 确定，1 = 取消
+  int _btn = 0;
 
   final FocusNode _focus = FocusNode(debugLabel: 'remoteTimePicker');
 
@@ -88,21 +94,39 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
       return KeyEventResult.ignored;
     }
     final k = event.logicalKey;
-    // 上 = 加，下 = 减（与滚轮/数字选择器的直觉一致）
-    if (k == LogicalKeyboardKey.arrowUp) {
-      _step(1);
-      return KeyEventResult.handled;
-    }
-    if (k == LogicalKeyboardKey.arrowDown) {
-      _step(-1);
+    // 上 = 加，下 = 减（与滚轮/数字选择器的直觉一致）。
+    // 焦点在按钮行时，上下都退回分钟框——数字区里上下只循环调数值，
+    // 要出到按钮只能走左右
+    if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
+      if (_col == 2) {
+        setState(() => _col = 1);
+      } else {
+        _step(k == LogicalKeyboardKey.arrowUp ? 1 : -1);
+      }
       return KeyEventResult.handled;
     }
     if (k == LogicalKeyboardKey.arrowLeft) {
-      setState(() => _col = 0);
+      setState(() {
+        if (_col == 2) {
+          _btn = 0;
+        } else if (_col == 1) {
+          _col = 0;
+        }
+      });
       return KeyEventResult.handled;
     }
     if (k == LogicalKeyboardKey.arrowRight) {
-      setState(() => _col = 1);
+      setState(() {
+        if (_col == 0) {
+          _col = 1;
+        } else if (_col == 1) {
+          // 分钟再往右 = 跳出数字区，落到「确定」
+          _col = 2;
+          _btn = 0;
+        } else {
+          _btn = 1;
+        }
+      });
       return KeyEventResult.handled;
     }
     if (k == LogicalKeyboardKey.enter ||
@@ -110,7 +134,11 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
         k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.gameButtonA ||
         k == LogicalKeyboardKey.space) {
-      _confirm();
+      if (_col == 2 && _btn == 1) {
+        Navigator.pop(context);
+      } else {
+        _confirm();
+      }
       return KeyEventResult.handled;
     }
     if (k == LogicalKeyboardKey.escape ||
@@ -245,22 +273,60 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
             ),
             const SizedBox(height: 10),
             const Text(
-              '上下调数值 · 左右切时/分 · OK 确定',
+              '上下调数值 · 左右切时/分 · 分钟上再按右到「确定」',
               style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+            ),
+            const SizedBox(height: 14),
+            // 确定 / 取消：只有从分钟框按右才出得来（用户定义的顺序），
+            // 所以这两个按钮不进焦点树，焦点状态由 _col/_btn 自己画
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                _actionButton('取消', 1, () => Navigator.pop(context)),
+                const SizedBox(width: 8),
+                _actionButton('确定', 0, _confirm),
+              ],
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消',
-                style: TextStyle(color: AppColors.textSecondary)),
+      ),
+    );
+  }
+
+  /// 按钮行的一个按钮：_col==2 且 _btn 命中时画白框（遥控器焦点）
+  Widget _actionButton(String label, int index, VoidCallback onTap) {
+    final focused = _col == 2 && _btn == index;
+    final primary = index == 0;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _col = 2;
+          _btn = index;
+        });
+        onTap();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+        decoration: BoxDecoration(
+          color: primary
+              ? AppColors.accent.withValues(alpha: focused ? 0.30 : 0.18)
+              : Colors.white.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: focused
+                ? Colors.white
+                : (primary ? AppColors.accent : AppColors.stroke),
+            width: focused ? 2 : 1,
           ),
-          TextButton(
-            onPressed: _confirm,
-            child: const Text('确定', style: TextStyle(color: AppColors.accent)),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: primary ? Colors.white : AppColors.textSecondary,
+            fontSize: 13.5,
+            fontWeight: primary ? FontWeight.w600 : FontWeight.normal,
           ),
-        ],
+        ),
       ),
     );
   }

@@ -56,9 +56,30 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   final FocusNode _tabSearchFocus = FocusNode(debugLabel: 'radioTabSearch');
   final FocusNode _tabMineFocus = FocusNode(debugLabel: 'radioTabMine');
 
-  /// 快捷筛选（地名 + 标签）的焦点：左右键在这条横排里走，
-  /// 由 State 统一持有，才能保证「走到头停住」而不是跳去别处
-  final List<FocusNode> _chipFocus = [];
+  /// 搜索条三个控件的焦点：输入框 → 搜索 → 仅中国，左右键按这个顺序走
+  /// （用户定义的操作顺序，上下键也走同一条线）
+  final FocusNode _searchBtnFocus = FocusNode(debugLabel: 'radioSearchBtn');
+  final FocusNode _cnFocus = FocusNode(debugLabel: 'radioCnOnly');
+
+  /// 快捷筛选拆成两行（地区一行、分类一行），**每行只占一个焦点停靠点**：
+  /// 行内左右换 chip、OK 过滤，上下在行与行之间走。以前两排混成一条横排
+  /// 且每个 chip 都是停靠点，上下要按十几次 chip 才下得去，遥控器上就是
+  /// "乱跳"（用户实测）。
+  final FocusNode _regionRow = FocusNode(debugLabel: 'radioRegionRow');
+  final FocusNode _tagRow = FocusNode(debugLabel: 'radioTagRow');
+
+  /// 列表末尾「回到顶部」：长列表按到底之后，遥控器没有别的出口能回去
+  final FocusNode _topRow = FocusNode(debugLabel: 'radioBackToTop');
+
+  /// 行内光标位置（左右键改的是它，OK 才真正过滤）
+  int _regionIdx = 0;
+  int _tagIdx = 0;
+
+  /// chip 的 GlobalKey：左右移动时把它滚进可视区
+  final Map<String, GlobalKey> _chipKeys = {};
+
+  /// 结果列表滚动控制器：回到顶部要能把列表也拉回去
+  final ScrollController _resultScroll = ScrollController();
 
   /// 列表行焦点按台 id 复用：列表重建不丢焦点，遥控器不会跳回顶部
   final Map<String, FocusNode> _rowFocus = {};
@@ -80,15 +101,12 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   void initState() {
     super.initState();
     RadioSearchDialog.active = true;
-    // 快捷筛选的焦点节点：地名在前、分类标签在后，和界面顺序一致
-    _chipFocus
-      ..clear()
-      ..addAll(<FocusNode>[
-        for (var i = 0; i < RadioDirectory.quickRegions.length; i++)
-          FocusNode(debugLabel: 'radioCity$i'),
-        for (var i = 0; i < RadioDirectory.quickTags.length; i++)
-          FocusNode(debugLabel: 'radioTag$i'),
-      ]);
+    // 行焦点进出都要重画（行内光标态靠 hasFocus 判断）
+    for (final n in [_regionRow, _tagRow]) {
+      n.addListener(() {
+        if (mounted) setState(() {});
+      });
+    }
     // 方向键/OK 走硬件层：比焦点树更早拿到按键，保证遥控器一定能操作
     HardwareKeyboard.instance.addHandler(_onHardwareKey);
     // 内置索引只有几 KB，先读起来，搜索结果才能标「内置」
@@ -97,6 +115,11 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     });
     // 首屏给中国区热门，避免面对空白
     _search();
+    // 进来第一件事：焦点落在「搜索电台」页签上（不等搜索结果回来，
+    // 网络慢时也不会出现"焦点悬空、按哪都不动"的一段空窗）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _tabSearchFocus.requestFocus();
+    });
   }
 
   @override
@@ -108,9 +131,12 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     _rootFocus.dispose();
     _tabSearchFocus.dispose();
     _tabMineFocus.dispose();
-    for (final n in _chipFocus) {
-      n.dispose();
-    }
+    _searchBtnFocus.dispose();
+    _cnFocus.dispose();
+    _regionRow.dispose();
+    _tagRow.dispose();
+    _topRow.dispose();
+    _resultScroll.dispose();
     for (final n in _rowFocus.values) {
       n.dispose();
     }
@@ -146,8 +172,26 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     if (k == LogicalKeyboardKey.arrowLeft ||
         k == LogicalKeyboardKey.arrowRight) {
       if (_imeComposing) return KeyEventResult.ignored;
-      // 快捷筛选横排：左右走焦点，到头停住（不跳到别的控件）
-      if (_moveChip(left: k == LogicalKeyboardKey.arrowLeft)) {
+      final left = k == LogicalKeyboardKey.arrowLeft;
+      // 筛选行内：左右换 chip（循环），OK 才过滤
+      if (_regionRow.hasFocus) {
+        _moveInRow(region: true, delta: left ? -1 : 1);
+        return KeyEventResult.handled;
+      }
+      if (_tagRow.hasFocus) {
+        _moveInRow(region: false, delta: left ? -1 : 1);
+        return KeyEventResult.handled;
+      }
+      // 列表末尾「回到顶部」：往右就是出口（用户要求的"这一行往右退出"）
+      if (_topRow.hasFocus && !left) {
+        _backToTop();
+        return KeyEventResult.handled;
+      }
+      // 搜索条内：输入框 ←→ 搜索按钮 ←→ 仅中国
+      final bar = _barIndex;
+      if (bar >= 0) {
+        final next = (bar + (left ? -1 : 1)).clamp(0, 2);
+        [_queryFocus, _searchBtnFocus, _cnFocus][next].requestFocus();
         return KeyEventResult.handled;
       }
       // 页签上左右切页
@@ -160,7 +204,39 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
       // 方向导航，焦点横向窜到别的控件上，遥控器感觉像"乱跳"
       return KeyEventResult.handled;
     }
+    // OK：筛选行/回顶行/页签这几类"自绘焦点"自己处理；其它控件放行给
+    // 焦点树（输入框回车、列表行 OK、按钮等各管各的）
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA) {
+      if (_regionRow.hasFocus) {
+        _activateRegion(_regionIdx);
+        return KeyEventResult.handled;
+      }
+      if (_tagRow.hasFocus) {
+        _activateTag(_tagIdx);
+        return KeyEventResult.handled;
+      }
+      if (_topRow.hasFocus) {
+        _backToTop();
+        return KeyEventResult.handled;
+      }
+      // 我的电台页签上按 OK：进卡片里（焦点落到第一台）
+      if (_tab == 1 && _tabMineFocus.hasFocus) {
+        _focusMineList();
+        return KeyEventResult.handled;
+      }
+    }
     return KeyEventResult.ignored;
+  }
+
+  /// 搜索条里当前焦点在哪一格：0 输入框 / 1 搜索 / 2 仅中国 / -1 不在条上
+  int get _barIndex {
+    if (_queryFocus.hasFocus) return 0;
+    if (_searchBtnFocus.hasFocus) return 1;
+    if (_cnFocus.hasFocus) return 2;
+    return -1;
   }
 
   /// 输入法是否正在组词（组词期间不能抢上下键）
@@ -178,8 +254,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   void _moveVertical({required bool up}) {
     final stops = _navStops();
     if (stops.isEmpty) return;
-    final cur = FocusManager.instance.primaryFocus;
-    final idx = stops.indexWhere((n) => n == cur || n.hasFocus);
+    final idx = _stopIndexOf(stops, FocusManager.instance.primaryFocus);
     if (idx < 0) {
       stops.first.requestFocus();
       _ensureVisible();
@@ -191,33 +266,115 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     _ensureVisible();
   }
 
-  /// 上下导航的停靠点（树顺序）。
+  /// 上下导航的停靠点（树顺序，与界面自上而下一致）。
   ///
-  /// 输入框不算停靠点：一旦焦点落进去，上下键就被输入框/输入法吃掉，
-  /// 遥控器再也走不出来（设置页踩过同一个坑）。输入框仍可鼠标点击或
-  /// OK 进入编辑，只是不参与上下循环。
+  /// 搜索框也算停靠点：遥控器/键盘要能「页签 → 搜索框 → 搜索按钮 →
+  /// 城市筛选 → 结果列表」一路走下来。输入法组词期间上下键会放行给
+  /// 候选词（见 _imeComposing），所以不会被困在框里出不来。
+  ///
+  /// 只保留最外层：行/按钮内部还会再建焦点节点，不去重会出现同一行
+  /// 停两次、顺序看起来乱蹦。
   List<FocusNode> _navStops() {
-    final stops = <FocusNode>[];
+    final all = <FocusNode>[];
     for (final n in _rootFocus.traversalDescendants) {
       if (!n.canRequestFocus || n.context == null) continue;
-      if (n.context!.findAncestorWidgetOfExactType<EditableText>() != null) {
-        continue;
-      }
-      stops.add(n);
+      all.add(n);
     }
-    return stops;
+    final keep = <FocusNode>[];
+    for (final n in all) {
+      var p = n.parent;
+      var nested = false;
+      while (p != null) {
+        if (keep.contains(p)) {
+          nested = true;
+          break;
+        }
+        p = p.parent;
+      }
+      if (!nested) keep.add(n);
+    }
+    return keep;
   }
 
-  /// 左右：在快捷筛选横排内移动。返回 false 表示当前焦点不在这一排
-  bool _moveChip({required bool left}) {
-    final cur = FocusManager.instance.primaryFocus;
-    final i = _chipFocus.indexWhere((n) => n == cur || n.hasFocus);
-    if (i < 0) return false;
-    final next = i + (left ? -1 : 1);
-    if (next < 0 || next >= _chipFocus.length) return true; // 到头：吞掉
-    _chipFocus[next].requestFocus();
-    _ensureVisible();
-    return true;
+  /// 当前焦点在停靠点里的位置：焦点常落在子节点上（输入框内的
+  /// EditableText、按钮内部的 InkWell），要沿祖先链找最近的停靠点，
+  /// 否则会被当成"不在列表里"而跳到头/尾——遥控器感觉就是乱跳
+  int _stopIndexOf(List<FocusNode> stops, FocusNode? from) {
+    var cur = from;
+    while (cur != null) {
+      final i = stops.indexOf(cur);
+      if (i >= 0) return i;
+      cur = cur.parent;
+    }
+    return -1;
+  }
+
+  /// 筛选行内左右移动光标（循环）。focus 在行节点上，具体 chip 靠下标记录，
+  /// 所以这里要顺手把目标 chip 滚进可视区（遥控器看不到屏幕外的光标）。
+  void _moveInRow({required bool region, required int delta}) {
+    final n = region
+        ? RadioDirectory.quickRegions.length
+        : RadioDirectory.quickTags.length;
+    if (n == 0) return;
+    setState(() {
+      if (region) {
+        _regionIdx = (_regionIdx + delta) % n;
+        if (_regionIdx < 0) _regionIdx += n;
+      } else {
+        _tagIdx = (_tagIdx + delta) % n;
+        if (_tagIdx < 0) _tagIdx += n;
+      }
+    });
+    final key = _chipKeys[region ? 'r$_regionIdx' : 't$_tagIdx'];
+    final ctx = key?.currentContext;
+    if (ctx != null && ctx.mounted) {
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 120),
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+      );
+    }
+  }
+
+  void _activateRegion(int i) {
+    if (i < 0 || i >= RadioDirectory.quickRegions.length) return;
+    final city = RadioDirectory.quickRegions[i];
+    final on = _queryCtl.text.trim() == city && _tag.isEmpty;
+    if (on) {
+      _queryCtl.clear();
+      _search();
+    } else {
+      _queryCtl.text = city;
+      setState(() => _tag = '');
+      _search();
+    }
+  }
+
+  void _activateTag(int i) {
+    if (i < 0 || i >= RadioDirectory.quickTags.length) return;
+    final tag = RadioDirectory.quickTags[i].$2;
+    final on = _tag == tag;
+    _queryCtl.clear();
+    _search(tag: on ? '' : tag);
+  }
+
+  /// 长列表到底后的出口：回滚列表 + 焦点回到「搜索电台」页签
+  void _backToTop() {
+    _tabSearchFocus.requestFocus();
+    if (_resultScroll.hasClients) {
+      _resultScroll.animateTo(
+        0,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  /// 「我的电台」页签上按 OK：焦点进卡片，落到第一台
+  void _focusMineList() {
+    final items = RadioLibrary.items;
+    if (items.isEmpty) return;
+    _rowNodeFor('mine:${items.first.id}').requestFocus();
   }
 
   void _ensureVisible() {
@@ -338,7 +495,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
                   const Divider(color: AppColors.divider, height: 1),
                   if (_tab == 0) ...[
                     _searchBar(),
-                    _tagBar(),
+                    _filterRows(),
                     const Divider(color: AppColors.divider, height: 1),
                   ],
                   Expanded(child: _tab == 0 ? _resultArea() : _mineArea()),
@@ -615,11 +772,13 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
           GhostButton(
             icon: Icons.search,
             tooltip: '搜索 (回车)',
+            focusNode: _searchBtnFocus,
             onPressed: _loading ? null : () => _search(),
           ),
           const SizedBox(width: 4),
           // 仅中国：默认开，搜"音乐"不会出来一堆国外台
           FilterChip(
+            focusNode: _cnFocus,
             label: const Text('仅中国', style: TextStyle(fontSize: 12)),
             selected: _cnOnly,
             onSelected: (v) {
@@ -639,95 +798,187 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     );
   }
 
-  Widget _tagBar() {
-    return ScrollConfiguration(
-      // 桌面端 Flutter 默认不允许鼠标拖动滚动：这排快捷筛选挺长，
-      // 按住鼠标往左拖完全不动（只能滚滚轮），体验很别扭
-      behavior: const _DragScrollBehavior(),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
-        child: Row(
-          children: [
-            // 地名：点一下直接按地名搜（比让用户自己敲"上海"更顺手）
-            for (var i = 0; i < RadioDirectory.quickRegions.length; i++) ...[
-              if (i > 0) const SizedBox(width: 6),
-              _cityChip(RadioDirectory.quickRegions[i], i),
-            ],
-            const SizedBox(width: 10),
-            Container(width: 1, height: 18, color: AppColors.divider),
-            const SizedBox(width: 10),
-            for (var j = 0; j < RadioDirectory.quickTags.length; j++) ...[
-              if (j > 0) const SizedBox(width: 6),
-              _tagChip(
-                RadioDirectory.quickTags[j].$1,
-                RadioDirectory.quickTags[j].$2,
-                RadioDirectory.quickRegions.length + j,
+  /// 两行筛选：地区 / 分类。
+  ///
+  /// 每行只占一个焦点停靠点（行内左右换 chip、OK 过滤），上下键直接
+  /// 在「地区行 → 分类行 → 结果列表」之间走——以前两排混成一条横排，
+  /// 每个 chip 都是停靠点，遥控器要按十几次才下得去。
+  Widget _filterRows() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+      child: Column(
+        children: [
+          _filterRow(
+            label: '地区',
+            node: _regionRow,
+            count: RadioDirectory.quickRegions.length,
+            chip: (i) {
+              final city = RadioDirectory.quickRegions[i];
+              return _filterChip(
+                keyId: 'r$i',
+                label: city,
+                selected: _queryCtl.text.trim() == city && _tag.isEmpty,
+                cursor: _regionRow.hasFocus && _regionIdx == i,
+                onTap: () {
+                  _regionRow.requestFocus();
+                  setState(() => _regionIdx = i);
+                  _activateRegion(i);
+                },
+              );
+            },
+          ),
+          const SizedBox(height: 6),
+          _filterRow(
+            label: '分类',
+            node: _tagRow,
+            count: RadioDirectory.quickTags.length,
+            chip: (i) {
+              final (label, tag) = RadioDirectory.quickTags[i];
+              return _filterChip(
+                keyId: 't$i',
+                label: label,
+                selected: _tag == tag,
+                cursor: _tagRow.hasFocus && _tagIdx == i,
+                onTap: () {
+                  _tagRow.requestFocus();
+                  setState(() => _tagIdx = i);
+                  _activateTag(i);
+                },
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 一行筛选：左侧小标签 + 横向滚动的 chip 条
+  Widget _filterRow({
+    required String label,
+    required FocusNode node,
+    required int count,
+    required Widget Function(int) chip,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        SizedBox(
+          width: 34,
+          child: Text(
+            label,
+            style:
+                const TextStyle(color: AppColors.textTertiary, fontSize: 11.5),
+          ),
+        ),
+        Expanded(
+          child: Focus(
+            focusNode: node,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: node.hasFocus ? Colors.white70 : Colors.transparent,
+                ),
               ),
+              child: ScrollConfiguration(
+                // 桌面端 Flutter 默认不允许鼠标拖动滚动：这排挺长，
+                // 按住鼠标往左拖完全不动（只能滚滚轮），体验很别扭
+                behavior: const _DragScrollBehavior(),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (var i = 0; i < count; i++) ...[
+                        if (i > 0) const SizedBox(width: 6),
+                        chip(i),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 一个筛选 chip：选中=主色 + 对号；光标（行有焦点且停在这颗上）=白框
+  Widget _filterChip({
+    required String keyId,
+    required String label,
+    required bool selected,
+    required bool cursor,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      key: _chipKeys.putIfAbsent(keyId, () => GlobalKey()),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.accent.withValues(alpha: 0.24)
+              : Colors.white.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: cursor
+                ? Colors.white
+                : (selected ? AppColors.accent : AppColors.stroke),
+            width: cursor ? 2 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (selected) ...[
+              const Icon(Icons.check, size: 12, color: AppColors.textPrimary),
+              const SizedBox(width: 3),
             ],
+            Text(
+              label,
+              style: TextStyle(
+                color:
+                    selected ? AppColors.textPrimary : AppColors.textSecondary,
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  /// 分类标签 chip（遥控器焦点下标排在所有地名之后，与界面顺序一致）
-  Widget _tagChip(String label, String tag, int focusIndex) {
-    final on = _tag == tag;
-    void act() {
-      // 再点一次取消标签，回到普通搜索
-      _queryCtl.clear();
-      _search(tag: on ? '' : tag);
-    }
-
+  /// 结果列表末尾的出口行：OK 或「右」都回顶部（列表 + 焦点一起回去）
+  Widget _backToTopRow() {
     return _FocusCard(
-      focusNode: _chipFocus[focusIndex],
-      onActivate: act,
-      radius: 20,
-      padding: const EdgeInsets.all(2),
-      child: ChoiceChip(
-        label: Text(label, style: const TextStyle(fontSize: 12)),
-        selected: on,
-        onSelected: (_) => act(),
-        selectedColor: AppColors.accent.withValues(alpha: 0.25),
-        backgroundColor: Colors.white.withValues(alpha: 0.04),
-        side: const BorderSide(color: AppColors.stroke),
-        labelStyle: TextStyle(
-          color: on ? AppColors.textPrimary : AppColors.textSecondary,
-        ),
-      ),
-    );
-  }
-
-  /// 地名 chip：选中态看「输入框里正好是这个地名」
-  Widget _cityChip(String city, int focusIndex) {
-    final on = _queryCtl.text.trim() == city && _tag.isEmpty;
-    void act() {
-      if (on) {
-        _queryCtl.clear();
-        _search();
-      } else {
-        _queryCtl.text = city;
-        setState(() => _tag = '');
-        _search();
-      }
-    }
-
-    return _FocusCard(
-      focusNode: _chipFocus[focusIndex],
-      onActivate: act,
-      radius: 20,
-      padding: const EdgeInsets.all(2),
-      child: ChoiceChip(
-        label: Text(city, style: const TextStyle(fontSize: 12)),
-        selected: on,
-        onSelected: (_) => act(),
-        selectedColor: AppColors.accent.withValues(alpha: 0.25),
-        backgroundColor: Colors.white.withValues(alpha: 0.04),
-        side: const BorderSide(color: AppColors.stroke),
-        checkmarkColor: AppColors.textPrimary,
-        labelStyle: TextStyle(
-          color: on ? AppColors.textPrimary : AppColors.textSecondary,
+      focusNode: _topRow,
+      onActivate: _backToTop,
+      radius: 8,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        child: Row(
+          children: [
+            const Icon(Icons.vertical_align_top,
+                size: 18, color: AppColors.textTertiary),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Text(
+                '回到顶部 · 回「搜索电台」',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+              ),
+            ),
+            Text(
+              'OK / →',
+              style: TextStyle(
+                color: AppColors.textTertiary.withValues(alpha: 0.9),
+                fontSize: 11.5,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -781,11 +1032,15 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     }
     final controller = context.watch<PlayerController>();
     return ListView.separated(
+      controller: _resultScroll,
       padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: _results.length,
+      // 多一行「回到顶部」：长列表按到底后，遥控器没有别的出口回得去
+      // （用户实测：按到底再往回返，返不回最顶上）
+      itemCount: _results.length + 1,
       separatorBuilder: (_, __) =>
           const Divider(color: AppColors.divider, height: 1),
       itemBuilder: (context, i) {
+        if (i == _results.length) return _backToTopRow();
         final s = _results[i];
         final saved = controller.isStationSaved(s.id);
         return _StationRow(

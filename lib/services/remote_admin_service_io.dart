@@ -80,8 +80,7 @@ class RemoteAdminService {
   RemoteAdminHooks? _hooks;
 
   bool get isRunning => _server != null;
-  String get endpoint =>
-      _server == null ? '' : 'http://$_ip:$_port';
+  String get endpoint => _server == null ? '' : 'http://$_ip:$_port';
 
   Future<void> start({required RemoteAdminHooks hooks}) async {
     if (_server != null) return;
@@ -336,6 +335,9 @@ button{font-family:inherit;cursor:pointer;-webkit-appearance:none;appearance:non
   background:#1d2330;color:#b9c4da;font-size:12.5px;white-space:nowrap;
 }
 .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
+/* 地区 / 分类两行：每行一个标签 + 横向换行 chip，与电视端一致 */
+.chip-row{display:-webkit-flex;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;-webkit-align-items:center;align-items:center;margin:6px -4px 0}
+.chip-label{-webkit-flex:0 0 34px;flex:0 0 34px;color:#7b869c;font-size:11.5px;padding-left:4px}
 .search-row{display:-webkit-flex;display:flex;margin-top:10px}
 .search-row input{-webkit-flex:1 1 auto;flex:1 1 auto;min-width:0;margin-right:8px}
 .search-row .btn{-webkit-flex:0 0 84px;flex:0 0 84px;height:44px}
@@ -550,7 +552,7 @@ var state={playlists:[],epgs:[],radios:[],currentPlaylistId:null,currentEpgId:nu
   radioBuiltin:{},settings:{}};
 var tab='pl', editing=null, editType='url';
 var builtin={cctv:{},radio:{}};
-var radioResults=null, radioBusy=false, radioTag='', radioQ='';
+var radioResults=null, radioBusy=false, radioTag='', radioQ='', radioRegion='';
 var TABS=['pl','radio','epg','play','set','help'];
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function findById(arr,id){for(var i=0;i<arr.length;i++)if(arr[i].id===id)return arr[i];return null}
@@ -647,7 +649,14 @@ function renderRadio(){
     +'<div class="search-row"><input id="r-q" placeholder="台名，如：中国之声" value="'+esc(radioQ)+'"'
     +' onkeydown="if(event.key===\'Enter\'){event.preventDefault();doRadioSearch()}">'
     +'<button class="btn primary" onclick="doRadioSearch()">搜索</button></div>'
-    +'<div class="chips">'+[['新闻','news'],['音乐','music'],['交通','traffic'],['故事','talk'],['戏曲','opera'],['体育','sports'],['财经','business'],['怀旧','oldies']]
+    // 地区 / 分类两行：与电视端搜索弹窗一一对应（电视上是左右换 chip、
+    // OK 过滤；手机上是点选）。用户在电视端加的分类筛选，这里必须同步有
+    +'<div class="chip-row"><span class="chip-label">地区</span>'
+    +['北京','上海','广东','浙江','江苏','四川','湖南','湖北','山东','河南','陕西','福建','辽宁','天津','重庆','安徽']
+      .map(function(t){return '<button class="chip'+(radioRegion===t?' on':'')+'" onclick="searchRegion(\''+t+'\')">'+t+'</button>'}).join('')
+    +'</div>'
+    +'<div class="chip-row"><span class="chip-label">分类</span>'
+    +[['新闻','news'],['音乐','music'],['交通','traffic'],['故事','talk'],['戏曲','opera'],['体育','sports'],['财经','business'],['怀旧','oldies']]
       .map(function(t){return '<button class="chip'+(radioTag===t[1]?' on':'')+'" onclick="searchTag(\''+t[1]+'\')">'+t[0]+'</button>'}).join('')
     +'</div>'
     +'<div class="meta">搜索在电脑侧发起，手机只要能连上电脑就行；搜到的台点「加入」进「我的电台」</div></div>';
@@ -702,10 +711,15 @@ function hasStation(id){
 }
 function doRadioSearch(){
   var q=el('r-q')?el('r-q').value.trim():'';
-  radioQ=q;radioTag='';radioRun(q,'');
+  radioQ=q;radioTag='';radioRegion='';radioRun(q,'');
 }
 function searchTag(tag){
-  radioTag=tag;radioQ='';radioRun('',tag);
+  radioTag=tag;radioQ='';radioRegion='';radioRun('',tag);
+}
+// 地区：和电视端一样，把地名塞进查询词，清掉分类
+function searchRegion(city){
+  if(radioRegion===city){radioRegion='';radioQ='';radioRun('','');return}
+  radioRegion=city;radioQ=city;radioTag='';radioRun(city,'');
 }
 function radioRun(q,tag){
   radioBusy=true;radioResults=null;renderRadio();

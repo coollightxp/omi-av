@@ -12,6 +12,7 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../core/theme/app_colors.dart';
+import '../core/app_version.dart';
 import '../core/widgets/standby_shell.dart';
 import '../models/channel.dart';
 import '../services/exit_guard.dart';
@@ -141,8 +142,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   String _msgOsdText = '';
   IconData _msgOsdIcon = Icons.info_outline;
 
-  // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）
-  static const String _appVersion = '1.0.201';
+  // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致，
+  // 由发布脚本自动同步，别再手写在这里——以前写死 1.0.201 一直没改）
+  static const String _appVersion = AppVersion.value;
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   int _exitDialogFocusIndex = 0; // 0=返回（其余项按 _exitOptions 顺序）
@@ -1204,14 +1206,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
       if (!c.locked)
         const _ExitOption(Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
-      // 小窗播放：桌面端窗口置顶缩小；移动端系统画中画（Web 端不支持，不显示）
+      // 小窗播放：桌面端窗口置顶缩小；移动端系统画中画（Web 端不支持，不显示）。
+      // 电视/盒子不做这一项：没有触摸屏、也没有通知栏，画中画只会让遥控器
+      // 操作断掉（用户口径：盒子上小窗与信息栏都没有意义）
       if (!kIsWeb && c.isDesktop)
         _ExitOption(
             c.miniWindow ? Icons.fullscreen : Icons.picture_in_picture_alt,
             c.miniWindow ? '恢复窗口' : '小窗播放',
             Colors.greenAccent,
             'mini'),
-      if (!kIsWeb && !c.isDesktop)
+      if (!kIsWeb && !c.isDesktop && !c.isTv)
         _ExitOption(radio ? Icons.headphones : Icons.picture_in_picture_alt,
             radio ? '后台播放' : '小窗播放', Colors.greenAccent, 'mini'),
       // Web 扫码管理：局域网管理服务未启动（地址为空）时不显示
@@ -2109,17 +2113,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     );
   }
 
-  /// 小窗模式的「恢复窗口」按钮：右上角常驻，鼠标可直接点回原尺寸
+  /// 小窗模式的「恢复窗口」按钮：贴右上角常驻，鼠标可直接点回原尺寸
   /// （小窗口里底部面板会被裁切，面板按钮不总是点得到）。
-  /// 用户反馈左上角「当不当正不正」，挪到右上角
   ///
-  /// top 取 48 而不是 8：鼠标移到顶部 40px 内会弹出 44px 高的悬停标题栏，
-  /// 标题栏在本按钮之上（Stack 后者居上）的命中层会吞掉点击，导致
-  /// 按钮看似存在却点不动。下移到标题栏下沿以外即可避开。
+  /// 位置：top/right 各留 4 的呼吸边距，贴角而不是压在画面中间——
+  /// 420×236 的小窗里，按钮放 48 就已经落在画面下三分之一，看着"当不当
+  /// 正不正"。之前下移是为了避开 44px 高的悬停标题栏，但小窗模式下
+  /// 标题栏根本不呼出（见 build 里的 onHover：miniWindow 直接 return），
+  /// 那 44px 的避让纯属多余；这 4px 只是不让按钮边缘切到窗口圆角。
   Widget _buildMiniRestoreButton(PlayerController c) {
     return Positioned(
-      top: 48,
-      right: 8,
+      top: 4,
+      right: 4,
       child: Material(
         color: Colors.black.withOpacity(0.62),
         borderRadius: BorderRadius.circular(18),
@@ -2288,6 +2293,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 左侧频道面板禁止呼出、右侧节目单不显示，避免"换了台画面没变"
     if (c.isCasting) {
       OsdBus.show('正在投屏，请先断开', icon: Icons.cast_connected);
+      return;
+    }
+    // 投屏等待同理：此刻没有本地播放会话，切台/换源改了也不会出画面，
+    // 还会和发送端握手抢状态。规则与已投屏保持一致（双击返回可退出）
+    if (c.castWaiting) {
+      OsdBus.show('投屏等待中，双击返回可退出', icon: Icons.cast);
       return;
     }
     setState(() {
@@ -2620,6 +2631,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
   void _toggleSettings() {
+    // 投屏等待中没有本地会话：设置里的播放/画面项全是空转，且面板会盖住
+    // 等待提示与倒计时。与左右面板同一规则，双击返回退出等待后再进设置
+    if (!_settingsOpen && context.read<PlayerController>().castWaiting) {
+      OsdBus.show('投屏等待中，双击返回可退出', icon: Icons.cast);
+      return;
+    }
     setState(() {
       _settingsOpen = !_settingsOpen;
       // 打开设置时隐藏悬停标题栏
@@ -2988,6 +3005,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   void _showBottomPanel() {
     final c = context.read<PlayerController>();
     if (c.locked) return;
+    // 只有「投屏等待」不出底栏：此时本地还没有任何会话，暂停/进度都是空的。
+    // 已投屏（isCasting）必须照常呼出——那上面有「断开投屏/静音/旋转」，
+    // 鼠标用户全靠它，挡掉等于没有退出口
+    if (c.castWaiting) return;
     setState(() => _bottomPanelVisible = true);
     _bottomHideTimer?.cancel();
   }
