@@ -3281,12 +3281,13 @@ class PlayerController extends ChangeNotifier {
 
     switch (_sleepAction) {
       case SleepAction.shutdown:
-        OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
+        OsdBus.show('定时关闭：正在关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 先发系统命令再退程序：进程先死也不影响系统照常关闭，
-        // 15 秒内还能在命令行 `shutdown /a` 撤销
+        // 应用内倒计时已经走完，到这里就直接关机。以前发 /t 15，
+        // Windows 会弹「即将注销你的登录」蓝色通知——用户明确不要
+        // 任何系统提示。先发命令再退程序：进程先死不影响关机。
         if (isDesktop) {
-          await shutdownSystem(delaySeconds: 15);
+          await shutdownSystem();
         }
         if (isDesktop) {
           await ExitGuard.quit();

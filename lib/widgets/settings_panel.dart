@@ -3441,7 +3441,12 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 40),
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 360),
+        // 手机上 216 的码占了六成屏宽（用户实测「太大不好看」）：
+        // 短边 <600 的设备用 150，桌面/平板维持 216
+        constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.shortestSide < 600
+                ? 280
+                : 360),
         padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
         decoration: BoxDecoration(
           color: const Color(0xFFF7F8FA),
@@ -3476,7 +3481,8 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
               child: QrImageView(
                 data: url,
                 version: QrVersions.auto,
-                size: 216,
+                size:
+                    MediaQuery.of(context).size.shortestSide < 600 ? 150 : 216,
                 backgroundColor: Colors.white,
                 padding: EdgeInsets.zero,
                 eyeStyle: const QrEyeStyle(
