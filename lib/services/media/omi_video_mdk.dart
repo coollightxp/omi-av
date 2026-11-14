@@ -86,6 +86,10 @@ class OmiVideoMdkController extends ChangeNotifier
           'avio.rw_timeout': '15000000',
           // 起播预读 + 缓冲上限（毫秒）；不丢帧、不改帧率探测
           'buffer.range': '$startMs+$maxMs',
+          // 解封装容错：部分 Icecast 电台（AsiaFM 亚洲粤语台等）的 AAC
+          // 裸流里混着结构损坏的包，ffmpeg 默认判 corrupt 后整段解码失败，
+          // 表现为「有时切过去就报错、有时又正常」。丢掉坏包继续放
+          'avformat.err_detect': 'ignore_err',
         },
       });
     } catch (e) {

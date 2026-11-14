@@ -99,6 +99,9 @@ Offset? _downCursor;
 Offset? _downLocal;
 Offset? _downWindow;
 
+/// 手动跟手路径的一次性闸门：指针事件比 setPosition 快时排队会拖成橡皮筋
+bool _busy = false;
+
 /// 移动：[local] 传当前指针的窗口内坐标，用于判阈值。
 ///
 /// 超过 6px 才算拖动（避免单击带歪窗口）。先请系统接管（原生拖动），
@@ -114,6 +117,7 @@ Future<void> updateWindowDrag({Offset? local}) async {
   } else if (_downCursor == null) {
     return;
   }
+  if (_busy) return;
   _dragStarted = true;
   if (!_nativeTried) {
     _nativeTried = true;
@@ -142,8 +146,6 @@ Future<void> updateWindowDrag({Offset? local}) async {
     _busy = false;
   }
 }
-
-bool _busy = false;
 
 void endWindowDrag() {
   _armGen++;

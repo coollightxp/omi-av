@@ -53,7 +53,15 @@ import 'pip.dart';
 import 'system_power.dart';
 
 /// 播放器状态
-enum PlayerState { idle, loading, playing, paused, error, ended, waitingForNetwork }
+enum PlayerState {
+  idle,
+  loading,
+  playing,
+  paused,
+  error,
+  ended,
+  waitingForNetwork
+}
 
 /// 定时关闭到点后做什么。三者是不同概念，别混：
 /// - [pause]：停止播放、保留当前画面（电台听着睡着，第二天接着听）
@@ -185,6 +193,7 @@ class PlayerController extends ChangeNotifier {
   /// 启动画面开始时刻与最少停留计时（见 _init 末尾）
   final DateTime _bootStartAt = DateTime.now();
   Timer? _bootMinTimer;
+
   /// 启动画面上的状态文案（"正在读取节目列表…"等）
   String _bootStatus = '正在启动…';
 
@@ -209,6 +218,7 @@ class PlayerController extends ChangeNotifier {
   // 播放进度定时刷新（进度条/倒计时）
   Timer? _tickTimer;
   Timer? _epgDayTimer;
+
   /// 已经检查过跨天的日期（yyyyMMdd），避免同一天反复拉节目单
   String _epgDayChecked = '';
 
@@ -230,8 +240,7 @@ class PlayerController extends ChangeNotifier {
     caseSensitive: false,
   );
 
-  static bool isJunkTrack(String t) =>
-      t.isEmpty || _junkTrackRe.hasMatch(t);
+  static bool isJunkTrack(String t) => t.isEmpty || _junkTrackRe.hasMatch(t);
 
   // ---------- 待机态：投屏等待 / 待选台（方案 3.7、第九节） ----------
 
@@ -268,6 +277,7 @@ class PlayerController extends ChangeNotifier {
   double get brightness => _brightness;
   PlayerSettings get settings => _settings;
   OmiVideoBackend? get videoController => _videoController;
+
   /// 电视域分类：整组都是电台的分组不进来（内置电台源已整体标 radio，
   /// 这里再兜一层，防其它源里"广播"分组漏进电视标签）
   List<ChannelCategory> get categories => [
@@ -393,15 +403,13 @@ class PlayerController extends ChangeNotifier {
     // 延迟 20 秒避开启动最忙的时段，失败静默用本地清单
     Timer(const Duration(seconds: 20), () {
       unawaited(sourceManager.maybeAutoUpdateBuiltinCctv().then((_) {
-        if (sourceManager.currentPlaylistId ==
-            PlaylistSource.builtinCctvId) {
+        if (sourceManager.currentPlaylistId == PlaylistSource.builtinCctvId) {
           unawaited(refreshChannels());
         }
       }));
       // 内置电台清单：同一套到期机制，互不影响
       unawaited(sourceManager.maybeAutoUpdateBuiltinRadio().then((_) {
-        if (sourceManager.currentPlaylistId ==
-            PlaylistSource.builtinRadioId) {
+        if (sourceManager.currentPlaylistId == PlaylistSource.builtinRadioId) {
           unawaited(refreshChannels());
         }
       }));
@@ -651,8 +659,7 @@ class PlayerController extends ChangeNotifier {
         str = p.getString(isRadio ? _kLastChannel : _kLastRadioChannel);
       }
       if (str == null || str.isEmpty) return;
-      final Map<String, dynamic> data =
-          jsonDecode(str) as Map<String, dynamic>;
+      final Map<String, dynamic> data = jsonDecode(str) as Map<String, dynamic>;
       final urls = (data['streamUrls'] as List<dynamic>?)
               ?.map((e) => e.toString())
               .where((e) => e.isNotEmpty)
@@ -686,8 +693,7 @@ class PlayerController extends ChangeNotifier {
         groupTitle: data['groupTitle'] as String? ?? '',
         userAgent: data['userAgent'] as String? ?? '',
       );
-      _sourceIndex =
-          srcIdx < target.streamUrls.length ? srcIdx : 0;
+      _sourceIndex = srcIdx < target.streamUrls.length ? srcIdx : 0;
       // 上次是网页频道：启动时也自动打开网页播放
       await playChannel(target);
       // 开机时系统网络/DNS 可能尚未就绪，首次拉流偶发超时失败。
@@ -728,9 +734,8 @@ class PlayerController extends ChangeNotifier {
       var uuid = prefs.getString('dlna_uuid') ?? '';
       if (uuid.isEmpty) {
         final rnd = Random();
-        uuid = List.generate(
-                8, (_) => '0123456789abcdef'[rnd.nextInt(16)])
-            .join();
+        uuid =
+            List.generate(8, (_) => '0123456789abcdef'[rnd.nextInt(16)]).join();
         await prefs.setString('dlna_uuid', uuid);
       }
       await dlnaService.start(
@@ -738,8 +743,7 @@ class PlayerController extends ChangeNotifier {
         hooks: DlnaHooks(
           onPlay: (url, title) => playCastUrl(url, title),
           onPause: () async {
-            if (_videoController != null &&
-                _videoController!.value.isPlaying) {
+            if (_videoController != null && _videoController!.value.isPlaying) {
               await _videoController!.pause();
               _state = PlayerState.paused;
               notifyListeners();
@@ -1024,8 +1028,8 @@ class PlayerController extends ChangeNotifier {
     final rawEpg = (data['epgs'] as List?) ?? const [];
     final epgs = rawEpg
         .whereType<Map>()
-        .map((m) => EpgSource.fromJson(
-            _normalizeRemoteItem(m.cast<String, dynamic>())))
+        .map((m) =>
+            EpgSource.fromJson(_normalizeRemoteItem(m.cast<String, dynamic>())))
         .toList();
     final newEpgId = data['currentEpgId']?.toString();
     final oldEpgId = sourceManager.currentEpgId;
@@ -1112,7 +1116,8 @@ class PlayerController extends ChangeNotifier {
       if (ahRaw != null) autoHide = ahRaw.clamp(1000, 10000);
       int tuneDwell = cur.tuneDwellMs;
       final tdRaw = ri('tuneDwellMs');
-      if (tdRaw != null && const {500, 800, 1200, 2000, 2500, 3000}.contains(tdRaw)) {
+      if (tdRaw != null &&
+          const {500, 800, 1200, 2000, 2500, 3000}.contains(tdRaw)) {
         tuneDwell = tdRaw;
       }
       int sourceTimeout = cur.sourceTimeoutSeconds;
@@ -1442,8 +1447,7 @@ class PlayerController extends ChangeNotifier {
       if (lower.isEmpty) continue;
       for (final cat in _categories) {
         for (final ch in cat.channels) {
-          if (ch.tvgName.isNotEmpty &&
-              ch.tvgName.toLowerCase() == lower) {
+          if (ch.tvgName.isNotEmpty && ch.tvgName.toLowerCase() == lower) {
             return ch;
           }
           final name = ch.name.toLowerCase();
@@ -1481,8 +1485,7 @@ class PlayerController extends ChangeNotifier {
         try {
           await VolumeController.instance.setVolume(_volume);
         } catch (_) {}
-        OsdBus.show('检测到系统音量被静音，已恢复',
-            icon: Icons.volume_up);
+        OsdBus.show('检测到系统音量被静音，已恢复', icon: Icons.volume_up);
       } else {
         _volume = vol;
       }
@@ -1925,7 +1928,8 @@ class PlayerController extends ChangeNotifier {
   void _applyWebQuality() {
     final eval = _webEval;
     if (eval == null) return;
-    eval('window.__omSetRes && window.__omSetRes("${webQualityLevels[_webQualityIndex]}")');
+    eval(
+        'window.__omSetRes && window.__omSetRes("${webQualityLevels[_webQualityIndex]}")');
   }
 
   /// 网页清晰度切换：网页频道前台时，遥控器左右键即调清晰度（档位并入
@@ -1977,16 +1981,14 @@ class PlayerController extends ChangeNotifier {
   Future<void> _openWebPageChannel(Channel channel) async {
     // 网页直播支持已关闭：不创建/调用 WebView，给一条提示后保持原状
     if (!_settings.webEnabled) {
-      OsdBus.show('网页直播支持已关闭，可在 设置 → 系统 中开启',
-          icon: Icons.language);
+      OsdBus.show('网页直播支持已关闭，可在 设置 → 系统 中开启', icon: Icons.language);
       return;
     }
     // 系统没有可用的内嵌网页运行时（老系统/未装 WebView2）：
     // 绝不能创建 InAppWebView 平台视图——创建即抛异常，退出时也容易
     // 连带崩溃。这里直接拦下并提示，普通频道/EPG/多源管理不受影响
     if (!webEmbeddedRuntimeReady()) {
-      OsdBus.show('未检测到可用的 WebView2 运行时，网页频道不可用',
-          icon: Icons.language);
+      OsdBus.show('未检测到可用的 WebView2 运行时，网页频道不可用', icon: Icons.language);
       return;
     }
     // 已在播放同一个网页频道：保持现状（网页已在前台/后台缓冲中），
@@ -2037,8 +2039,8 @@ class PlayerController extends ChangeNotifier {
     // 它会一直盖在画面上（白底 + 吃鼠标 + 吃双击）
     try {
       // ignore: avoid_dynamic_calls
-      unawaited(webController?.setSize(const Size(0, 0)) ??
-          Future<void>.value());
+      unawaited(
+          webController?.setSize(const Size(0, 0)) ?? Future<void>.value());
     } catch (_) {}
     _webPageActive = false;
     _webPageForeground = false;
@@ -2109,8 +2111,7 @@ class PlayerController extends ChangeNotifier {
       if (web != null && t != null) {
         // 网页 → 内置
         _userWebChoiceUrl = null;
-        OsdBus.show('正在切换到内置播放器全屏播放',
-            icon: Icons.switch_video);
+        OsdBus.show('正在切换到内置播放器全屏播放', icon: Icons.switch_video);
         await playSniffedWebStream(
           url: t.url,
           referer: t.referer,
@@ -2171,9 +2172,9 @@ class PlayerController extends ChangeNotifier {
         return true;
       } else if (kind == 'flv') {
         final h = hdrs()..['Range'] = 'bytes=0-4095';
-        final r =
-            await http.get(Uri.parse(url), headers: h).timeout(
-                const Duration(seconds: 8));
+        final r = await http
+            .get(Uri.parse(url), headers: h)
+            .timeout(const Duration(seconds: 8));
         if (r.statusCode != 200 && r.statusCode != 206) return false;
         final ct = r.headers['content-type'] ?? '';
         if (ct.contains('x-flv') || ct.contains('video-flv')) return true;
@@ -2208,10 +2209,9 @@ class PlayerController extends ChangeNotifier {
     required String referer,
     String? userAgent,
   }) async {
-    final web =
-        (_currentChannel != null && _currentChannel!.isWebPage)
-            ? _currentChannel
-            : null;
+    final web = (_currentChannel != null && _currentChannel!.isWebPage)
+        ? _currentChannel
+        : null;
     _lastWebChannel = web;
     // 记住最近一个可直连嗅探目标：控制面板可在网页/内置间来回切换
     _sniffTarget = _SniffTarget(
@@ -2261,8 +2261,7 @@ class PlayerController extends ChangeNotifier {
     _sniffTarget = null;
     final web = _lastWebChannel;
     if (web != null) _abandonedSniffWebUrl = web.webPageUrl;
-    OsdBus.show('内置播放器无法播放该流，已切回网页播放',
-        icon: Icons.language);
+    OsdBus.show('内置播放器无法播放该流，已切回网页播放', icon: Icons.language);
     if (web != null) {
       Future(() => _openWebPageChannel(web));
     }
@@ -2417,6 +2416,7 @@ class PlayerController extends ChangeNotifier {
       _sourceIndex = 0;
     }
     final gen = ++_playGeneration;
+    _instanceBornAt = DateTime.now();
     _state = PlayerState.loading;
     notifyListeners();
 
@@ -2471,8 +2471,7 @@ class PlayerController extends ChangeNotifier {
     if (_isCasting && !isHls) {
       final proxied = await CastStreamProxy.instance.wrapUrl(streamUrl);
       if (proxied != null) {
-        CastLog.write(
-            'cast proxy: ${Uri.parse(streamUrl).host} -> 127.0.0.1');
+        CastLog.write('cast proxy: ${Uri.parse(streamUrl).host} -> 127.0.0.1');
         streamUrl = proxied;
       }
     }
@@ -2481,8 +2480,26 @@ class PlayerController extends ChangeNotifier {
     final dotIdx = segName.lastIndexOf('.');
     final ext = dotIdx >= 0 ? segName.substring(dotIdx + 1) : '';
     const knownMediaExt = {
-      'mp4', 'mkv', 'avi', 'flv', 'ts', 'mov', 'wmv', 'm4v', 'webm', 'mpg',
-      'mpeg', '3gp', 'rmvb', 'rm', 'mp3', 'aac', 'flac', 'ogg', 'wav', 'mka',
+      'mp4',
+      'mkv',
+      'avi',
+      'flv',
+      'ts',
+      'mov',
+      'wmv',
+      'm4v',
+      'webm',
+      'mpg',
+      'mpeg',
+      '3gp',
+      'rmvb',
+      'rm',
+      'mp3',
+      'aac',
+      'flac',
+      'ogg',
+      'wav',
+      'mka',
     };
     String? formatHint;
     if (ext == 'm3u8' || ext == 'm3u') {
@@ -2491,8 +2508,7 @@ class PlayerController extends ChangeNotifier {
       formatHint = 'dash';
     } else if (!knownMediaExt.contains(ext)) {
       // 后缀无法识别（php/html/无后缀等）：预检拿真实 Content-Type
-      final fmt =
-          await inferStreamFormat(url: streamUrl, headers: headers);
+      final fmt = await inferStreamFormat(url: streamUrl, headers: headers);
       formatHint = (fmt == 'hls' || fmt == 'dash') ? fmt : null;
     }
 
@@ -2596,7 +2612,8 @@ class PlayerController extends ChangeNotifier {
       _sniffedFromWeb = false;
       // 记录当前频道，下次启动时恢复。网页嗅探接管时保存的是原网页
       // 频道（webview://），而不是带时效 token 的嗅探流地址
-      if (_lastWebChannel != null && _currentChannel?.id == _lastWebChannel!.id) {
+      if (_lastWebChannel != null &&
+          _currentChannel?.id == _lastWebChannel!.id) {
         await _saveLastChannel(channel: _lastWebChannel);
       } else {
         await _saveLastChannel();
@@ -2697,25 +2714,52 @@ class PlayerController extends ChangeNotifier {
         stopCastAndRestore();
         return;
       }
-      // 音频直播假死：报错了但播放位置还在走（声音没断），先别拆播放器。
-      // 6 秒后复检，位置仍在推进就继续播；真断流位置会停住，再走下面
-      // 的换源/重试链路。
-      if (!_softErrPending &&
-          !_isCasting &&
-          _state == PlayerState.playing &&
-          v.position > Duration.zero) {
+      // ---- 错误判定：一次 error 不足以判死 ----
+      //
+      // 底层是 ffmpeg：AAC 坏包、单帧解码失败、切台瞬间上一条连接的残留
+      // 都会抛一次 error，但流本身还在走——用户实测「弹了重试卡片，后台
+      // 其实一直在正常播」。起播阶段最容易被误判：此时 state 还没到
+      // playing、position 还是 0，旧逻辑直接进重试链路，白重连三次才落到
+      // 「链接失效」错误页。
+      //
+      // 改成：先挂一次延迟复检（起播阶段给 3.5 秒宽限，播放中 2.5 秒），
+      // 期间只要「在播 / 位置推进」就当作误报忽略；真的既没声音也没进度、
+      // 而且错误仍在，才走换源/重试。
+      if (!_softErrPending && !_isCasting) {
+        final born = _instanceBornAt;
+        final earlyStart = born != null &&
+            DateTime.now().difference(born) < const Duration(seconds: 8);
         _softErrPending = true;
         final startPos = v.position;
         _softErrTimer?.cancel();
-        _softErrTimer = Timer(const Duration(seconds: 6), () {
-          _softErrPending = false;
-          final vc = _videoController;
-          // 期间已换台/换实例/已暂停：本次判定作废
-          if (vc == null || !identical(vc, self)) return;
-          if (_state != PlayerState.playing) return;
-          if (vc.value.position > startPos) return;
-          _enterErrorOrRetry();
-        });
+        _softErrTimer = Timer(
+          Duration(milliseconds: earlyStart ? 3500 : 2500),
+          () {
+            _softErrPending = false;
+            final vc = _videoController;
+            // 期间已换台/换实例：本次判定作废
+            if (vc == null || !identical(vc, self)) return;
+            final cur = vc.value;
+            // 在播或进度在走 = 流是活的，这次 error 是噪声。
+            // 如果刚才已经落到错误页，这里顺手恢复——否则会出现
+            // 「界面停在重试卡片、后台声音一直在放」的鬼状态
+            if (cur.isPlaying || cur.position > startPos) {
+              _recoverFromSoftError();
+              return;
+            }
+            // error 已消失（底层自己恢复了）
+            if (!cur.hasError) return;
+            if (hasNextSource) {
+              nextSource();
+              return;
+            }
+            if (_sniffedFromWeb) {
+              _sniffPlaybackFailed();
+              return;
+            }
+            _enterErrorOrRetry();
+          },
+        );
         return;
       }
       // 播放中途出错且有备用源时自动切换
@@ -2735,9 +2779,7 @@ class PlayerController extends ChangeNotifier {
     // 发送端据此知道视频结束。之后按「投屏播完后」设置处理：
     // 0=立即切回直播；N 秒=等待连播（电视剧下一集），超时才切回；
     // -1=一直等待新投屏或用户手动切台/断开。
-    if (_isCasting &&
-        v.isCompleted &&
-        _state == PlayerState.playing) {
+    if (_isCasting && v.isCompleted && _state == PlayerState.playing) {
       _state = PlayerState.ended;
       notifyListeners();
       _castEndedTimer?.cancel();
@@ -2802,8 +2844,7 @@ class PlayerController extends ChangeNotifier {
     _lastAudioSig = sig;
     // 台标：源里给的优先，其次 Radio Browser 索引（与 ChannelBadge 同源）；
     // 原生下载做卡片大图 + 锁屏封面，失败回落应用图标
-    final logoUrl =
-        ch.logoUrl.isNotEmpty ? ch.logoUrl : RadioLogo.logoFor(ch);
+    final logoUrl = ch.logoUrl.isNotEmpty ? ch.logoUrl : RadioLogo.logoFor(ch);
     unawaited(audioNotify(
       name: name,
       program: program,
@@ -2853,9 +2894,8 @@ class PlayerController extends ChangeNotifier {
     _sleepTickTimer?.cancel();
     // 先立刻算一次：徽标/卡片不必等第一个整秒才出现
     final first = sleepRemain;
-    sleepCountdown.value = (first == null || first <= Duration.zero)
-        ? null
-        : first;
+    sleepCountdown.value =
+        (first == null || first <= Duration.zero) ? null : first;
     _sleepTickTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       final r = sleepRemain;
       sleepCountdown.value = (r == null || r <= Duration.zero) ? null : r;
@@ -3312,6 +3352,10 @@ class PlayerController extends ChangeNotifier {
   bool _softErrPending = false;
   Timer? _softErrTimer;
 
+  /// 当前播放实例的创建时刻：判断「起播阶段」用（起播阶段的偶发解码
+  /// 报错要更宽容，见 _onVideoListener 的错误判定）
+  DateTime? _instanceBornAt;
+
   /// 重载当前频道：网页频道整页重新载入（站点脚本随后按频道名重新点台），
   /// 直播流频道从第一个源重新播放。底部面板「重载」按钮与网页卡死
   /// 看门狗都走这里
@@ -3337,6 +3381,26 @@ class PlayerController extends ChangeNotifier {
   /// 重载当前频道（从第一个源重新拉流，与手动点「重载」一致）；
   /// 次数用尽仍失败则判定链接失效，停留错误页等用户手动处理。
   /// 与网页频道卡死自动重载共用同一开关与次数（autoReloadStall/retryTimes）
+  /// 误判纠正：底层其实在播（或有进度），把界面从错误态拉回来。
+  ///
+  /// 触发场景（用户实测）：电台切台/切引擎瞬间，底层抛一次解码 error，
+  /// 界面进了「重试」甚至错误页，但声音从头到尾没断。既然流是活的，
+  /// 就别让用户看着重试卡片听广播。
+  void _recoverFromSoftError() {
+    _softErrPending = false;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    _autoReloadCount = 0;
+    if (_state == PlayerState.error) {
+      _state = PlayerState.playing;
+      _lastError = null;
+      OsdBus.show('已恢复播放', icon: Icons.play_circle_fill);
+      notifyListeners();
+    }
+  }
+
   void _enterErrorOrRetry() {
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
@@ -3352,8 +3416,7 @@ class PlayerController extends ChangeNotifier {
       // 一下又自己恢复（用户实测重进 App 闪「重试」后正常）。保持当前
       // 状态 + OSD 轻提示即可，次数用尽才进错误页等用户手动处理。
       _lastError = null;
-      OsdBus.show('连接失败，正在自动重试（第 $n/$total 次）…',
-          icon: Icons.refresh);
+      OsdBus.show('连接失败，正在自动重试（第 $n/$total 次）…', icon: Icons.refresh);
       notifyListeners();
       final ch = _currentChannel;
       _autoRetryTimer = Timer(const Duration(seconds: 3), () {
@@ -3536,8 +3599,7 @@ class PlayerController extends ChangeNotifier {
       }
 
       await putString(_kAudioPreset, _settings.audioPreset);
-      await putString(
-          _kAudioEqGains, jsonEncode(_settings.audioEqGains));
+      await putString(_kAudioEqGains, jsonEncode(_settings.audioEqGains));
       await putBool(_kSpectrumTexture, _settings.spectrumTexture);
       await putBool(_kRadioMeter, _settings.radioMeter);
       await putString(_kPlayEngine, _settings.playEngine);
@@ -3595,8 +3657,7 @@ class PlayerController extends ChangeNotifier {
   void updateSettings(PlayerSettings settings) {
     final launchChanged = settings.launchAtStartup != _settings.launchAtStartup;
     final topChanged = settings.alwaysOnTop != _settings.alwaysOnTop;
-    final closeToTrayChanged =
-        settings.closeToTray != _settings.closeToTray;
+    final closeToTrayChanged = settings.closeToTray != _settings.closeToTray;
     final dlnaChanged = settings.dlnaEnabled != _settings.dlnaEnabled;
     final qualityChanged =
         settings.preferredQuality != _settings.preferredQuality;
@@ -3806,10 +3867,28 @@ class PlayerController extends ChangeNotifier {
 
   /// 均衡器 10 段中心频率（Hz）
   static const List<int> kEqBands = [
-    31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000,
+    31,
+    62,
+    125,
+    250,
+    500,
+    1000,
+    2000,
+    4000,
+    8000,
+    16000,
   ];
   static const List<String> kEqBandLabels = [
-    '31', '62', '125', '250', '500', '1k', '2k', '4k', '8k', '16k',
+    '31',
+    '62',
+    '125',
+    '250',
+    '500',
+    '1k',
+    '2k',
+    '4k',
+    '8k',
+    '16k',
   ];
 
   List<double> get audioEqGains {
@@ -3863,9 +3942,8 @@ class PlayerController extends ChangeNotifier {
       return List<double>.filled(kEqBands.length, 0);
     }
     try {
-      final list = (jsonDecode(raw) as List)
-          .map((e) => (e as num).toDouble())
-          .toList();
+      final list =
+          (jsonDecode(raw) as List).map((e) => (e as num).toDouble()).toList();
       if (list.length != kEqBands.length) {
         return List<double>.filled(kEqBands.length, 0);
       }
@@ -3925,8 +4003,9 @@ class PlayerController extends ChangeNotifier {
   }
 
   /// 当前频道台标（M3U tvg-logo 或 EPG icon），无则空串
-  String get currentLogo =>
-      _currentChannel == null ? '' : sourceManager.getLogoForChannel(_currentChannel!);
+  String get currentLogo => _currentChannel == null
+      ? ''
+      : sourceManager.getLogoForChannel(_currentChannel!);
 
   /// 视频分辨率文字，如 "1280 × 720"
   String get resolutionText {
@@ -3981,15 +4060,15 @@ class PlayerController extends ChangeNotifier {
     // 周期性下发 Seek 做进度同步，对 HTTP-FLV/HLS 直播执行 seek 会把
     // 播放内核挂起（画面永久卡死），直接忽略
     final rawDur = _videoController?.value.duration ?? Duration.zero;
-    if (_isCasting &&
-        (rawDur <= Duration.zero || _isLiveDuration(rawDur))) {
+    if (_isCasting && (rawDur <= Duration.zero || _isLiveDuration(rawDur))) {
       CastLog.write(
           'seekTo(${position.inSeconds}s) IGNORED rawDur=${rawDur.inSeconds}s (live/unknown)');
       return;
     }
     CastLog.write('seekTo(${position.inSeconds}s) dur=${rawDur.inSeconds}s');
     await _videoController?.seekTo(position);
-    CastLog.write('seekTo(${position.inSeconds}s) done pos=${_videoController?.value.position.inSeconds}s');
+    CastLog.write(
+        'seekTo(${position.inSeconds}s) done pos=${_videoController?.value.position.inSeconds}s');
     // seek 后位置会立即变化，重置看门狗观察计时，避免误判为卡顿
     _watchPosMs = -1;
     _watchAdvanceAt = null;
@@ -4033,8 +4112,8 @@ class PlayerController extends ChangeNotifier {
     final vh = v.size.height.toInt();
     // 电台流没有视频轨，尺寸恒为 0：不能走「有声无画」恢复，
     // 否则会每 8 秒重建一次连接、电台永远起不来
-    final noVideo = !(_currentChannel?.isRadio ?? false) &&
-        (vw <= 0 || vh <= 0);
+    final noVideo =
+        !(_currentChannel?.isRadio ?? false) && (vw <= 0 || vh <= 0);
 
     // buffering 持续计时。两条豁免规则：
     // 1. 已缓冲末尾仍在增长 = 下载在推进只是慢（长视频远距 seek 后 CDN
@@ -4166,7 +4245,8 @@ class PlayerController extends ChangeNotifier {
       CastLog.write('cast RECOVERY aborted: superseded by new play');
       return;
     }
-    bool stale() => !_isCasting ||
+    bool stale() =>
+        !_isCasting ||
         _currentChannel != ch ||
         !identical(_videoController, mine);
     if (!isLive && savedPos > const Duration(seconds: 2)) {
@@ -4192,8 +4272,7 @@ class PlayerController extends ChangeNotifier {
       }
       if (ready) {
         if (stale()) return; // seek 前最后确认，等待期间被新播放取代则放弃
-        CastLog.write(
-            'cast RECOVERY resume seek ${savedPos.inSeconds}s');
+        CastLog.write('cast RECOVERY resume seek ${savedPos.inSeconds}s');
         try {
           await mine.seekTo(savedPos);
           CastLog.write(
@@ -4302,8 +4381,7 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
     switch (err) {
       case null:
-        OsdBus.show('开始录音（原始流直存，不转码）',
-            icon: Icons.fiber_manual_record);
+        OsdBus.show('开始录音（原始流直存，不转码）', icon: Icons.fiber_manual_record);
       case 'busy':
         break;
       case 'hls':
@@ -4375,8 +4453,7 @@ class PlayerController extends ChangeNotifier {
     // 2) tvg-name 精确匹配
     for (final cat in _categories) {
       for (final ch in cat.channels) {
-        if (ch.tvgName.isNotEmpty &&
-            ch.tvgName.toLowerCase() == lowerId) {
+        if (ch.tvgName.isNotEmpty && ch.tvgName.toLowerCase() == lowerId) {
           return ch;
         }
       }
@@ -4415,13 +4492,16 @@ class PlayerController extends ChangeNotifier {
   Future<bool> startRecording() async {
     if (_webPageActive) return _startWebRecording();
     final vc = _videoController;
-    if (_currentChannel == null || vc == null || !vc.value.isInitialized ||
-        !isDesktop || _isRecording) {
+    if (_currentChannel == null ||
+        vc == null ||
+        !vc.value.isInitialized ||
+        !isDesktop ||
+        _isRecording) {
       return false;
     }
     try {
-      _recordPath =
-          await captureService.buildFilePath('recordings', _currentChannel!.name, 'mp4');
+      _recordPath = await captureService.buildFilePath(
+          'recordings', _currentChannel!.name, 'mp4');
       // libmpv 的 stream-record 直接落盘原始流（TS/MP4 容器由流本身决定）
       final ok = await vc.startRecord(_recordPath!);
       if (!ok) {
@@ -4578,9 +4658,7 @@ class PlayerController extends ChangeNotifier {
       final r = await eval(_webRecStartJs);
       final rs = r?.toString() ?? '';
       if (!rs.startsWith('ok')) {
-        _lastError = rs == 'novideo'
-            ? '网页中未找到可录制的视频'
-            : '网页不支持视频录制';
+        _lastError = rs == 'novideo' ? '网页中未找到可录制的视频' : '网页不支持视频录制';
         return false;
       }
       // JS 返回实际容器格式（mp4 优先，回退 webm）
@@ -4605,8 +4683,7 @@ class PlayerController extends ChangeNotifier {
     try {
       await eval?.call(_webRecStopJs);
       if (done != null) {
-        await done.future.timeout(const Duration(seconds: 5),
-            onTimeout: () {});
+        await done.future.timeout(const Duration(seconds: 5), onTimeout: () {});
       }
     } catch (_) {}
     final path = _webRecBytes > 0 ? _recordPath : null;
@@ -4663,7 +4740,8 @@ class PlayerController extends ChangeNotifier {
       final png = await vc.snapshotPng();
       if (png == null || png.isEmpty) return null;
       final name = _currentChannel?.name ?? 'screenshot';
-      final path = await captureService.buildFilePath('screenshots', name, 'png');
+      final path =
+          await captureService.buildFilePath('screenshots', name, 'png');
       await captureService.saveBytes(path, png);
       return path;
     } catch (e) {
@@ -4711,8 +4789,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> ensureRadioCatalog() async {
     if (_radioCatalogLoaded) return;
     try {
-      _radioCategories =
-          await RadioCatalog.all(tvChannels: _tvSourceChannels);
+      _radioCategories = await RadioCatalog.all(tvChannels: _tvSourceChannels);
       _radioCatalogLoaded = true;
     } catch (e) {
       debugPrint('[RadioCatalog] load failed: $e');
@@ -4723,8 +4800,7 @@ class PlayerController extends ChangeNotifier {
 
   /// 「我的电台」增删后只重建自己那一段，不重读安装包
   void _refreshRadioCatalog() {
-    final rebuilt =
-        RadioCatalog.rebuildIfLoaded(tvChannels: _tvSourceChannels);
+    final rebuilt = RadioCatalog.rebuildIfLoaded(tvChannels: _tvSourceChannels);
     if (rebuilt == null) return;
     _radioCategories = rebuilt;
   }
@@ -4795,8 +4871,7 @@ class PlayerController extends ChangeNotifier {
 
   /// 编辑播放列表（名称/地址/类型）；当前源地址变化时重新加载频道
   Future<void> editPlaylist(PlaylistSource source) async {
-    final idx =
-        sourceManager.playlists.indexWhere((p) => p.id == source.id);
+    final idx = sourceManager.playlists.indexWhere((p) => p.id == source.id);
     final urlChanged =
         idx >= 0 && sourceManager.playlists[idx].url != source.url;
     await sourceManager.updatePlaylist(source);
@@ -4835,8 +4910,7 @@ class PlayerController extends ChangeNotifier {
   /// 编辑 EPG（名称/地址）；当前源地址变化时重新加载节目单
   Future<void> editEpg(EpgSource source) async {
     final idx = sourceManager.epgs.indexWhere((e) => e.id == source.id);
-    final urlChanged =
-        idx >= 0 && sourceManager.epgs[idx].url != source.url;
+    final urlChanged = idx >= 0 && sourceManager.epgs[idx].url != source.url;
     await sourceManager.updateEpg(source);
     if (urlChanged && sourceManager.currentEpgId == source.id) {
       await refreshEpg();
@@ -4920,8 +4994,10 @@ class PlayerController extends ChangeNotifier {
     final list = List<OmiVideoBackend>.from(_orphanControllers);
     _orphanControllers.clear();
     for (final c in list) {
-      c.release().timeout(const Duration(seconds: 8)).then((_) {},
-          onError: (_) {});
+      c
+          .release()
+          .timeout(const Duration(seconds: 8))
+          .then((_) {}, onError: (_) {});
     }
   }
 

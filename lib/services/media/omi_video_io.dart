@@ -173,6 +173,8 @@ class OmiVideoController extends ChangeNotifier
   }
 
   Future<void> initialize() async {
+    // 必须在 open 之前设：这是 demuxer 的 AVOption，open 时读一次
+    await _applyFaultTolerance();
     if (_radioSpectrum) await _applySpectrumFilter();
     await _player.open(
       Media(_url.toString(), httpHeaders: _headers),
@@ -308,6 +310,28 @@ class OmiVideoController extends ChangeNotifier
       _spectrumApplied = true;
     } catch (e) {
       debugPrint('[OmiVideo] lavfi-complex failed: $e');
+    }
+  }
+
+  /// 解封装容错：`err_detect=ignore_err`。
+  ///
+  /// 部分 Icecast 电台（实测 AsiaFM 亚洲粤语台 `yyt.asiafm.net:8000/asiafm`，
+  /// Content-Type: audio/aacp）的 AAC 流里混着结构损坏的包——PCE 采样率索引
+  /// 与容器配置不符、保留了保留位、声道元素未分配。ffmpeg 默认把这类包判成
+  /// corrupt 后整段解码失败，libmpv 抛 `Error decoding audio`，上层就显示
+  /// 「播放失败」。而损坏包是随机出现的，所以表现成「有时候切过去就报错、
+  /// 有时候又正常」。
+  ///
+  /// 让 demuxer 直接丢掉坏包（不送进解码器）即可：实测该台连续解码 8 秒，
+  /// astats 电平正常、无 NaN/Inf、听感无感。对正常流没有副作用——它只是把
+  /// 「碰到轻微损坏就整段失败」改成「跳过损坏继续播」。
+  Future<void> _applyFaultTolerance() async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    try {
+      await platform.setProperty('demuxer-lavf-o', 'err_detect=ignore_err');
+    } catch (e) {
+      debugPrint('[OmiVideo] err_detect failed: $e');
     }
   }
 
