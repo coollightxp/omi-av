@@ -234,13 +234,17 @@ class PlayerController extends ChangeNotifier {
 
   /// 很多电台的 ICY 元数据就是流文件名（index.m3u8 / 64k.mp3），
   /// 拿它当"曲目"显示非常难看。带协议头或以媒体扩展名结尾的一律视为
-  /// 非曲目，界面不显示、记录也不收
+  /// 非曲目，界面不显示、记录也不收。
+  /// 另：含 U+FFFD（替换符）的视为乱码——不少中文台（AsiaFM 等）的
+  /// ICY 标题是 GBK 编码，mpv 按 UTF-8 解出来就是一串替换符，
+  /// 显示出来就是乱码，宁可当无曲目处理
   static final RegExp _junkTrackRe = RegExp(
     r'(://|\.(m3u8?|mp3|aac|flv|ts|mp4|ogg|opus)(\?.*)?$)',
     caseSensitive: false,
   );
 
-  static bool isJunkTrack(String t) => t.isEmpty || _junkTrackRe.hasMatch(t);
+  static bool isJunkTrack(String t) =>
+      t.isEmpty || t.contains('\uFFFD') || _junkTrackRe.hasMatch(t);
 
   // ---------- 待机态：投屏等待 / 待选台（方案 3.7、第九节） ----------
 
@@ -1601,6 +1605,7 @@ class PlayerController extends ChangeNotifier {
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
     _softErrPending = false;
+    _softErrSecondRound = false;
     _softErrTimer?.cancel();
     _softErrTimer = null;
     _autoRetryTimer?.cancel();
@@ -2749,6 +2754,35 @@ class PlayerController extends ChangeNotifier {
             }
             // error 已消失（底层自己恢复了）
             if (!cur.hasError) return;
+            // 电台 AAC 流坏包扎堆：一轮复检不够，再给一轮 4 秒——
+            // 两轮过去仍然既没进度又在报错，才真正走重试
+            if ((_currentChannel?.isRadio ?? false) && !_softErrSecondRound) {
+              _softErrSecondRound = true;
+              _softErrPending = true;
+              final pos2 = cur.position;
+              _softErrTimer?.cancel();
+              _softErrTimer = Timer(const Duration(milliseconds: 4000), () {
+                _softErrPending = false;
+                final vc2 = _videoController;
+                if (vc2 == null || !identical(vc2, self)) return;
+                final v2 = vc2.value;
+                if (v2.isPlaying || v2.position > pos2) {
+                  _recoverFromSoftError();
+                  return;
+                }
+                if (!v2.hasError) return;
+                if (hasNextSource) {
+                  nextSource();
+                  return;
+                }
+                if (_sniffedFromWeb) {
+                  _sniffPlaybackFailed();
+                  return;
+                }
+                _enterErrorOrRetry();
+              });
+              return;
+            }
             if (hasNextSource) {
               nextSource();
               return;
@@ -3352,6 +3386,10 @@ class PlayerController extends ChangeNotifier {
   bool _softErrPending = false;
   Timer? _softErrTimer;
 
+  /// 电台第二轮复检标志：AAC 坏包偶尔扎堆出现，一轮宽限里
+  /// 「既没进度又在报错」不代表流真断了，再给一轮 4 秒复检
+  bool _softErrSecondRound = false;
+
   /// 当前播放实例的创建时刻：判断「起播阶段」用（起播阶段的偶发解码
   /// 报错要更宽容，见 _onVideoListener 的错误判定）
   DateTime? _instanceBornAt;
@@ -3388,6 +3426,7 @@ class PlayerController extends ChangeNotifier {
   /// 就别让用户看着重试卡片听广播。
   void _recoverFromSoftError() {
     _softErrPending = false;
+    _softErrSecondRound = false;
     _softErrTimer?.cancel();
     _softErrTimer = null;
     _autoRetryTimer?.cancel();

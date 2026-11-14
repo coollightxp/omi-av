@@ -166,10 +166,13 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   /// 上下键改为在设置内容里纵向移动焦点。
   ///
-  /// 不使用几何方向计算（focusInDirection）也不依赖 WidgetOrder 遍历：
-  /// 直接取「面板根节点下所有可聚焦节点」的树顺序（即界面自上而下的顺序），
-  /// 上一格/下一格走一步。这样不会隔行跳、也不会穿到播放页其它面板。
-  /// 到最上面落到页签栏，页签栏上用左右键切页。
+  /// 明确两区模型（修「按一下左右之后两个高亮同时跳」）：
+  /// - 焦点在左侧分类栏（整栏只有 _navFocus 一个停靠点）：
+  ///   上下 = 切分类；左右/OK 由 _SettingsNav 自己处理（右 = 进内容区）；
+  /// - 焦点在右侧内容区：上下 = 在内容控件间移动（不含分类栏），
+  ///   到顶再按上回分类栏；宽屏下按左也回分类栏（见 _onPanelKeyEvent）。
+  /// 分类项不再可聚焦（ExcludeFocus），焦点框永远只有一个，
+  /// 不会出现「分类高亮 + 内容焦点框各跳各的」。
   bool _onVerticalKey(KeyEvent event) {
     if (!widget.isOpen) return false;
     // 设置里弹出对话框（编辑源、二维码等）时放行：焦点属于对话框，
@@ -180,8 +183,35 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   /// 面板根焦点上的按键：与上面的全局处理器共用同一套逻辑，
   /// 保证焦点在面板内时按键一定先在这里被吃掉
-  KeyEventResult _onPanelKeyEvent(FocusNode node, KeyEvent event) =>
-      _handleVertical(event) ? KeyEventResult.handled : KeyEventResult.ignored;
+  KeyEventResult _onPanelKeyEvent(FocusNode node, KeyEvent event) {
+    if (_handleVertical(event)) return KeyEventResult.handled;
+    // 宽屏双栏：内容区按左 = 回分类栏（遥控器用户左右双向都能走）
+    if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.arrowLeft &&
+          !_navFocus.hasFocus &&
+          !_focusInEditableText &&
+          _contentStops().any((n) => n.hasFocus)) {
+        _navFocus.requestFocus();
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
+
+  bool get _focusInEditableText =>
+      FocusManager.instance.primaryFocus?.context
+          ?.findAncestorWidgetOfExactType<EditableText>() !=
+      null;
+
+  /// 内容区所有可聚焦节点的树顺序（不含分类栏）
+  List<FocusNode> _contentStops() {
+    final stops = <FocusNode>[];
+    for (final n in _panelFocusNode.traversalDescendants) {
+      if (n == _navFocus) continue;
+      if (n.canRequestFocus && n.context != null) stops.add(n);
+    }
+    return stops;
+  }
 
   bool _handleVertical(KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
@@ -192,29 +222,37 @@ class _SettingsPanelState extends State<SettingsPanel>
     // 焦点在输入框内时放行：输入法（尤其是中文）用上下键选候选词，
     // 面板不能在这里抢焦点切控件——否则选词过程被中断，老系统
     // （Win10 1607）上还会出现输入框无响应（AppHangB1）
-    final focusCtx = FocusManager.instance.primaryFocus?.context;
-    if (focusCtx != null &&
-        focusCtx.findAncestorWidgetOfExactType<EditableText>() != null) {
-      return false;
+    if (_focusInEditableText) return false;
+
+    // 分类栏持有焦点：上下直接切分类（分类项不可聚焦，没有第二个停靠点）
+    if (_navFocus.hasFocus) {
+      final i = _tabController.index + (isUp ? -1 : 1);
+      if (i >= 0 && i < _tabController.length) {
+        _tabController.index = i;
+      }
+      return true;
     }
 
-    // 面板内所有可聚焦节点的树顺序（页签栏在最前，内容自上而下）
-    final stops = <FocusNode>[];
-    for (final n in _panelFocusNode.traversalDescendants) {
-      if (n.canRequestFocus && n.context != null) stops.add(n);
+    final stops = _contentStops();
+    if (stops.isEmpty) {
+      _navFocus.requestFocus();
+      return true;
     }
-    if (stops.isEmpty) return false;
-
     final focus = FocusManager.instance.primaryFocus;
     final idx = stops.indexWhere((n) => n == focus || n.hasFocus);
     if (idx < 0) {
-      // 焦点还停在面板外（刚打开时）：从页签栏进入
+      // 焦点还停在面板外（刚打开时）：从分类栏进入
       _navFocus.requestFocus();
       return true;
     }
     final target = idx + (isUp ? -1 : 1);
-    if (target < 0 || target >= stops.length) {
-      // 已到顶/到底：吞掉按键，停在原处
+    if (target < 0) {
+      // 内容区到顶：回分类栏
+      _navFocus.requestFocus();
+      return true;
+    }
+    if (target >= stops.length) {
+      // 已到底：吞掉按键，停在原处
       return true;
     }
     stops[target].requestFocus();
@@ -521,42 +559,48 @@ class _SettingsNav extends StatelessWidget {
             ? AppColors.accent.withValues(alpha: 0.18)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          onTap: () => onChanged(i),
-          child: Container(
-            padding: EdgeInsets.symmetric(
-              horizontal: vertical ? 12 : 14,
-              vertical: vertical ? 11 : 8,
-            ),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: selected ? AppColors.accent : Colors.transparent,
-                width: 1,
+        // 分类项不参与焦点遍历：整栏只有外层 _navFocus 一个停靠点，
+        // 上下键不会在分类项之间落焦点框（否则会出现「分类高亮 +
+        // 焦点框」两套视觉同时跳）。鼠标点击不受影响
+        child: ExcludeFocus(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => onChanged(i),
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: vertical ? 12 : 14,
+                vertical: vertical ? 11 : 8,
               ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  icon,
-                  size: 18,
-                  color: selected ? AppColors.accent : Colors.white54,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: selected ? AppColors.accent : Colors.transparent,
+                  width: 1,
                 ),
-                if (vertical)
-                  const SizedBox(width: 10)
-                else
-                  const SizedBox(width: 6),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: selected ? Colors.white : Colors.white60,
-                    fontSize: vertical ? 14 : 13,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    icon,
+                    size: 18,
+                    color: selected ? AppColors.accent : Colors.white54,
                   ),
-                ),
-              ],
+                  if (vertical)
+                    const SizedBox(width: 10)
+                  else
+                    const SizedBox(width: 6),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      color: selected ? Colors.white : Colors.white60,
+                      fontSize: vertical ? 14 : 13,
+                      fontWeight:
+                          selected ? FontWeight.w600 : FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),

@@ -681,7 +681,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           ),
                         ),
 
-                      // 小窗模式：左上角常驻「恢复窗口」按钮。小窗口（420×236）
+                      // 小窗模式：右上角常驻「恢复窗口」按钮。小窗口（420×236）
                       // 里底部控制面板会被窄窗口裁切，只靠面板按钮容易点不到
                       if (controller.isDesktop && controller.miniWindow)
                         _buildMiniRestoreButton(controller),
@@ -2104,8 +2104,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     );
   }
 
-  /// 小窗模式的「恢复窗口」按钮：左上角常驻，鼠标可直接点回原尺寸
-  /// （小窗口里底部面板会被裁切，面板按钮不总是点得到）
+  /// 小窗模式的「恢复窗口」按钮：右上角常驻，鼠标可直接点回原尺寸
+  /// （小窗口里底部面板会被裁切，面板按钮不总是点得到）。
+  /// 用户反馈左上角「当不当正不正」，挪到右上角
   ///
   /// top 取 48 而不是 8：鼠标移到顶部 40px 内会弹出 44px 高的悬停标题栏，
   /// 标题栏在本按钮之上（Stack 后者居上）的命中层会吞掉点击，导致
@@ -2113,7 +2114,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   Widget _buildMiniRestoreButton(PlayerController c) {
     return Positioned(
       top: 48,
-      left: 8,
+      right: 8,
       child: Material(
         color: Colors.black.withOpacity(0.62),
         borderRadius: BorderRadius.circular(18),

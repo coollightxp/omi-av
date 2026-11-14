@@ -72,6 +72,11 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   int _kbCategoryIndex = 0;
   int _kbChannelIndex = 0;
 
+  /// 焦点是否停在顶部「电视 / 电台」胶囊上。
+  /// 分类列表按到最顶再按上即跳到这里；此时左/右/OK 切换两个标签，
+  /// 按下回到分类列表（用户反馈：想切电台却上不去、跳不到顶上）
+  bool _kbTabFocused = false;
+
   /// OK 长按收藏：按下边沿启动计时，800ms 内抬起=播放，超时=收藏/取消收藏
   Timer? _okLongTimer;
   bool _okLongFired = false;
@@ -195,6 +200,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         }
       }
       _lastOpenChannelId = cur?.id;
+      // 每次打开都从分类列表开始，焦点不留在顶部标签行
+      _kbTabFocused = false;
       final favs = _favsOf(controller);
 
       // 上次停留在收藏场景：场景仍非空时保持层级，
@@ -203,11 +210,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           _isFavCat(_selectedCategory!.id) &&
           favs.isNotEmpty) {
         _kbCategoryIndex = 0;
-        final favIdx = cur == null
-            ? -1
-            : favs.indexWhere((ch) => ch.id == cur.id);
-        _kbChannelIndex =
-            favIdx >= 0 ? favIdx.clamp(0, favs.length - 1) : 0;
+        final favIdx =
+            cur == null ? -1 : favs.indexWhere((ch) => ch.id == cur.id);
+        _kbChannelIndex = favIdx >= 0 ? favIdx.clamp(0, favs.length - 1) : 0;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _scrollToCurrentChannel();
         });
@@ -281,25 +286,64 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     final cat = _selectedCategory;
     if (cat == null) {
       // ===== 第一级：分类列表（长按收藏只作用于第二级频道行） =====
-      if (cats.isEmpty) return;
       if (!isDown) return;
+      // 焦点停在顶部「电视 / 电台」胶囊：左/右/OK/菜单 = 互换两个标签，
+      // 按下 = 回到分类列表，按上 = 已在最顶，停住
+      if (_kbTabFocused) {
+        switch (action) {
+          case 'left':
+          case 'right':
+          case 'ok':
+          case 'menu':
+            _switchTab(1 - _mediaTab);
+          case 'down':
+            setState(() {
+              _kbTabFocused = false;
+              _kbCategoryIndex = 0;
+            });
+          case 'up':
+            break;
+        }
+        return;
+      }
       switch (action) {
         case 'left':
           // 第一级按左键 = 切换 电视/电台（右键留给"进入分类"）
           _switchTab(1 - _mediaTab);
+          return;
         case 'menu':
           // 方案 12.6：列表打开时菜单键空闲，用作一键切域
           _switchTab(1 - _mediaTab);
+          return;
         case 'up':
+          // 已在分类列表最顶：再按上跳到「电视 / 电台」胶囊，
+          // 在那里按 OK 即可切换到电台（分类为空时同样可跳上去）
+          if (cats.isEmpty || _kbCategoryIndex <= 0) {
+            setState(() {
+              _kbCategoryIndex = 0;
+              _kbTabFocused = true;
+            });
+            OsdBus.show('按 OK / 左右键 切换「电视 / 电台」', icon: Icons.swap_horiz);
+            return;
+          }
           setState(() => _kbCategoryIndex =
               (_kbCategoryIndex - 1).clamp(0, cats.length - 1));
           _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+          return;
         case 'down':
+          if (cats.isEmpty) return;
           setState(() => _kbCategoryIndex =
               (_kbCategoryIndex + 1).clamp(0, cats.length - 1));
           _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+          return;
         case 'ok':
         case 'right':
+          if (cats.isEmpty) {
+            // 没有分类时 OK/右键没有落点，直接把焦点送到顶部分类胶囊，
+            // 让用户能切到另一个标签（否则死在这里）
+            setState(() => _kbTabFocused = true);
+            return;
+          }
           final next = cats[_kbCategoryIndex.clamp(0, cats.length - 1)];
           final nextChannels = _channelsOf(controller, next);
           // 进入收藏场景 = 切到该场景，此后收藏动作落到这个场景
@@ -325,6 +369,16 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       switch (action) {
         case 'up':
           if (!isDown || channels.isEmpty) break;
+          // 频道列表已到顶：再按上回分类列表（再按上就跳到
+          // 「电视 / 电台」胶囊）。比只能按左键回去更符合遥控器直觉
+          if (_kbChannelIndex <= 0) {
+            setState(() {
+              _selectedCategory = null;
+              _kbTabFocused = false;
+            });
+            _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+            break;
+          }
           setState(() => _kbChannelIndex =
               (_kbChannelIndex - 1).clamp(0, channels.length - 1));
           _scrollKeyboardTo(_channelKeys, _kbChannelIndex);
@@ -335,7 +389,10 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           _scrollKeyboardTo(_channelKeys, _kbChannelIndex);
         case 'left':
           if (!isDown) break;
-          setState(() => _selectedCategory = null);
+          setState(() {
+            _selectedCategory = null;
+            _kbTabFocused = false;
+          });
         case 'ok':
           if (channels.isEmpty) break;
           if (isDown) {
@@ -426,18 +483,18 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     final controller = context.read<PlayerController>();
     final cat = _selectedCategory;
     if (cat == null) return;
-    final idx = cat.channels
-        .indexWhere((ch) => ch.id == controller.currentChannel?.id);
+    final idx =
+        cat.channels.indexWhere((ch) => ch.id == controller.currentChannel?.id);
     if (idx < 0) return;
     // 注意：打开瞬间 _channelScroll 还没有 clients，
     // 不能在这里同步判断 hasClients，交给 postFrame
-    _ensureVisibleIndex(_channelScroll, _channelKeys, idx,
-        const Duration(milliseconds: 300));
+    _ensureVisibleIndex(
+        _channelScroll, _channelKeys, idx, const Duration(milliseconds: 300));
   }
 
   /// 频道全局序号（跨分类累加，1 起），与数字选台/OSD 序号一致
-  int _globalIndexOf(PlayerController controller, ChannelCategory cat,
-      int indexInCat) {
+  int _globalIndexOf(
+      PlayerController controller, ChannelCategory cat, int indexInCat) {
     // 序号口径必须与数字跳台一致：电视=当前源，电台=跨源目录
     // （PlayerController._switchDomainChannels 用的是同一份列表）
     final cats = _catsOf(controller);
@@ -482,8 +539,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     final compact = shortest < 600;
     // 任何情况下不超过屏幕宽度的 92%：逻辑分辨率很小的电视盒子上
     // 面板不能宽于屏幕，否则内容会被裁掉
-    final drawerW =
-        designW.clamp(0.0, size.width * 0.92).toDouble();
+    final drawerW = designW.clamp(0.0, size.width * 0.92).toDouble();
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
@@ -514,8 +570,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                 // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
                 color: AppColors.overlay,
                 elevation: 28,
-                shape: const Border(
-                    right: BorderSide(color: AppColors.stroke)),
+                shape: const Border(right: BorderSide(color: AppColors.stroke)),
                 child: SafeArea(
                   child: Column(
                     children: [
@@ -609,8 +664,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   /// 电视 / 电台 两个标签。电台是跨源聚合（内置精选 + 我的电台），
   /// 切换标签不动当前节目源，点哪个台播哪个台。
   Widget _buildTabBar(PlayerController controller) {
-    final tvCount = controller.categories
-        .fold<int>(0, (a, e) => a + e.channels.length);
+    final tvCount =
+        controller.categories.fold<int>(0, (a, e) => a + e.channels.length);
     final radioCount = controller.radioCategories
         .fold<int>(0, (a, e) => a + e.channels.length);
     return Padding(
@@ -623,6 +678,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               icon: Icons.live_tv,
               count: tvCount,
               selected: _mediaTab == 0,
+              focused: _kbTabFocused && _mediaTab == 0,
               onTap: () => _switchTab(0),
             ),
           ),
@@ -634,6 +690,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               count: radioCount,
               loading: !controller.radioCatalogLoaded,
               selected: _mediaTab == 1,
+              focused: _kbTabFocused && _mediaTab == 1,
               onTap: () => _switchTab(1),
             ),
           ),
@@ -691,9 +748,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                   color: Colors.white38),
               const SizedBox(height: 16),
               Text(
-                radioOnlySource
-                    ? '当前源只有电台'
-                    : (isRadioTab ? '还没有电台' : '暂无频道列表'),
+                radioOnlySource ? '当前源只有电台' : (isRadioTab ? '还没有电台' : '暂无频道列表'),
                 style: TextStyle(color: Colors.white54, fontSize: t.listHeader),
               ),
               const SizedBox(height: 8),
@@ -716,9 +771,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                 icon: Icon(
                     radioOnlySource
                         ? Icons.radio
-                        : (isRadioTab
-                            ? Icons.travel_explore
-                            : Icons.settings),
+                        : (isRadioTab ? Icons.travel_explore : Icons.settings),
                     size: 18),
                 label: Text(radioOnlySource
                     ? '去电台标签'
@@ -739,8 +792,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       itemCount: cats.length + favCats.length,
       itemBuilder: (context, index) {
         final isFav = index < favCats.length;
-        final cat =
-            isFav ? favCats[index] : cats[index - favCats.length];
+        final cat = isFav ? favCats[index] : cats[index - favCats.length];
         final key = _categoryKeys.putIfAbsent(index, GlobalKey.new);
         final isMine = cat.id == PlaylistSource.radioLibraryId;
         return _CategoryTile(
@@ -752,7 +804,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                   ? (isMine ? Icons.library_music : Icons.radio)
                   : Icons.category),
           iconColor: isFav ? Colors.amber : Colors.blueAccent,
-          keyboardSelected: index == _kbCategoryIndex,
+          keyboardSelected: index == _kbCategoryIndex && !_kbTabFocused,
           onTap: () => setState(() {
             // 进入收藏场景 = 切到该场景，此后收藏动作落到这个场景
             if (_isFavCat(cat.id)) {
@@ -811,6 +863,7 @@ class _TabBtn extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.loading = false,
+    this.focused = false,
   });
 
   final String label;
@@ -818,6 +871,9 @@ class _TabBtn extends StatelessWidget {
   final int count;
   final bool selected;
   final bool loading;
+
+  /// 遥控器焦点停在标签行时的白框（分类列表按到最顶再按上到这里）
+  final bool focused;
   final VoidCallback onTap;
 
   @override
@@ -835,7 +891,10 @@ class _TabBtn extends StatelessWidget {
               : Colors.white.withValues(alpha: 0.05),
           borderRadius: BorderRadius.circular(9),
           border: Border.all(
-            color: selected ? AppColors.accent : AppColors.stroke,
+            color: focused
+                ? Colors.white
+                : (selected ? AppColors.accent : AppColors.stroke),
+            width: focused ? 1.6 : 1,
           ),
         ),
         child: Row(
@@ -932,7 +991,8 @@ class _CategoryTile extends StatelessWidget {
                   ),
                   Text(
                     '${category.channels.length} 个频道',
-                    style: TextStyle(color: Colors.white54, fontSize: t.listSub),
+                    style:
+                        TextStyle(color: Colors.white54, fontSize: t.listSub),
                   ),
                 ],
               ),

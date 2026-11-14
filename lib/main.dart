@@ -11,6 +11,7 @@ import 'services/exit_guard.dart';
 import 'services/media_capture_service.dart';
 import 'services/tray_service.dart';
 import 'services/web_env.dart';
+import 'services/win_error_mode.dart';
 
 /// 窗口关闭拦截：设置开了「✕ 最小化到托盘」时隐藏窗口继续播放，
 /// 托盘图标左键恢复；否则交给 [ExitGuard] 走统一的有序退出
@@ -28,6 +29,11 @@ class _OmiWindowListener extends WindowListener {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Windows：先压掉系统级崩溃弹窗（Exception Processing Message
+  // 0xc0000005 随机弹出，要点「确定」才消失）。必须尽早执行，
+  // 抢在 mpv/WebView2 原生线程起来之前
+  suppressWindowsCrashDialogs();
 
   // 注意：不能让 SharedPreferences 失败阻塞 runApp——平台通道一失败
   // main 直接死掉就是永久白屏（安卓实测 NoSuchMethodError 时整机白屏
