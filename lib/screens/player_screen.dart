@@ -192,12 +192,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   StateSetter? _tpRefresh;
   BuildContext? _tpDialogCtx;
 
-  // 临时诊断（v2.1.37，确认后删）：两条按键通道各收到多少次、最近一个是
-  // 什么，直接画在卡片底部。用户截一张图就能判断「键到底进没进程序」，
-  // 不用再一轮一轮猜。
-  int _dbgHook = 0;
-  int _dbgKey = 0;
-  String _dbgLast = '无';
 
   // 两个侧边面板的状态句柄：遥控器/键盘导航由本页统一分发
   // （HardwareKeyboard 与 Windows 低级钩子走同一入口）
@@ -1057,6 +1051,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       c.unlock();
       return;
     }
+    // 抽屉 / EPG 面板盖在设置面板上（或单独打开）：返回键先关这一层。
+    // 以前这两个分支排在 _settingsOpen 之后，设置面板开着时按返回
+    // 关掉的是被盖住看不见的设置面板——抽屉纹丝不动，看起来就是
+    // 「退出面板时好时坏」（2026-11-14 安卓实测）
+    if (_leftDrawerOpen) {
+      setState(() => _leftDrawerOpen = false);
+      return;
+    }
+    if (_rightEpgOpen) {
+      setState(() => _rightEpgOpen = false);
+      return;
+    }
+
     if (_settingsOpen && settingsChildOpen.value) {
       // 设置卡片上压着下一级卡片（编辑/确认/诊断/扫码…）：这一下返回
       // 只关那一层，设置卡片留着。以前直接落到下面的分支，一下把
@@ -1105,14 +1112,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _castExitArmAt = now;
         OsdBus.show('再按一次退出投屏', icon: Icons.cast_connected);
       }
-      return;
-    }
-    if (_leftDrawerOpen) {
-      setState(() => _leftDrawerOpen = false);
-      return;
-    }
-    if (_rightEpgOpen) {
-      setState(() => _rightEpgOpen = false);
       return;
     }
     if (_bottomPanelVisible) {
@@ -1967,7 +1966,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       remainText: remainText,
       atText: _sleepSetAt != null ? sleepHhmm(_sleepSetAt!) : '23:30',
       onTap: _onSleepChipTap,
-      debugText: '按键诊断：钩子 $_dbgHook · 键盘 $_dbgKey · 最近 $_dbgLast',
     );
   }
 
@@ -2186,21 +2184,29 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _tpRefresh?.call(() {});
         return true;
       case 'left':
+        // 左键：确定 -> 取消 -> 回到分钟列（用户定稿的方向：
+        // 按钮行是「取消 确定」，往左走就是往回走）
         if (_tpCol == 2) {
-          _tpBtn = 0;
+          if (_tpBtn == 0) {
+            _tpBtn = 1;
+          } else {
+            _tpCol = 1;
+          }
         } else if (_tpCol == 1) {
           _tpCol = 0;
         }
         _tpRefresh?.call(() {});
         return true;
       case 'right':
+        // 右键：时 -> 分 -> 取消 -> 确定，一条道往右走，
+        // 不再出现「分钟往右直接落到确定、再往右又跳回左边的取消」
         if (_tpCol == 0) {
           _tpCol = 1;
         } else if (_tpCol == 1) {
-          _tpCol = 2; // 分钟再往右 = 跳出数字区，落到「确定」
-          _tpBtn = 0;
+          _tpCol = 2;
+          _tpBtn = 1; // 先到「取消」
         } else {
-          _tpBtn = 1;
+          _tpBtn = 0; // 再往右到「确定」
         }
         _tpRefresh?.call(() {});
         return true;
@@ -2294,11 +2300,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final k = event.logicalKey;
     final isDown = event is KeyDownEvent;
     final isUp = event is KeyUpEvent;
-    _dbgKey++;
-    _dbgLast = '键盘 ${k.debugName ?? '?'}'
-        '${isDown ? '↓' : isUp ? '↑' : '↻'}';
-    if (_sleepCardOpen) _sleepRefresh?.call(() {});
-    if (_timePickOpen) _tpRefresh?.call(() {});
 
     // 键盘/遥控器一有动作就隐藏鼠标指针（鼠标一移动原生侧自动恢复）
     if (isDown) _hidePointerForRemote();
@@ -2348,15 +2349,68 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 所有按键一律交给它，否则按返回会把底下的设置面板关掉
     if (RadioSearchDialog.active) return false;
 
+    // 设置里弹出的编辑弹窗（编辑播放列表/编辑 EPG）自带行导航：
+    // 返回只关弹窗这一层，不能落到 _handleBackPressed 把设置卡片
+    // 也一起关掉（2026-11-14 用户实测）
+    // settingsChildOpen：本文件之外（settings_panel 内统一包装）弹出的
+    // 下一级卡片，返回同样只关它那一层
+    if (_settingsOpen &&
+        (settingsEditDialogOpen || settingsChildOpen.value)) {
+      return false;
+    }
+    // 有对话框（二维码/退出确认、设置面板里的下拉菜单等）盖在页面上时：
+    // 遥控器按键统一收口——OK/返回/菜单关闭弹层，方向键消费不穿透。
+    // 必须排在抽屉/设置之前：以前这条在 _settingsOpen 之后，设置面板
+    // 开着时弹出的下拉框（如「自动检查间隔」）按 OK/返回会被设置分支
+    // 截走——要么关掉整个设置面板，要么把键放行给焦点树弄乱弹层
+    // （安卓实测：选台时「关闭/每周/每月」菜单突然弹出来）
+    if (_modalRouteOpen) {
+      return _handleKeyWhileModal(k, isDown, isUp);
+    }
+    // 频道抽屉 / EPG 面板打开（哪怕设置面板也开着、被盖在下面）：
+    // 按键一律交给面板，绝不放行给 Flutter 焦点系统。以前只要设置
+    // 面板开着，抽屉就收不到键：OK 同时触发面板行播放和设置里拿到
+    // 焦点的控件（下拉框展开、列表乱跳、返回关错层）——安卓实测
+    // 「联动+穿透+退出面板时好时坏」的根源
+    if (_navPanelOpen) {
+      if (k == LogicalKeyboardKey.select ||
+          k == LogicalKeyboardKey.enter ||
+          k == LogicalKeyboardKey.numpadEnter ||
+          k == LogicalKeyboardKey.gameButtonA) {
+        if (isDown) _okDown();
+        if (isUp) _okUp();
+        return true;
+      }
+      if (k == LogicalKeyboardKey.arrowLeft ||
+          k == LogicalKeyboardKey.arrowRight) {
+        final left = k == LogicalKeyboardKey.arrowLeft;
+        if (isDown) _lrDown(left);
+        if (isUp) _lrUp(left);
+        return true;
+      }
+      if (k == LogicalKeyboardKey.contextMenu) {
+        if (isDown) _menuDown();
+        if (isUp) _menuUp();
+        return true;
+      }
+      if (k == LogicalKeyboardKey.arrowUp) {
+        if (isDown) _verticalKey(true);
+        return true;
+      }
+      if (k == LogicalKeyboardKey.arrowDown) {
+        if (isDown) _verticalKey(false);
+        return true;
+      }
+      if (k == LogicalKeyboardKey.escape) {
+        if (isDown) _handleBackPressed();
+        return true;
+      }
+      // 其余键一律吞掉：面板开着时不给焦点系统任何穿透机会
+      return true;
+    }
     // 设置面板里有输入框（URL、数字等）：仅返回/菜单键负责关面板，
     // 其余按键放行给输入框
     if (_settingsOpen) {
-      // 设置里弹出的编辑弹窗（编辑播放列表/编辑 EPG）自带行导航：
-      // 返回只关弹窗这一层，不能落到 _handleBackPressed 把设置卡片
-      // 也一起关掉（2026-11-14 用户实测）
-      // settingsChildOpen：本文件之外（settings_panel 内统一包装）弹出的
-      // 下一级卡片，返回同样只关它那一层
-      if (settingsEditDialogOpen || settingsChildOpen.value) return false;
       if (isDown &&
           (k == LogicalKeyboardKey.escape ||
               k == LogicalKeyboardKey.contextMenu)) {
@@ -2364,12 +2418,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         return true;
       }
       return false;
-    }
-    // 有对话框（二维码/退出确认等）盖在页面上时：遥控器按键统一收口——
-    // OK/返回/菜单关闭弹层，方向键消费不穿透，避免弹层是在 OK 按下后
-    // 才弹出时抬起事件丢失，导致按住状态卡死、关弹层后误触节目列表
-    if (_modalRouteOpen) {
-      return _handleKeyWhileModal(k, isDown, isUp);
     }
 
     // OK 与左右方向键要区分短按/长按，走按下-抬起配对处理
@@ -3450,10 +3498,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// isDown=true 按下边沿、false 抬起边沿，与 Flutter 路径共用
   /// 同一套短按/长按/面板导航逻辑。
   void _onNativeAction(String action, bool isDown) {
-    _dbgHook++;
-    _dbgLast = '钩子 $action${isDown ? '↓' : '↑'}';
-    if (_sleepCardOpen) _sleepRefresh?.call(() {});
-    if (_timePickOpen) _tpRefresh?.call(() {});
     if (!mounted) return;
     if (isDown) _hidePointerForRemote();
     if (isDown) {
@@ -3583,6 +3627,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'space':
         controller.togglePlayPause();
       case 'm':
+      case 'mute':
+        // 'mute' 来自 Windows 钩子的 VK_VOLUME_MUTE（遥控器静音键）：
+        // 钩子已把系统那一路吞掉，这里只切换播放器自己的静音，
+        // 不再出现「程序和系统各静音一次、取消时只解除一处」
         _onShortcut('mute');
       case 'f':
         _onShortcut('fullscreen');

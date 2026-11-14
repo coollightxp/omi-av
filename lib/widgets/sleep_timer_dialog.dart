@@ -65,9 +65,6 @@ Widget buildSleepTimerCard({
   /// 语义与遥控器完全一致（动作行只改选中、倒计时立即生效、设置…进时间
   /// 选择器、取消定时直接清除）。传 null 时整张卡片不可点。
   void Function(int row, int col)? onTap,
-  /// 临时诊断文字（v2.1.37）：显示两条按键通道各收到几个键、最近一个是什么。
-  /// 确认遥控器在这张卡片上恢复正常后删除。
-  String? debugText,
 }) {
   Widget chip(SleepCardItem item, bool focused, int r, int c) {
     final selected = item.selected;
@@ -188,12 +185,6 @@ Widget buildSleepTimerCard({
             const Text('上下换一行 · 左右换一项 · OK 确定 · 返回退出',
                 style:
                     TextStyle(color: AppColors.textTertiary, fontSize: 11)),
-            if (debugText != null) ...[
-              const SizedBox(height: 8),
-              Text(debugText,
-                  style: const TextStyle(
-                      color: AppColors.success, fontSize: 10.5)),
-            ],
           ],
         ),
       ),
