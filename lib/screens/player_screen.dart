@@ -922,6 +922,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                             settingsChildOpen.value = false;
                             // 关闭后恢复低级钩子对数字键的选台拦截
                             _winHotkeys.setCapture(true);
+                            // 收走输入框焦点与 IME：面板只是滑下去、仍挂载，
+                            // 输入连接留着的话，之后按上下键切台会把它再
+                            // 拉起来（安卓实测「切台蹦输入法」）
+                            _hideIme();
+                            FocusManager.instance.primaryFocus?.unfocus();
                             WidgetsBinding.instance.addPostFrameCallback(
                                 (_) => _ensureShortcutFocus());
                           },
@@ -1119,6 +1124,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       // 与设置面板右上角关闭、S 键切换保持一致：恢复低级钩子的数字键
       // 拦截，否则网页前台时数字选台会失灵
       _winHotkeys.setCapture(true);
+      // 返回键关设置同样要收走输入焦点：滑下去的输入框若还连着输入
+      // 连接，之后切台的按键会把 IME 再拉起来
+      _hideIme();
+      FocusManager.instance.primaryFocus?.unfocus();
       return;
     }
     // 定时关闭已进入最后 60 秒（画面里有倒计时卡片）：返回键 = 取消定时，
@@ -2415,7 +2424,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       final editing = pf?.context
               ?.findAncestorWidgetOfExactType<EditableText>() !=
           null;
-      if (!editing) _hideIme();
+      // 只有「设置面板开着、而且真的在输入框里」才放行；
+      // 设置关着时焦点若还挂在隐藏输入框上（残留），照样压掉
+      if (!editing || !_settingsOpen) _hideIme();
     }
 
     // 锁定状态：除「返回键 / 菜单键」解锁外，所有按键一律屏蔽，

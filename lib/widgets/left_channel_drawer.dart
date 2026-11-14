@@ -280,11 +280,23 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     }
   }
 
+  /// 打开在线电台搜索。**先开弹窗、再把抽屉收起来**：抽屉留在弹窗
+  /// 后面时，它自己的上下键处理还活着（用户实测：从抽屉顶部图标点出来
+  /// 的搜索面板遥控器完全动不了，而设置里打开的同一个面板能操作）。
+  /// 弹窗与抽屉是同一个组件，差别只在打开时抽屉还开着。
+  void _openRadioSearch() {
+    RadioSearchDialog.show(context);
+    widget.onClose();
+  }
+
   /// 遥控器/键盘按键入口（由 PlayerScreen 统一分发，Windows 低级钩子
   /// 与 HardwareKeyboard 走同一入口）。
   /// action: up/down/left/right/ok/back；back 与 ok 在按下边沿触发。
   void handleRemoteKey(String action, {required bool isDown}) {
     if (!widget.isOpen || !mounted) return;
+    // 电台搜索弹窗盖在抽屉上时，按键归弹窗：抽屉不许在暗地里
+    // 继续吃上下键（否则弹窗看起来「遥控器完全没反应」）
+    if (RadioSearchDialog.active) return;
     if (action == 'back') {
       if (isDown) widget.onClose();
       return;
@@ -643,7 +655,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             IconButton(
               icon: const Icon(Icons.travel_explore, color: Colors.white70),
               tooltip: '搜索在线电台',
-              onPressed: () => RadioSearchDialog.show(context),
+              onPressed: _openRadioSearch,
             ),
           IconButton(
             icon: const Icon(Icons.close, color: Colors.white70),
@@ -788,7 +800,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                 onPressed: radioOnlySource
                     ? () => _switchTab(1)
                     : (isRadioTab
-                        ? () => RadioSearchDialog.show(context)
+                        ? _openRadioSearch
                         : widget.onOpenSettings),
                 icon: Icon(
                     radioOnlySource
