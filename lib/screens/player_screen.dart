@@ -546,6 +546,23 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _rootFocusNode.requestFocus();
   }
 
+  /// 面板（抽屉/EPG）开着时的软键盘兜底：理论上这条路径下不该有任何
+  /// 输入框，但 ① 设置里的输入框焦点可能被归档后残留；② 外接 2.4G
+  /// 遥控器（HID 键盘设备）某些键值会让系统在无焦点状态下拉起 IME
+  /// （2026-11-14 实测：抽屉里上下移动有时蹦出输入法）。方向键进来时
+  /// 顺手把文本焦点收回根节点、软键盘压回去，零副作用。
+  void _hideIme() {
+    final f = FocusManager.instance.primaryFocus;
+    if (f != null &&
+        f.context?.findAncestorWidgetOfExactType<EditableText>() != null) {
+      f.unfocus();
+      // 不走 _ensureShortcutFocus：它对设置面板打开的情况直接返回，
+      // 而抽屉盖在设置上时按键已归抽屉，输入框不该再持有焦点
+      _rootFocusNode.requestFocus();
+    }
+    SystemChannels.textInput.invokeMethod('TextInput.hide');
+  }
+
   @override
   Widget build(BuildContext context) {
     // 返回键始终拦截，统一交给 _handleBackPressed 处理
@@ -737,8 +754,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       // 控制面板/EPG（见 _buildGestureLayer），不再使用贴边
                       // 窄热区；桌面端保留 hover 边缘自动弹出
 
-                      // 桌面端 hover 边缘自动弹出（小窗里不响应，避免面板盖画面）
-                      if (controller.isDesktop && !mini) ...[
+                      // 桌面端 hover 边缘自动弹出（小窗里不响应，避免面板盖画面）。
+                      // 投屏状态（等待/播放中）也不弹：底部控制条（进度条/暂停）
+                      // 有用要保留，左右两个面板只会把画面挡掉
+                      if (controller.isDesktop &&
+                          !mini &&
+                          !controller.castWaiting &&
+                          !controller.isCasting) ...[
                         // 左边缘：不在 onExit 里启动隐藏计时——面板滑入会覆盖
                         // 这个 20px 触发区，触发区合成 onExit 与面板 onEnter 的
                         // 回调顺序若为「先入后出」，会把面板刚取消的隐藏定时器
@@ -1441,6 +1463,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     return r != null && !r.isCurrent;
   }
 
+  /// 「返回/退出」类按键：Esc（键盘）、遥控器返回（安卓 goBack /
+  /// 浏览器返回 browserBack）。以前各弹层只认 Esc，遥控器按返回落到
+  /// 「不认识的键」里，卡片取消不了（2026-11-14 实测）
+  bool _isBackKey(LogicalKeyboardKey k) =>
+      k == LogicalKeyboardKey.escape ||
+      k == LogicalKeyboardKey.goBack ||
+      k == LogicalKeyboardKey.browserBack;
+
   /// 对话框打开期间的遥控器/键盘按键收口。
   /// 返回 true=已消费；不认识的键放行给弹层内控件（如输入框）。
   bool _handleKeyWhileModal(LogicalKeyboardKey k, bool isDown, bool isUp) {
@@ -1502,7 +1532,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return true;
     }
-    if (k == LogicalKeyboardKey.escape) {
+    if (_isBackKey(k)) {
       if (isDown) Navigator.of(context).maybePop();
       return true;
     }
@@ -1551,7 +1581,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return true;
     }
-    if (k == LogicalKeyboardKey.escape) {
+    if (_isBackKey(k)) {
       if (isDown && _exitDialogOpen) {
         _exitDialogOpen = false;
         Navigator.of(context).pop<String?>(null);
@@ -1818,7 +1848,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
       return true;
     }
-    if (k == LogicalKeyboardKey.contextMenu || k == LogicalKeyboardKey.escape) {
+    if (k == LogicalKeyboardKey.contextMenu || _isBackKey(k)) {
       if (isDown && _shutdownDialogOpen) _confirmShutdown(false);
       return true;
     }
@@ -1959,6 +1989,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         ? '${_sleepSetAt == null ? '剩余' : '${sleepHhmm(_sleepSetAt!)} 关闭 · 剩余'}'
             ' ${sleepFmtRemain(_sleepRemain!)}'
         : null;
+    // 时间选择器打开期间把定时卡片本体藏起来（与设置面板进下一级
+    // 同一方式）：原来是叠在顶上两层都看得见，返回取消时才露出
+    if (_timePickOpen) return const SizedBox.shrink();
     return buildSleepTimerCard(
       rows: _sleepRows(),
       row: _sleepRow,
@@ -2394,14 +2427,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         return true;
       }
       if (k == LogicalKeyboardKey.arrowUp) {
-        if (isDown) _verticalKey(true);
+        if (isDown) {
+          _hideIme();
+          _verticalKey(true);
+        }
         return true;
       }
       if (k == LogicalKeyboardKey.arrowDown) {
-        if (isDown) _verticalKey(false);
+        if (isDown) {
+          _hideIme();
+          _verticalKey(false);
+        }
         return true;
       }
-      if (k == LogicalKeyboardKey.escape) {
+      if (_isBackKey(k)) {
         if (isDown) _handleBackPressed();
         return true;
       }
@@ -2451,8 +2490,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       if (isDown) _verticalKey(false);
       return true;
     }
-    // Esc / 遥控器返回：层级关闭（与 Android Back 同一入口）
-    if (k == LogicalKeyboardKey.escape) {
+    // Esc / 遥控器返回：层级关闭（与 Android Back 同一入口）。
+    // 遥控器返回是 goBack/browserBack 不是 escape——以前不认，落到
+    // 「其余按键」放行，靠引擎默认返回 + PopScope 兜底才能进层级处理
+    if (_isBackKey(k)) {
       if (isDown) _handleBackPressed();
       return true;
     }
@@ -2973,6 +3014,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       if (left) {
         _leftDrawerOpen = true;
         _rightEpgOpen = false;
+        _hideIme();
       } else {
         _rightEpgOpen = true;
         _leftDrawerOpen = false;
@@ -3005,6 +3047,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else {
           _leftDrawerOpen = true;
           _rightEpgOpen = false;
+          _hideIme();
         }
       } else {
         if (_rightEpgOpen) {
@@ -3429,6 +3472,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final c = context.read<PlayerController>();
     c.dismissAwaitingChannelPick();
     if (mounted) setState(() => _leftDrawerOpen = true);
+    _hideIme();
   }
 
   /// 待选台拦截：返回 true 表示这次按键已被待机画面消费

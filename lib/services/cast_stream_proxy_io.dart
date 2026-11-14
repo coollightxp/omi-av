@@ -90,12 +90,20 @@ class CastStreamProxy {
             // 明确声明支持断点续传（内核判定可 seek 的依据）
             req.response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
           }
+          // 逐块 flush 会把高码率流的吞吐拖下来、数据到达内核的节奏
+          // 变碎（mdk 缓冲薄，扛不住这种碎喂食，表现为音频卡一下、
+          // 画面丢帧追）。改成攒批：每 256KB 或流结束时才 flush 一次
+          var flushed = 0;
           await for (final chunk
               in outResp.timeout(const Duration(seconds: 15))) {
             sent += chunk.length;
             req.response.add(chunk);
-            await req.response.flush();
+            if (sent - flushed >= 256 * 1024) {
+              await req.response.flush();
+              flushed = sent;
+            }
           }
+          await req.response.flush();
           if (range != null || attempt > 1) {
             CastLog.write(
                 'cast proxy ok range=${range ?? "-"} bytes=$sent attempt=$attempt');
