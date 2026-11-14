@@ -60,10 +60,10 @@ class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
     _registered = true;
     _bufferSecs = bufferSeconds;
     // 上限 120 秒与 MPV 侧一致；起播预读最多 3 秒，避免大缓冲等太久。
-    // 上限保底 15 秒（原默认 5 秒）：投屏是点播高码率长 GOP，5 秒的
-    // 毫秒窗口填不上消耗就会音频欠载、视频丢帧追（2026-11-14 实测）；
-    // 上限只是允许多囤，起播预读不变所以不影响出声速度
-    final maxMs = bufferSeconds.clamp(15, 120) * 1000;
+    // 注意：上限不能为投屏一味放大（2.1.40 试过保底 15 秒）——直播是
+    // 实时流，MDK 囤得越多延迟越大、越容易丢帧追（2026-11-14 实测直播
+    // 反而卡）。投屏卡顿的改善靠代理攒批 flush，这里保持 5 秒默认
+    final maxMs = bufferSeconds.clamp(5, 120) * 1000;
     final startMs = maxMs < 3000 ? maxMs : 3000;
     try {
       fvp.registerWith(options: <String, dynamic>{

@@ -189,8 +189,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   int _tpMin = 30;
   int _tpCol = 0; // 0=时 1=分 2=按钮行
   int _tpBtn = 0; // 0=确定 1=取消
-  StateSetter? _tpRefresh;
-  BuildContext? _tpDialogCtx;
 
 
   // 两个侧边面板的状态句柄：遥控器/键盘导航由本页统一分发
@@ -560,6 +558,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       // 而抽屉盖在设置上时按键已归抽屉，输入框不该再持有焦点
       _rootFocusNode.requestFocus();
     }
+    // 网页源频道：播放页里有一块原生 WebView 平台视图，遥控器按键
+    // 焦点漏进它内部的可编辑元素时，Flutter 侧的 TextInput.hide 管不到
+    // ——IME、连带的「从剪贴板选择」框都由 WebView 拉起
+    // （2026-11-14 实测：CCTV13/14 列表滚到顶、按分类都会蹦输入法）。
+    // 让 WebView 内部失焦，输入连接随之断开
+    _WebChannelOverlayState.active?.clearFocus();
     SystemChannels.textInput.invokeMethod('TextInput.hide');
   }
 
@@ -1989,9 +1993,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         ? '${_sleepSetAt == null ? '剩余' : '${sleepHhmm(_sleepSetAt!)} 关闭 · 剩余'}'
             ' ${sleepFmtRemain(_sleepRemain!)}'
         : null;
-    // 时间选择器打开期间把定时卡片本体藏起来（与设置面板进下一级
-    // 同一方式）：原来是叠在顶上两层都看得见，返回取消时才露出
-    if (_timePickOpen) return const SizedBox.shrink();
+    // 时间选择器不再用独立 showDialog 叠在卡片上（旧版两层路由叠着、
+    // 返回时两层一起关），改为与设置面板进下一级同构：**同一个窗口内
+    // 切子页**。打开/关闭靠 _sleepRefresh 重建本 builder，物理上不可能
+    // 出现叠层，返回也只在本窗口内切换
+    if (_timePickOpen) {
+      return buildRemoteTimePickerCard(
+        title: '定时关闭时间',
+        hour: _tpHour,
+        minute: _tpMin,
+        col: _tpCol,
+        btn: _tpBtn,
+        onTap: _onTimePickTap,
+      );
+    }
     return buildSleepTimerCard(
       rows: _sleepRows(),
       row: _sleepRow,
@@ -2036,10 +2051,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _popSleepCard(
             SleepPick(DateTime.now().add(Duration(minutes: m)), _sleepAction));
       case 2:
-        unawaited(_openTimePicker(TimeOfDay(
+        _openTimePicker(TimeOfDay(
           hour: _sleepSetAt?.hour ?? 23,
           minute: _sleepSetAt?.minute ?? 30,
-        )));
+        ));
       case 3:
         _popSleepCard(SleepPick(null, _sleepAction));
     }
@@ -2099,10 +2114,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                 DateTime.now().add(Duration(minutes: m)), _sleepAction));
           case 2:
             // 进时间选择器：不关本卡片，选完一起生效
-            unawaited(_openTimePicker(TimeOfDay(
+            _openTimePicker(TimeOfDay(
               hour: _sleepSetAt?.hour ?? 23,
               minute: _sleepSetAt?.minute ?? 30,
-            )));
+            ));
           case 3:
             _popSleepCard(SleepPick(null, _sleepAction));
           default:
@@ -2153,43 +2168,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
 
-  /// 打开时间选择卡片（纯视觉，按键在 _handleTimePickKey）。
-  /// 选完确定时：连同定时关闭卡片一起生效并关闭。
-  Future<void> _openTimePicker(TimeOfDay initial) async {
-    if (_timePickOpen) return;
+  /// 打开时间选择「子页」（同一个定时卡片窗口内切换，不开新路由）。
+  /// 选完确定时：连同定时关闭卡片一起生效并关闭（见 _popTimePicker）。
+  void _openTimePicker(TimeOfDay initial) {
+    if (!_sleepCardOpen || _timePickOpen) return;
     _tpHour = initial.hour;
     _tpMin = initial.minute;
     _tpCol = 0;
     _tpBtn = 0;
     _timePickOpen = true;
-    _syncRemoteCapture();
-    TimeOfDay? result;
-    try {
-      result = await showDialog<TimeOfDay>(
-        context: context,
-        barrierColor: AppColors.scrim,
-        builder: (_) => StatefulBuilder(
-          builder: (ctx, setD) {
-            _tpRefresh = setD;
-            _tpDialogCtx = ctx;
-            return buildRemoteTimePickerCard(
-              title: '定时关闭时间',
-              hour: _tpHour,
-              minute: _tpMin,
-              col: _tpCol,
-              btn: _tpBtn,
-              onTap: _onTimePickTap,
-            );
-          },
-        ),
-      );
-    } finally {
-      _timePickOpen = false;
-      _tpRefresh = null;
-      _tpDialogCtx = null;
-      _syncRemoteCapture();
-    }
-    if (result != null && _sleepCardOpen) {
+    _sleepRefresh?.call(() {});
+  }
+
+  /// 关闭时间选择子页。[result] 非空 = 确定：连同定时卡片一起生效并关闭；
+  /// 空 = 取消：只切回定时卡片主页。
+  void _popTimePicker(TimeOfDay? result) {
+    _timePickOpen = false;
+    _sleepRefresh?.call(() {});
+    if (result != null) {
       _popSleepCard(
           SleepPick(nextSleepAt(result.hour, result.minute), _sleepAction));
     }
@@ -2214,7 +2210,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             _tpMin = (_tpMin + (up ? 1 : -1) + 60) % 60;
           }
         }
-        _tpRefresh?.call(() {});
+        _sleepRefresh?.call(() {});
         return true;
       case 'left':
         // 左键：确定 -> 取消 -> 回到分钟列（用户定稿的方向：
@@ -2228,7 +2224,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else if (_tpCol == 1) {
           _tpCol = 0;
         }
-        _tpRefresh?.call(() {});
+        _sleepRefresh?.call(() {});
         return true;
       case 'right':
         // 右键：时 -> 分 -> 取消 -> 确定，一条道往右走，
@@ -2241,21 +2237,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else {
           _tpBtn = 0; // 再往右到「确定」
         }
-        _tpRefresh?.call(() {});
+        _sleepRefresh?.call(() {});
         return true;
       case 'ok':
-        final ctx = _tpDialogCtx;
         if (_tpCol == 2 && _tpBtn == 1) {
-          if (ctx != null && ctx.mounted) Navigator.of(ctx).pop(); // 取消
-        } else if (ctx != null && ctx.mounted) {
-          Navigator.of(ctx).pop(TimeOfDay(hour: _tpHour, minute: _tpMin));
+          _popTimePicker(null); // 取消
+        } else {
+          _popTimePicker(TimeOfDay(hour: _tpHour, minute: _tpMin));
         }
         return true;
       case 'back':
       case 'esc':
       case 'menu':
-        final ctx = _tpDialogCtx;
-        if (ctx != null && ctx.mounted) Navigator.of(ctx).pop();
+        _popTimePicker(null); // 只切回定时卡片，不再连底层一起关
         return true;
       default:
         return true; // 其余键吞掉
@@ -2283,19 +2277,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'minute':
         _tpCol = 1;
       case 'ok':
-        final ctx = _tpDialogCtx;
-        if (ctx != null && ctx.mounted) {
-          Navigator.of(ctx).pop(TimeOfDay(hour: _tpHour, minute: _tpMin));
-        }
+        _popTimePicker(TimeOfDay(hour: _tpHour, minute: _tpMin));
         return;
       case 'cancel':
-        final ctx = _tpDialogCtx;
-        if (ctx != null && ctx.mounted) Navigator.of(ctx).pop();
+        _popTimePicker(null);
         return;
       default:
         return;
     }
-    _tpRefresh?.call(() {});
+    _sleepRefresh?.call(() {});
   }
 
   /// 硬件键盘路径：翻译成语义动作后交给 _handleTimePickAction
@@ -2406,6 +2396,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 焦点的控件（下拉框展开、列表乱跳、返回关错层）——安卓实测
     // 「联动+穿透+退出面板时好时坏」的根源
     if (_navPanelOpen) {
+      // 面板开着时每个按键的按下沿都压一次 IME（原来只压上下键，
+      // 用户实测左右选台、OK 进分类照样蹦输入法/剪贴板框）
+      if (isDown) _hideIme();
       if (k == LogicalKeyboardKey.select ||
           k == LogicalKeyboardKey.enter ||
           k == LogicalKeyboardKey.numpadEnter ||
@@ -2427,17 +2420,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         return true;
       }
       if (k == LogicalKeyboardKey.arrowUp) {
-        if (isDown) {
-          _hideIme();
-          _verticalKey(true);
-        }
+        if (isDown) _verticalKey(true);
         return true;
       }
       if (k == LogicalKeyboardKey.arrowDown) {
-        if (isDown) {
-          _hideIme();
-          _verticalKey(false);
-        }
+        if (isDown) _verticalKey(false);
         return true;
       }
       if (_isBackKey(k)) {
@@ -3896,6 +3883,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
   /// 诊断用：加载进度分桶（25/50/75/100）去重，避免每帧进度回调刷屏
   int _progBucket = 0;
   InAppWebViewController? _webController;
+
+  /// 当前活跃的网页控制器（静态注册）：播放页主 State 拿不到本 State 的
+  /// 实例，但压 IME 时需要让 WebView 内部失焦（否则网页源频道上遥控器
+  /// 按键焦点漏进可编辑元素，系统输入法/剪贴板框会被拉起）
+  static InAppWebViewController? active;
 
   /// 后台缓冲期间每秒探测一次页面 <video> 的真实起播状态
   Timer? _probeTimer;
@@ -6714,6 +6706,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 打点须在 WebDiag.end() 之前（end 后日志会话关闭不再记录）
     final c = _webController;
     _webController = null;
+    if (identical(active, c)) active = null;
     if (c != null) {
       WebDiag.log('wv_dispose');
       // 先停掉页面加载与媒体，再销毁：页面还在解码/请求时直接释放
@@ -7386,6 +7379,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
           ),
           onWebViewCreated: (controller) async {
             _webController = controller;
+            active = controller;
             // 内置播放失败回退过、或用户手动选择网页观看的页面，
             // 本次运行不再尝试自动接管（起播即推网页前台）
             _sniffAbandoned = context
