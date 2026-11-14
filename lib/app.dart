@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 
@@ -53,36 +54,45 @@ class _OmiMaterialApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = context.read<PlayerController>();
     return MaterialApp(
-          title: '欧米视听',
-          debugShowCheckedModeBanner: false,
-          // 中文本地化：输入框长按菜单（粘贴/复制）等系统文案用中文，
-          // 否则 Android/Windows 上长按输入框弹出的都是英文
-          localizationsDelegates: const [
-            GlobalMaterialLocalizations.delegate,
-            GlobalWidgetsLocalizations.delegate,
-            GlobalCupertinoLocalizations.delegate,
-          ],
-          supportedLocales: const [Locale('zh', 'CN'), Locale('en')],
-          locale: const Locale('zh', 'CN'),
-          // 全局统一字体族须在 ThemeData 构造函数传入（copyWith 无此参数）
-          theme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.dark,
-            fontFamily: _platformFontFamily,
-          ).copyWith(
-            scaffoldBackgroundColor: Colors.black,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: Colors.blueAccent,
-              brightness: Brightness.dark,
-            ),
-          ),
-          builder: (context, child) => ListenableBuilder(
-            listenable: Listenable.merge([
-              controller.settingsNotifier,
-              controller.tvModeNotifier,
-            ]),
-            child: child,
-            builder: (context, child) {
+      title: '欧米视听',
+      debugShowCheckedModeBanner: false,
+      // 中文本地化：输入框长按菜单（粘贴/复制）等系统文案用中文，
+      // 否则 Android/Windows 上长按输入框弹出的都是英文
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [Locale('zh', 'CN'), Locale('en')],
+      locale: const Locale('zh', 'CN'),
+      // 全局统一字体族须在 ThemeData 构造函数传入（copyWith 无此参数）
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        fontFamily: _platformFontFamily,
+      ).copyWith(
+        scaffoldBackgroundColor: Colors.black,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blueAccent,
+          brightness: Brightness.dark,
+        ),
+      ),
+      // 全局按键映射：电视遥控器 / 手柄的 OK 键发的是 select（不是
+      // Enter），而 Material 的按钮、开关、列表项只认 Enter/Space，
+      // 不映射的话遥控器按 OK 毫无反应；小键盘回车同理。
+      builder: (context, child) => Shortcuts(
+        shortcuts: const <ShortcutActivator, Intent>{
+          SingleActivator(LogicalKeyboardKey.select): ActivateIntent(),
+          SingleActivator(LogicalKeyboardKey.gameButtonA): ActivateIntent(),
+          SingleActivator(LogicalKeyboardKey.numpadEnter): ActivateIntent(),
+        },
+        child: ListenableBuilder(
+          listenable: Listenable.merge([
+            controller.settingsNotifier,
+            controller.tvModeNotifier,
+          ]),
+          child: child,
+          builder: (context, child) {
             final mq = MediaQuery.of(context);
             final settings = controller.settingsNotifier.value;
             // 全局文字缩放只反映用户在设置里的「界面缩放」：
@@ -92,8 +102,8 @@ class _OmiMaterialApp extends StatelessWidget {
             // 设备形态（手机面板整体缩小）不在这里做，否则会与各面板的
             // ScaledPanel Transform 缩放叠加（面板里文字被缩两次，变得极小）。
             final shortest = mq.size.shortestSide;
-            final isAndroid = !kIsWeb &&
-                defaultTargetPlatform == TargetPlatform.android;
+            final isAndroid =
+                !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
             final isSmallAndroid = isAndroid && shortest < 720;
             double scale;
             if (settings.uiScaleAuto) {
@@ -122,9 +132,10 @@ class _OmiMaterialApp extends StatelessWidget {
                 child: child!,
               ),
             );
-            },
-          ),
-          home: const PlayerScreen(),
+          },
+        ),
+      ),
+      home: const PlayerScreen(),
     );
   }
 }

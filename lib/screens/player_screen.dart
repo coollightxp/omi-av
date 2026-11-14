@@ -28,6 +28,7 @@ import '../widgets/boot_animation.dart';
 import '../widgets/bottom_program_panel.dart';
 import '../widgets/gesture_indicator_overlay.dart';
 import '../widgets/left_channel_drawer.dart';
+import '../widgets/radio_search_dialog.dart';
 import '../widgets/right_epg_panel.dart';
 import '../widgets/settings_panel.dart';
 import '../widgets/sleep_timer_dialog.dart';
@@ -1315,6 +1316,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 对话框打开期间的遥控器/键盘按键收口。
   /// 返回 true=已消费；不认识的键放行给弹层内控件（如输入框）。
   bool _handleKeyWhileModal(LogicalKeyboardKey k, bool isDown, bool isUp) {
+    // 在线电台弹窗自带完整焦点导航（页签/搜索框/快捷筛选/结果列表）。
+    // 这里若按「弹层统一收口」处理，方向键会被吞掉、OK 还会直接把弹窗
+    // 关掉——遥控器根本没法在里面选台加台。放行给它自己的焦点树处理。
+    if (RadioSearchDialog.active) return false;
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
@@ -1687,6 +1692,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return true;
     }
+
+    // 在线电台弹窗（可能从设置面板里打开）自带完整的焦点与按键逻辑：
+    // 所有按键一律交给它，否则按返回会把底下的设置面板关掉
+    if (RadioSearchDialog.active) return false;
 
     // 设置面板里有输入框（URL、数字等）：仅返回/菜单键负责关面板，
     // 其余按键放行给输入框
