@@ -2961,6 +2961,10 @@ class PlayerController extends ChangeNotifier {
   /// 通知权限只申请一次（系统窗只弹一次，之后拒绝就只能去设置里开）
   bool _notifAsked = false;
 
+  /// 卡片 ❌ 的界面层收尾（结束 Activity + 杀进程），由播放页注册。
+  /// 放在界面层是为了不在 controller 里 import dart:io（Web 构建会挂）
+  Future<void> Function()? onCardExit;
+
   Future<void> _ensureNotifPermission() async {
     if (_notifAsked) return;
     _notifAsked = true;
@@ -3020,14 +3024,32 @@ class PlayerController extends ChangeNotifier {
       case 'next':
         if (radio) unawaited(playAdjacentChannel(1));
       case 'stop':
-        _exitFromCard();
+        // ❌ = 与退出卡片上「退出」完全同一条流程（用户口径）：
+        // 停内核 → 收前台服务 → 结束 Activity → 杀进程。
+        // 以前只做「暂停 + 收卡片」，用户看到的是「后台还活着」，
+        // 自然就认为「叉没退出去」
+        unawaited(_quitFromCard());
       case 'restore':
         // 原生侧负责把界面拉回前台，这里只需要刷新一次状态
         notifyListeners();
     }
   }
 
-  /// 通知卡片 ❌ = 退出听电视。必须**无条件**把内核停下来。
+  /// 卡片 ❌：走退出流程（停播 → 关服务 → 由界面层结束 Activity/杀进程）
+  Future<void> _quitFromCard() async {
+    await shutdownForExit();
+    final cb = onCardExit;
+    if (cb == null) {
+      _exitFromCard();
+      return;
+    }
+    try {
+      await cb();
+    } catch (_) {}
+  }
+
+  /// 通知卡片 ❌ 的旧实现（只暂停 + 收卡片），仅作无界面回调时的兜底。
+  /// 必须**无条件**把内核停下来。
   ///
   /// 以前这里是 `if (isPlaying) togglePlayPause()`。后台换台失败正在自动
   /// 重试时 `isPlaying` 是 false，于是什么都没停：卡片收了、声音还在，
@@ -3053,8 +3075,27 @@ class PlayerController extends ChangeNotifier {
     _state = PlayerState.paused;
     _lastError = null;
     _lastAudioSig = '';
-    unawaited(audioStop());
+    // 兜底硬停：pause 在 mpv loadfile 中途不保证生效（后台换台正在
+    // openInPlace 时尤其如此），只有把内核整个释放才能保证「后台一定
+    // 没声」。回前台再按播放会重建内核（见 togglePlayPause）
+    unawaited(_hardStopForCardExit());
     notifyListeners();
+  }
+
+  /// 卡片 ❌ 之后的兜底硬停：先 pause，再释放内核，最后收前台服务。
+  /// 任何一步失败都不阻塞下一步（各自带超时）。
+  Future<void> _hardStopForCardExit() async {
+    try {
+      await _videoController
+          ?.pause()
+          .timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+    try {
+      await _disposeVideoController().timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
+      await audioStop().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
   }
 
   /// 真正退出应用前调用：把播放停干净 + 收掉前台服务。
@@ -3305,6 +3346,13 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     if (_videoController == null || !_videoController!.value.isInitialized) {
+      // 卡片 ❌ 的兜底硬停会把内核整个释放（pause 在 mpv loadfile 中途
+      // 不保证生效）：回前台后按「播放」要在这里重建内核，不能再静默
+      // return（用户按了没反应）
+      final ch = _currentChannel;
+      if (ch != null && ch.streamUrls.isNotEmpty) {
+        await playChannel(ch);
+      }
       return;
     }
     if (_videoController!.value.isPlaying) {
