@@ -1943,6 +1943,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       col: _sleepCol,
       remainText: remainText,
       atText: _sleepSetAt != null ? sleepHhmm(_sleepSetAt!) : '23:30',
+      onTap: _onSleepChipTap,
     );
   }
 
@@ -1951,6 +1952,41 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _sleepCardOpen = false;
     if (ctx != null && ctx.mounted && Navigator.of(ctx).canPop()) {
       Navigator.of(ctx).pop(pick);
+    }
+  }
+
+  /// 鼠标点击卡片上的某一项 —— 语义与遥控器「选中 + OK」完全一致。
+  ///
+  /// v2.1.34 把卡片推倒成纯视觉组件后，卡片上的按钮一个手势都没挂，
+  /// 遥控器能用、鼠标点哪儿都没反应（用户 2026-11-14 实测发现）。
+  /// 这里只补点击，按键逻辑仍在 `_handleSleepCardAction`，两条路共用一个
+  /// 落点，不会出现「点一下算两次」。
+  void _onSleepChipTap(int r, int c) {
+    if (!_sleepCardOpen) return;
+    final rows = _sleepRows();
+    if (r < 0 || r >= rows.length) return;
+    _sleepRow = r;
+    _sleepCol = c.clamp(0, rows[r].length - 1);
+    switch (r) {
+      case 0:
+        // 动作行：点了就选中（与左右键同义），卡片不关
+        _sleepAction = _sleepCol == 0
+            ? SleepAction.pause
+            : _sleepCol == 1
+                ? SleepAction.exit
+                : SleepAction.shutdown;
+        _sleepRefresh?.call(() {});
+      case 1:
+        final m = const [30, 60, 90, 120][_sleepCol.clamp(0, 3)];
+        _popSleepCard(
+            SleepPick(DateTime.now().add(Duration(minutes: m)), _sleepAction));
+      case 2:
+        unawaited(_openTimePicker(TimeOfDay(
+          hour: _sleepSetAt?.hour ?? 23,
+          minute: _sleepSetAt?.minute ?? 30,
+        )));
+      case 3:
+        _popSleepCard(SleepPick(null, _sleepAction));
     }
   }
 
@@ -2086,6 +2122,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
               minute: _tpMin,
               col: _tpCol,
               btn: _tpBtn,
+              onTap: _onTimePickTap,
             );
           },
         ),
@@ -2158,6 +2195,42 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       default:
         return true; // 其余键吞掉
     }
+  }
+
+  /// 鼠标点击时间选择卡片 —— 与 `_handleTimePickAction` 同一套落点。
+  void _onTimePickTap(String a) {
+    if (!_timePickOpen) return;
+    switch (a) {
+      case 'hourUp':
+        _tpHour = (_tpHour + 1) % 24;
+        _tpCol = 0;
+      case 'hourDown':
+        _tpHour = (_tpHour + 23) % 24;
+        _tpCol = 0;
+      case 'minUp':
+        _tpMin = (_tpMin + 1) % 60;
+        _tpCol = 1;
+      case 'minDown':
+        _tpMin = (_tpMin + 59) % 60;
+        _tpCol = 1;
+      case 'hour':
+        _tpCol = 0;
+      case 'minute':
+        _tpCol = 1;
+      case 'ok':
+        final ctx = _tpDialogCtx;
+        if (ctx != null && ctx.mounted) {
+          Navigator.of(ctx).pop(TimeOfDay(hour: _tpHour, minute: _tpMin));
+        }
+        return;
+      case 'cancel':
+        final ctx = _tpDialogCtx;
+        if (ctx != null && ctx.mounted) Navigator.of(ctx).pop();
+        return;
+      default:
+        return;
+    }
+    _tpRefresh?.call(() {});
   }
 
   /// 硬件键盘路径：翻译成语义动作后交给 _handleTimePickAction

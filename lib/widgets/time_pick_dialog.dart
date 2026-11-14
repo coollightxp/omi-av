@@ -12,60 +12,86 @@ import '../core/theme/app_colors.dart';
 ///
 /// [col]：0 = 正在调小时，1 = 正在调分钟，2 = 在「确定 / 取消」按钮上。
 /// [btn]：按钮行里选中的是哪一个（0 = 确定，1 = 取消）。
+/// [onTap]：鼠标点击入口（桌面端）。桌面用户没有遥控器，卡片上每个可点
+/// 区域都必须能点——v2.1.34 推倒重做时漏了手势，鼠标点哪儿都没反应。
 Widget buildRemoteTimePickerCard({
   required String title,
   required int hour,
   required int minute,
   required int col,
   required int btn,
+  void Function(String action)? onTap,
 }) {
+  // 包一层点击：不传 onTap 时原样返回，卡片仍是纯视觉
+  Widget tap(String action, Widget child) {
+    if (onTap == null) return child;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => onTap(action),
+        child: child,
+      ),
+    );
+  }
+
   Widget column({
     required int value,
     required bool active,
+    required bool isHour,
   }) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SizedBox(
-          width: 96,
-          height: 32,
-          child: Icon(
-            Icons.keyboard_arrow_up,
-            size: 26,
-            color: active ? AppColors.accent : Colors.white38,
-          ),
-        ),
-        Container(
-          width: 96,
-          height: 84,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: active
-                ? AppColors.accent.withValues(alpha: 0.22)
-                : Colors.white.withValues(alpha: 0.05),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: active ? AppColors.accent : AppColors.stroke,
-              width: active ? 2 : 1,
-            ),
-          ),
-          child: Text(
-            value.toString().padLeft(2, '0'),
-            style: TextStyle(
-              color: active ? Colors.white : AppColors.textPrimary,
-              fontSize: 40,
-              fontWeight: FontWeight.w600,
-              fontFeatures: const [FontFeature.tabularFigures()],
+        tap(
+          isHour ? 'hourUp' : 'minUp',
+          SizedBox(
+            width: 96,
+            height: 32,
+            child: Icon(
+              Icons.keyboard_arrow_up,
+              size: 26,
+              color: active ? AppColors.accent : Colors.white38,
             ),
           ),
         ),
-        SizedBox(
-          width: 96,
-          height: 32,
-          child: Icon(
-            Icons.keyboard_arrow_down,
-            size: 26,
-            color: active ? AppColors.accent : Colors.white38,
+        tap(
+          isHour ? 'hour' : 'minute',
+          Container(
+            width: 96,
+            height: 84,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active
+                  ? AppColors.accent.withValues(alpha: 0.22)
+                  : Colors.white.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: active ? AppColors.accent : AppColors.stroke,
+                width: active ? 2 : 1,
+              ),
+            ),
+            child: Text(
+              value.toString().padLeft(2, '0'),
+              style: TextStyle(
+                color: active ? Colors.white : AppColors.textPrimary,
+                fontSize: 40,
+                fontWeight: FontWeight.w600,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ),
+        tap(
+          isHour ? 'hourDown' : 'minDown',
+          SizedBox(
+            width: 96,
+            height: 32,
+            child: Icon(
+              Icons.keyboard_arrow_down,
+              size: 26,
+              color: active ? AppColors.accent : Colors.white38,
+            ),
           ),
         ),
       ],
@@ -75,26 +101,29 @@ Widget buildRemoteTimePickerCard({
   Widget actionButton(String label, int index) {
     final focused = col == 2 && btn == index;
     final primary = index == 0;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
-      decoration: BoxDecoration(
-        color: primary
-            ? AppColors.accent.withValues(alpha: focused ? 0.30 : 0.18)
-            : Colors.white.withValues(alpha: 0.04),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: focused
-              ? Colors.white
-              : (primary ? AppColors.accent : AppColors.stroke),
-          width: focused ? 2 : 1,
+    return tap(
+      index == 0 ? 'ok' : 'cancel',
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+        decoration: BoxDecoration(
+          color: primary
+              ? AppColors.accent.withValues(alpha: focused ? 0.30 : 0.18)
+              : Colors.white.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: focused
+                ? Colors.white
+                : (primary ? AppColors.accent : AppColors.stroke),
+            width: focused ? 2 : 1,
+          ),
         ),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: primary ? Colors.white : AppColors.textSecondary,
-          fontSize: 13.5,
-          fontWeight: primary ? FontWeight.w600 : FontWeight.normal,
+        child: Text(
+          label,
+          style: TextStyle(
+            color: primary ? Colors.white : AppColors.textSecondary,
+            fontSize: 13.5,
+            fontWeight: primary ? FontWeight.w600 : FontWeight.normal,
+          ),
         ),
       ),
     );
@@ -116,7 +145,7 @@ Widget buildRemoteTimePickerCard({
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            column(value: hour, active: col == 0),
+            column(value: hour, active: col == 0, isHour: true),
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 10),
               child: Text(
@@ -128,7 +157,7 @@ Widget buildRemoteTimePickerCard({
                 ),
               ),
             ),
-            column(value: minute, active: col == 1),
+            column(value: minute, active: col == 1, isHour: false),
           ],
         ),
         const SizedBox(height: 10),

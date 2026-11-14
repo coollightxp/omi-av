@@ -61,10 +61,14 @@ Widget buildSleepTimerCard({
   required int col,
   String? remainText,
   required String atText,
+  /// 鼠标点击（Windows/Linux 桌面）：点哪一项就把它当成「选中 + OK」，
+  /// 语义与遥控器完全一致（动作行只改选中、倒计时立即生效、设置…进时间
+  /// 选择器、取消定时直接清除）。传 null 时整张卡片不可点。
+  void Function(int row, int col)? onTap,
 }) {
-  Widget chip(SleepCardItem item, bool focused) {
+  Widget chip(SleepCardItem item, bool focused, int r, int c) {
     final selected = item.selected;
-    return Container(
+    final body = Container(
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
       decoration: BoxDecoration(
         color: focused
@@ -87,6 +91,16 @@ Widget buildSleepTimerCard({
                   : AppColors.textPrimary,
               fontSize: 13,
               fontWeight: focused ? FontWeight.w600 : FontWeight.normal)),
+    );
+    if (onTap == null) return body;
+    // 点击区域用 opaque，卡片底色是透明的，不加这一条点到文字间隙会漏
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => onTap(r, c),
+        child: body,
+      ),
     );
   }
 
@@ -120,7 +134,7 @@ Widget buildSleepTimerCard({
                 runSpacing: 5,
                 children: [
                   for (var i = 0; i < actionRow.length; i++)
-                    chip(actionRow[i], row == 0 && col == i),
+                    chip(actionRow[i], row == 0 && col == i, 0, i),
                 ]),
             // 三趟之间留出明显段落：以前标签贴着上一排 chip，看着像
             // 同一组；用户要求「倒计时 / 23:30 那行 / 底部说明」都拉开
@@ -134,7 +148,7 @@ Widget buildSleepTimerCard({
                 runSpacing: 5,
                 children: [
                   for (var i = 0; i < timerRow.length; i++)
-                    chip(timerRow[i], row == 1 && col == i),
+                    chip(timerRow[i], row == 1 && col == i, 1, i),
                 ]),
             const SizedBox(height: 16),
             const Text('固定时刻（点「设置」选几点，今天已过算明天）',
@@ -143,19 +157,29 @@ Widget buildSleepTimerCard({
             const SizedBox(height: 8),
             Row(
               children: [
-                Text(atText,
-                    style: const TextStyle(
-                        color: AppColors.textPrimary,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600)),
+                // 大号时间本身也可点：鼠标用户的直觉是「点时间改时间」
+                MouseRegion(
+                  cursor: onTap == null
+                      ? MouseCursor.defer
+                      : SystemMouseCursors.click,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onTap == null ? null : () => onTap(2, 0),
+                    child: Text(atText,
+                        style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ),
                 const SizedBox(width: 12),
                 for (var i = 0; i < atRow.length; i++)
-                  chip(atRow[i], row == 2 && col == i),
+                  chip(atRow[i], row == 2 && col == i, 2, i),
               ],
             ),
             if (rows.length > 3) ...[
               const SizedBox(height: 10),
-              chip(rows[3][0], row == 3 && col == 0),
+              chip(rows[3][0], row == 3 && col == 0, 3, 0),
             ],
             const SizedBox(height: 14),
             const Text('上下换一行 · 左右换一项 · OK 确定 · 返回退出',
