@@ -81,6 +81,14 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   Timer? _okLongTimer;
   bool _okLongFired = false;
 
+  /// 第一级按 OK 进入分类后，要吃掉这一次按键的"抬起"边沿。
+  ///
+  /// 遥控器一次 OK = 按下 + 抬起两个事件。按下时还在分类列表，于是进入
+  /// 下一级；抬起时 _selectedCategory 已经非空，事件落进第二级的
+  /// 「短按抬起 = 播放」分支，结果刚进分类就把第一条频道播了
+  /// （用户反馈：框选在顶上是对的，但直接就播放第一个了）。
+  bool _swallowOkUp = false;
+
   /// 上次触发播放的时间，用于播放内核重建期间的防抖
   DateTime? _lastPlayAt;
 
@@ -344,6 +352,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             setState(() => _kbTabFocused = true);
             return;
           }
+          // 这一次 OK 的抬起边沿会落到下一级，必须吃掉，否则"进分类"
+          // 和"播第一条"会同时发生（右键没有抬起语义，不受影响）
+          if (action == 'ok') _swallowOkUp = true;
           final next = cats[_kbCategoryIndex.clamp(0, cats.length - 1)];
           final nextChannels = _channelsOf(controller, next);
           // 进入收藏场景 = 切到该场景，此后收藏动作落到这个场景
@@ -396,6 +407,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         case 'ok':
           if (channels.isEmpty) break;
           if (isDown) {
+            // 新的一次按下：清掉可能残留的"吃掉抬起"标记
+            _swallowOkUp = false;
             // 长按 OK（800ms）= 收藏/取消收藏；抬起前未超时则按短按播放
             _okLongFired = false;
             _okLongTimer?.cancel();
@@ -404,6 +417,12 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               final idx = _kbChannelIndex.clamp(0, channels.length - 1);
               _toggleFavorite(channels[idx]);
             });
+            break;
+          }
+          // 这一次抬起是"从分类列表按 OK 进来"的那一下：只负责进级，不播放
+          if (_swallowOkUp) {
+            _swallowOkUp = false;
+            _okLongTimer?.cancel();
             break;
           }
           // 抬起边沿：长按已触发收藏，不再播放
