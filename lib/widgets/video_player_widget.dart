@@ -8,6 +8,7 @@ import '../models/channel.dart';
 import '../core/widgets/channel_badge.dart';
 import '../core/theme/app_colors.dart';
 import '../core/widgets/audio_wave.dart';
+import '../services/exit_guard.dart';
 import '../services/player_controller.dart';
 
 /// 视频播放器显示组件
@@ -91,21 +92,32 @@ class VideoPlayerWidget extends StatelessWidget {
           );
         }
 
-        // 空闲状态
+        // 空闲状态（含退出过程：ExitGuard 点亮后首屏改显「正在退出…」，
+        // 不再闪回「请选择频道开始观看」）
         if (vc == null || !vc.value.isInitialized) {
           return Container(
             color: Colors.black,
-            child: const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.live_tv, color: Colors.white30, size: 64),
-                  SizedBox(height: 16),
-                  Text(
-                    '请选择频道开始观看',
-                    style: TextStyle(color: Colors.white54, fontSize: 14),
-                  ),
-                ],
+            child: Center(
+              child: ValueListenableBuilder<bool>(
+                valueListenable: ExitGuard.exitVisible,
+                builder: (context, exiting, _) {
+                  return Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        exiting ? Icons.exit_to_app_rounded : Icons.live_tv,
+                        color: Colors.white30,
+                        size: 64,
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        exiting ? '正在退出…' : '请选择频道开始观看',
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 14),
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
           );
@@ -175,159 +187,172 @@ class _RadioStage extends StatelessWidget {
           colors: [Color(0xFF1A1209), Color(0xFF000000)],
         ),
       ),
-      // 小窗/分屏时整体等比缩放，不裁不溢
+      // 小窗/分屏时整体等比缩放，不裁不溢；
+      // 版面按可用宽度往中间收：大窗维持设计宽 560，小窗只占约 72%
+      // 并留出边距，避免图标+波形顶着窗口边撑满（用户反馈"太大了"）
       child: Center(
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: SizedBox(
-            width: 560,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _logo(ch),
-                const SizedBox(height: 26),
-                Text(
-                  name,
-                  maxLines: 1,
-                  textAlign: TextAlign.center,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 26,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+        child: LayoutBuilder(
+          builder: (context, cons) {
+            final avail = cons.maxWidth;
+            final target = avail.isFinite
+                ? math.min(560.0, math.max(200.0, avail * 0.72))
+                : 560.0;
+            final s = target / 560.0;
+            return FittedBox(
+              fit: BoxFit.scaleDown,
+              child: SizedBox(
+                width: target,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    _LiveDot(playing: controller.isPlaying),
-                    const SizedBox(width: 8),
+                    _logo(ch, s),
+                    SizedBox(height: 26 * s),
                     Text(
-                      controller.isPlaying ? '正在收听' : '已暂停',
-                      style: const TextStyle(
-                        color: Color(0xCCFFFFFF),
-                        fontSize: 14,
+                      name,
+                      maxLines: 1,
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 26 * s,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1,
                       ),
                     ),
-                    // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
-                    const SizedBox(width: 10),
-                    _AudioTag(
-                      playing: controller.isPlaying,
-                      level: controller.audioLevel,
-                    ),
-                    // 定时关闭实时倒计时（每秒走字，到点自动暂停）
-                    ValueListenableBuilder<Duration?>(
-                      valueListenable: controller.sleepCountdown,
-                      builder: (context, remain, _) {
-                        if (remain == null) return const SizedBox.shrink();
-                        final m = remain.inMinutes;
-                        final sec = remain.inSeconds % 60;
-                        return Padding(
-                          padding: const EdgeInsets.only(left: 10),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.08),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                  color:
-                                      Colors.white.withValues(alpha: 0.22)),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.bedtime_outlined,
-                                    size: 12, color: Color(0xB3FFFFFF)),
-                                const SizedBox(width: 4),
-                                Text(
-                                  '$m:${sec.toString().padLeft(2, '0')}',
-                                  style: const TextStyle(
-                                      color: Color(0xCCFFFFFF), fontSize: 12),
+                    SizedBox(height: 10 * s),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _LiveDot(playing: controller.isPlaying),
+                        const SizedBox(width: 8),
+                        Text(
+                          controller.isPlaying ? '正在收听' : '已暂停',
+                          style: TextStyle(
+                            color: const Color(0xCCFFFFFF),
+                            fontSize: 14 * s,
+                          ),
+                        ),
+                        // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
+                        const SizedBox(width: 10),
+                        _AudioTag(
+                          playing: controller.isPlaying,
+                          level: controller.audioLevel,
+                        ),
+                        // 定时关闭实时倒计时（每秒走字，到点自动暂停）
+                        ValueListenableBuilder<Duration?>(
+                          valueListenable: controller.sleepCountdown,
+                          builder: (context, remain, _) {
+                            if (remain == null) return const SizedBox.shrink();
+                            final m = remain.inMinutes;
+                            final sec = remain.inSeconds % 60;
+                            return Padding(
+                              padding: const EdgeInsets.only(left: 10),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.08),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                      color:
+                                          Colors.white.withValues(alpha: 0.22)),
                                 ),
-                              ],
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.bedtime_outlined,
+                                        size: 12, color: Color(0xB3FFFFFF)),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '$m:${sec.toString().padLeft(2, '0')}',
+                                      style: const TextStyle(
+                                          color: Color(0xCCFFFFFF),
+                                          fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        // 录音中徽标：红点 + 已录时长（每秒走字）
+                        if (controller.isRadioRecording)
+                          ValueListenableBuilder<Duration>(
+                            valueListenable: controller.radioRecElapsed,
+                            builder: (context, el, _) {
+                              final h = el.inHours;
+                              final m = el.inMinutes % 60;
+                              final s = el.inSeconds % 60;
+                              final two =
+                                  (int v) => v.toString().padLeft(2, '0');
+                              return Padding(
+                                padding: const EdgeInsets.only(left: 10),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: Colors.red.withValues(alpha: 0.14),
+                                    borderRadius: BorderRadius.circular(20),
+                                    border: Border.all(
+                                        color: Colors.redAccent
+                                            .withValues(alpha: 0.55)),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.fiber_manual_record,
+                                          size: 11, color: Colors.redAccent),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'REC ${h > 0 ? '${two(h)}:' : ''}'
+                                        '${two(m)}:${two(s)}',
+                                        style: const TextStyle(
+                                            color: Color(0xE6FFFFFF),
+                                            fontSize: 12),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                      ],
+                    ),
+                    // 正在播的曲目/节目：优先 ICY 实时元数据（歌名会在
+                    // 副歌换歌时自己变），其次 EPG 节目名。单独订阅播放器值，
+                    // 避免整屏跟着 position 每 100ms 重建
+                    AnimatedBuilder(
+                      animation: Listenable.merge([controller.videoController]),
+                      builder: (context, _) {
+                        final now = _nowText();
+                        if (now.isEmpty || now == name) {
+                          return SizedBox(height: 6 * s);
+                        }
+                        return Padding(
+                          padding: EdgeInsets.only(top: 12 * s),
+                          child: Text(
+                            now,
+                            maxLines: 2,
+                            textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: const Color(0xCCFFFFFF),
+                              fontSize: 15 * s,
+                              height: 1.4,
                             ),
                           ),
                         );
                       },
                     ),
-                    // 录音中徽标：红点 + 已录时长（每秒走字）
-                    if (controller.isRadioRecording)
-                      ValueListenableBuilder<Duration>(
-                        valueListenable: controller.radioRecElapsed,
-                        builder: (context, el, _) {
-                          final h = el.inHours;
-                          final m = el.inMinutes % 60;
-                          final s = el.inSeconds % 60;
-                          final two = (int v) => v.toString().padLeft(2, '0');
-                          return Padding(
-                            padding: const EdgeInsets.only(left: 10),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: Colors.red.withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                    color: Colors.redAccent
-                                        .withValues(alpha: 0.55)),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.fiber_manual_record,
-                                      size: 11, color: Colors.redAccent),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    'REC ${h > 0 ? '${two(h)}:' : ''}'
-                                    '${two(m)}:${two(s)}',
-                                    style: const TextStyle(
-                                        color: Color(0xE6FFFFFF),
-                                        fontSize: 12),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
+                    // 波形压轴：离上面的信息远一点、横贯整个版面，像舞台前
+                    // 的一道声浪，而不是挤在台标底下的小装饰
+                    SizedBox(height: 44 * s),
+                    _wave(s),
                   ],
                 ),
-                // 正在播的曲目/节目：优先 ICY 实时元数据（歌名会在
-                // 副歌换歌时自己变），其次 EPG 节目名。单独订阅播放器值，
-                // 避免整屏跟着 position 每 100ms 重建
-                AnimatedBuilder(
-                  animation: Listenable.merge([controller.videoController]),
-                  builder: (context, _) {
-                    final now = _nowText();
-                    if (now.isEmpty || now == name) {
-                      return const SizedBox(height: 6);
-                    }
-                    return Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: Text(
-                        now,
-                        maxLines: 2,
-                        textAlign: TextAlign.center,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Color(0xCCFFFFFF),
-                          fontSize: 15,
-                          height: 1.4,
-                        ),
-                      ),
-                    );
-                  },
-                ),
-                // 波形压轴：离上面的信息远一点、横贯整个版面，像舞台前
-                // 的一道声浪，而不是挤在台标底下的小装饰
-                const SizedBox(height: 44),
-                _wave(),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         ),
       ),
     );
@@ -337,19 +362,19 @@ class _RadioStage extends StatelessWidget {
   /// 只有开了「真波形纹理(实验)」且 mpv 真出帧（尺寸非 0）才贴纹理。
   /// 早期版本无条件优先纹理，结果 lavfi-complex 在部分流上建不起来，
   /// 看到的是一块不动的黑底 —— 用户反馈"波形没起作用"就是这个。
-  Widget _wave() {
+  Widget _wave(double s) {
     final vc = controller.videoController;
-    if (vc == null || !controller.spectrumTexture) return _fallbackWave();
+    if (vc == null || !controller.spectrumTexture) return _fallbackWave(s);
     return AnimatedBuilder(
       animation: vc,
       builder: (context, _) {
         // mpv 的 showwaves 一旦出帧，宽高就非 0
-        if (vc.value.size.width <= 0) return _fallbackWave();
+        if (vc.value.size.width <= 0) return _fallbackWave(s);
         return ClipRRect(
           borderRadius: BorderRadius.circular(10),
           child: Container(
-            width: 470,
-            height: 64,
+            width: 470 * s,
+            height: 64 * s,
             color: const Color(0xFF0B0805),
             child: vc.build(fit: BoxFit.cover),
           ),
@@ -358,21 +383,20 @@ class _RadioStage extends StatelessWidget {
     );
   }
 
-  Widget _fallbackWave() => AudioWave(
+  Widget _fallbackWave(double s) => AudioWave(
         active: controller.isPlaying,
         level: controller.audioLevel,
         fillWidth: true,
-        height: 56,
+        height: 56 * s,
         bars: 45,
-        barWidth: 3.4,
-        gap: 6.2,
+        barWidth: 3.4 * s,
+        gap: 6.2 * s,
       );
 
   /// 当前曲目/节目的取值顺序：ICY 实时曲目 → EPG 当前节目 → 空。
   /// 流文件名（index.m3u8 / 64k.mp3）不是曲目，过滤掉不显示
   String _nowText() {
-    final icy =
-        (controller.videoController?.value.mediaTitle ?? '').trim();
+    final icy = (controller.videoController?.value.mediaTitle ?? '').trim();
     if (icy.isNotEmpty && !PlayerController.isJunkTrack(icy)) return icy;
     final epg = controller.currentProgram?.title ??
         controller.getNowPlayingInfo().programTitle;
@@ -382,8 +406,9 @@ class _RadioStage extends StatelessWidget {
 
   /// 台标：内置库 → 源内 tvg-logo → Radio Browser → 字母台标
   /// （四级回退统一由 ChannelBadge 处理，与频道列表完全一致）
-  Widget _logo(Channel ch) {
-    const size = 176.0;
+  /// [s] 为版面缩放系数：小窗里圆随版面一起收，不再顶满窗口
+  Widget _logo(Channel ch, double s) {
+    final size = 176.0 * s;
     return Container(
       width: size,
       height: size,
@@ -510,4 +535,3 @@ class _LiveDotState extends State<_LiveDot>
     );
   }
 }
-

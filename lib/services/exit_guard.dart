@@ -32,10 +32,16 @@ class ExitGuard {
   /// 是否已在退出流程中（防重入：连点 ✕ / 托盘与快捷键同时触发）
   static bool get exiting => _exiting;
 
+  /// 退出提示可见性：进入退出流程立即点亮。
+  /// 首屏（空闲待选台画面）监听它，把「请选择频道开始观看」
+  /// 换成「正在退出…」，避免退出瞬间闪回选台文案让人以为没退掉
+  static final ValueNotifier<bool> exitVisible = ValueNotifier(false);
+
   /// 执行一次完整的有序退出。
   static Future<void> quit() async {
     if (_exiting) return;
     _exiting = true;
+    exitVisible.value = true;
     try {
       final p = prepare;
       if (p != null) {
