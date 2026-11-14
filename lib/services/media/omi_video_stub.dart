@@ -8,8 +8,7 @@ import 'omi_video_backend.dart';
 import 'omi_video_value.dart';
 
 /// 既非 io 也非 web 的目标（理论上不存在）：编译占位。
-class OmiVideoController extends ChangeNotifier
-    implements OmiVideoBackend {
+class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
     Map<String, String>? headers,
@@ -23,8 +22,7 @@ class OmiVideoController extends ChangeNotifier
 
   OmiVideoValue get value => const OmiVideoValue();
 
-  Future<void> initialize() async =>
-      throw UnsupportedError('当前平台无视频内核实现');
+  Future<void> initialize() async => throw UnsupportedError('当前平台无视频内核实现');
 
   Future<void> play() async {}
   Future<void> pause() async {}
@@ -43,6 +41,11 @@ class OmiVideoController extends ChangeNotifier
   @override
   Future<void> setVideoOutputDisabled(bool disabled) async {}
   Future<void> stopRecord() async {}
+
+  @override
+  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
+    throw UnsupportedError('当前内核不支持原地换源');
+  }
 
   Future<void> release() async {}
 

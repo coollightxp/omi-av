@@ -4,6 +4,7 @@ import 'dart:io' show File, FileStat, Platform;
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' as dialog show showDialog;
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -18,6 +19,7 @@ import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
 import '../services/builtin_epg.dart';
 import '../services/player_controller.dart';
+
 import '../services/source_manager.dart';
 import '../services/channel_blacklist.dart';
 import '../services/channel_alias.dart';
@@ -28,9 +30,50 @@ import '../services/radio_library.dart';
 import '../services/radio_catalog.dart';
 import '../services/web_diag.dart';
 import 'ime_safe_text_field.dart';
+
 import 'scaled_panel.dart';
 
 export 'ime_safe_text_field.dart' show ImeSafeTextField;
+
+/// 设置卡片之上是否压着「下一级卡片」（编辑、确认、诊断、文件选择、
+/// 在线电台搜索……）。
+///
+/// 播放页订阅它：为 true 时把设置卡片淡出，屏幕上任何时候只有一张卡片
+/// 亮着；下一级被返回/取消/关掉后自动淡回来。以前两张卡片（加半透明
+/// 遮罩）叠在一起，透出来的内容混成一片，看着很乱。
+final ValueNotifier<bool> settingsChildOpen = ValueNotifier<bool>(false);
+
+/// 设置里弹下一级卡片一律走这里：弹出前先把设置卡片让开，
+/// 关闭（含取消、返回、点遮罩、Esc）后恢复。
+///
+/// 十几处调用点逐个改是唯一可靠的办法——漏一个就会出现
+/// 「两张卡片同时亮」，正是用户看到的"画面乱"。
+Future<T?> showChildDialog<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  bool barrierDismissible = true,
+  Color? barrierColor,
+  String? barrierLabel,
+  bool useRootNavigator = true,
+  RouteSettings? routeSettings,
+  Offset? anchorPoint,
+}) async {
+  settingsChildOpen.value = true;
+  try {
+    return await dialog.showDialog<T>(
+      context: context,
+      builder: builder,
+      barrierDismissible: barrierDismissible,
+      barrierColor: barrierColor,
+      barrierLabel: barrierLabel,
+      useRootNavigator: useRootNavigator,
+      routeSettings: routeSettings,
+      anchorPoint: anchorPoint,
+    );
+  } finally {
+    settingsChildOpen.value = false;
+  }
+}
 
 typedef _ImeSafeTextField = ImeSafeTextField;
 
@@ -123,12 +166,15 @@ class _SettingsPanelState extends State<SettingsPanel>
     _tabController.addListener(_onTabIndexChanged);
     // 上下方向键统一由面板自己接管（见 _onVerticalKey）
     HardwareKeyboard.instance.addHandler(_onVerticalKey);
+    // 下一级卡片开合时只改本卡片透明度（不重建整棵树）
+    settingsChildOpen.addListener(_onChildOpenChanged);
     // 安卓端：开始采样剪贴板（粘贴按钮弹出历史供选择）
     if (_showPasteButton) _ClipHistory.ensureWatching();
   }
 
   @override
   void dispose() {
+    settingsChildOpen.removeListener(_onChildOpenChanged);
     _settingsOwner?.settingsNotifier.removeListener(_onSettingsChanged);
     HardwareKeyboard.instance.removeHandler(_onVerticalKey);
     _tabController.removeListener(_onTabIndexChanged);
@@ -136,6 +182,11 @@ class _SettingsPanelState extends State<SettingsPanel>
     _panelFocusNode.dispose();
     _tabController.dispose();
     super.dispose();
+  }
+
+  /// 下一级卡片开/合：只要重画本卡片（改的是 AnimatedOpacity 的终值）
+  void _onChildOpenChanged() {
+    if (mounted) setState(() {});
   }
 
   int _lastTabIndex = 0;
@@ -354,7 +405,9 @@ class _SettingsPanelState extends State<SettingsPanel>
       right: 0,
       child: AnimatedOpacity(
         duration: const Duration(milliseconds: 200),
-        opacity: widget.isOpen ? 1.0 : 0.0,
+        // 上面压了下一级卡片（编辑/确认/诊断/扫码…）就先淡出，
+        // 屏幕上只亮一张卡片；关掉下一级自动淡回来
+        opacity: widget.isOpen && !settingsChildOpen.value ? 1.0 : 0.0,
         child: ScaledPanel(
           alignment: Alignment.bottomCenter,
           scale: panelScaleOf(context) * windowFitScaleOf(context),
@@ -909,94 +962,63 @@ class _PlaylistTabState extends State<_PlaylistTab> {
     setState(() => _isLoading = false);
   }
 
-  /// 编辑已有播放列表（名称/地址/类型）
+  /// 编辑已有播放列表（名称/地址/类型）。
+  /// 遥控器导航走 RemoteEditDialog（上下换行/左右换项/OK 激活/返回只关本层）
   Future<void> _editPlaylist(PlaylistSource source) async {
     final nameCtl = TextEditingController(text: source.name);
     final urlCtl = TextEditingController(text: source.url);
     final filterCtl = TextEditingController(text: source.groupFilter);
     var type = source.type;
     if (!mounted) return;
-    final result = await showDialog<PlaylistSource>(
+    final result = await showChildDialog<PlaylistSource>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialog) => AlertDialog(
-          title: const Text('编辑播放列表'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SegmentedButton<PlaylistSourceType>(
-                  segments: const [
-                    ButtonSegment(
-                        value: PlaylistSourceType.url, label: Text('网络地址')),
-                    ButtonSegment(
-                        value: PlaylistSourceType.local, label: Text('本地文件')),
-                  ],
-                  selected: {type},
-                  onSelectionChanged: (s) => setDialog(() => type = s.first),
-                ),
-                const SizedBox(height: 10),
-                _ImeSafeTextField(
-                  controller: nameCtl,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: _inputDecoration('列表名称'),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _ImeSafeTextField(
-                        controller: urlCtl,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: _inputDecoration(
-                            type == PlaylistSourceType.url ? '直播源地址' : '本地文件路径',
-                            urlCtl),
-                      ),
-                    ),
-                    if (type == PlaylistSourceType.local)
-                      IconButton(
-                        icon: const Icon(Icons.folder_open,
-                            color: Colors.blueAccent),
-                        onPressed: () async {
-                          final f = await _pickLocalFileWithTopmostFix();
-                          if (f?.path != null) urlCtl.text = f!.path!;
-                        },
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                _ImeSafeTextField(
-                  controller: filterCtl,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: _inputDecoration('分组过滤（可选）：只导入命中的分组，逗号分隔'),
-                ),
-              ],
-            ),
+      builder: (ctx) => RemoteEditDialog(
+        title: '编辑播放列表',
+        segments: const ['网络地址', '本地文件'],
+        initialSeg: type == PlaylistSourceType.local ? 1 : 0,
+        onSegChanged: (i) =>
+            type = i == 1 ? PlaylistSourceType.local : PlaylistSourceType.url,
+        fields: (seg) => [
+          EditFieldSpec(controller: nameCtl, hint: '列表名称'),
+          EditFieldSpec(
+            controller: urlCtl,
+            hint: seg == PlaylistSourceType.local.index ? '本地文件路径' : '直播源地址',
+            suffix: seg == PlaylistSourceType.local.index
+                ? () => IconButton(
+                      icon: const Icon(Icons.folder_open,
+                          color: Colors.blueAccent),
+                      onPressed: () async {
+                        final f = await _pickLocalFileWithTopmostFix();
+                        if (f?.path != null) urlCtl.text = f!.path!;
+                      },
+                    )
+                : null,
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('取消'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final name = nameCtl.text.trim();
-                final url = urlCtl.text.trim();
-                if (name.isEmpty || url.isEmpty) return;
-                Navigator.pop(
-                  ctx,
-                  source.copyWith(
-                    name: name,
-                    url: url,
-                    type: type,
-                    groupFilter: filterCtl.text.trim(),
-                  ),
-                );
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
+          EditFieldSpec(controller: filterCtl, hint: '分组过滤（可选）：只导入命中的分组，逗号分隔'),
+        ],
+        actions: [
+          (
+            '取消',
+            () => Navigator.pop(ctx),
+          ),
+          (
+            '保存',
+            () {
+              final name = nameCtl.text.trim();
+              final url = urlCtl.text.trim();
+              if (name.isEmpty || url.isEmpty) return;
+              Navigator.pop(
+                ctx,
+                source.copyWith(
+                  name: name,
+                  url: url,
+                  type: type,
+                  groupFilter: filterCtl.text.trim(),
+                ),
+              );
+            },
+          ),
+        ],
       ),
     );
     if (result != null && mounted) {
@@ -1015,7 +1037,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
   Future<void> _diagnoseSource(PlaylistSource p) async {
     if (!mounted) return;
     final controller = context.read<PlayerController>();
-    showDialog<void>(
+    showChildDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
@@ -1271,7 +1293,13 @@ class _RadioSourcesTab extends StatelessWidget {
                     ),
                   ),
                   OutlinedButton.icon(
-                    onPressed: () => RadioSearchDialog.show(context),
+                    // 走本文件的包装：弹窗打开期间设置卡片先让开，
+                    // 屏幕上只留一张卡片（以前两张叠着，底下透出来很乱）
+                    onPressed: () => showChildDialog<void>(
+                      context: context,
+                      barrierColor: AppColors.scrim,
+                      builder: (_) => const RadioSearchDialog(),
+                    ),
                     icon: const Icon(Icons.travel_explore, size: 18),
                     label: const Text('在线电台'),
                     style: OutlinedButton.styleFrom(
@@ -1396,7 +1424,7 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
 
   Future<void> _newScene() async {
     final ctl = TextEditingController();
-    final name = await showDialog<String>(
+    final name = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('新建收藏场景'),
@@ -1422,7 +1450,7 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
 
   Future<void> _renameScene(String oldName) async {
     final ctl = TextEditingController(text: oldName);
-    final name = await showDialog<String>(
+    final name = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('重命名场景：$oldName'),
@@ -1446,7 +1474,7 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
   }
 
   Future<void> _deleteScene(String name) async {
-    final ok = await showDialog<bool>(
+    final ok = await showChildDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('删除场景〈$name〉？'),
@@ -1614,7 +1642,7 @@ class _AliasSectionState extends State<_AliasSection> {
   Future<void> _editAlias(Channel ch) async {
     final controller = context.read<PlayerController>();
     final ctl = TextEditingController(text: ChannelAlias.aliasOf(ch.id) ?? '');
-    final alias = await showDialog<String>(
+    final alias = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('别名：${ch.name}'),
@@ -1797,7 +1825,7 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
   }
 
   Future<void> _delete(File f) async {
-    final ok = await showDialog<bool>(
+    final ok = await showChildDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('删除录音？'),
@@ -1994,44 +2022,33 @@ class _EpgTabState extends State<_EpgTab> {
     setState(() => _isLoading = false);
   }
 
-  /// 编辑已有 EPG 源（名称/地址）
+  /// 编辑已有 EPG 源（名称/地址）。
+  /// 遥控器导航走 RemoteEditDialog（上下换行/OK 激活/返回只关本层）
   Future<void> _editEpg(EpgSource source) async {
     final nameCtl = TextEditingController(text: source.name);
     final urlCtl = TextEditingController(text: source.url);
     if (!mounted) return;
-    final result = await showDialog<EpgSource>(
+    final result = await showChildDialog<EpgSource>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('编辑 EPG'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _ImeSafeTextField(
-              controller: nameCtl,
-              style: const TextStyle(color: Colors.white),
-              decoration: _inputDecoration('EPG 名称'),
-            ),
-            const SizedBox(height: 8),
-            _ImeSafeTextField(
-              controller: urlCtl,
-              style: const TextStyle(color: Colors.white),
-              decoration: _inputDecoration('XMLTV EPG 地址 URL', urlCtl),
-            ),
-          ],
-        ),
+      builder: (ctx) => RemoteEditDialog(
+        title: '编辑 EPG',
+        fields: (seg) => [
+          EditFieldSpec(controller: nameCtl, hint: 'EPG 名称'),
+          EditFieldSpec(controller: urlCtl, hint: 'XMLTV EPG 地址 URL'),
+        ],
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+          (
+            '取消',
+            () => Navigator.pop(ctx),
           ),
-          ElevatedButton(
-            onPressed: () {
+          (
+            '保存',
+            () {
               final name = nameCtl.text.trim();
               final url = urlCtl.text.trim();
               if (name.isEmpty || url.isEmpty) return;
               Navigator.pop(ctx, source.copyWith(name: name, url: url));
             },
-            child: const Text('保存'),
           ),
         ],
       ),
@@ -2377,7 +2394,7 @@ class _PlayerSettingsTab extends StatelessWidget {
       ('bass', '低音增强', '音乐台更带感'),
       ('night', '夜间模式', '音量忽大忽小被抹平，睡前听不打醒'),
     ];
-    final picked = await showDialog<String>(
+    final picked = await showChildDialog<String>(
       context: context,
       builder: (ctx) => SimpleDialog(
         title: const Text('声音实验室'),
@@ -2442,7 +2459,7 @@ class _PlayerSettingsTab extends StatelessWidget {
   /// 自定义均衡器：10 段滑杆（31Hz~16kHz，±12dB），松手即生效
   Future<void> _showEqDialog(
       BuildContext context, PlayerController controller) async {
-    await showDialog<void>(
+    await showChildDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) {
@@ -3382,7 +3399,7 @@ class _SourceRowState extends State<_SourceRow> {
 /// 白色圆角卡片 + 圆角模块二维码，URL 独立底色展示，
 /// 「复制地址 / 关闭」两个按钮等高并排，遥控器返回键也可关闭。
 Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
-  return showDialog<void>(
+  return showChildDialog<void>(
     context: context,
     barrierColor: Colors.black.withOpacity(0.72),
     builder: (ctx) => Dialog(
@@ -3548,7 +3565,7 @@ class _PasteIconButton extends StatelessWidget {
       OsdBus.show('剪贴板是空的', icon: Icons.content_paste_off);
       return;
     }
-    final picked = await showDialog<String>(
+    final picked = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('从剪贴板选择'),
@@ -3600,6 +3617,342 @@ class _PasteIconButton extends StatelessWidget {
   }
 }
 
+/// 设置里的编辑弹窗（编辑播放列表 / 编辑 EPG）是否打开。
+/// 播放页的全局按键处理据此放行：弹窗自己接管遥控器（含返回只关
+/// 弹窗这一层，不再把底下的设置卡片一起关掉——2026-11-14 用户实测）
+int _editDialogDepth = 0;
+bool get settingsEditDialogOpen => _editDialogDepth > 0;
+
+/// 编辑弹窗一行输入框的描述（由调用方按当前分段给）
+class EditFieldSpec {
+  const EditFieldSpec({
+    required this.controller,
+    required this.hint,
+    this.suffix,
+  });
+
+  final TextEditingController controller;
+  final String hint;
+
+  /// 行尾附件（本地文件行的选文件按钮）；每次 build 重新求值
+  final Widget? Function()? suffix;
+}
+
+/// 编辑弹窗的行导航游标：buildRow 用它画"当前行"的白框
+class EditNavCursor {
+  const EditNavCursor({
+    required this.active,
+    required this.btnIndex,
+    this.fieldNode,
+  });
+
+  /// 遥控器光标停在这一行（且不在打字态）
+  final bool active;
+
+  /// 末行按钮排内游标（0=取消, 1=保存）
+  final int btnIndex;
+
+  /// 输入框行由弹窗创建并托管的焦点节点；OK 聚焦进入打字态
+  final FocusNode? fieldNode;
+}
+
+/// 设置编辑弹窗通用骨架（编辑播放列表 / 编辑 EPG 共用）。
+///
+/// 遥控器操作顺序（用户定义，与设置页同一套心智）：
+/// - **上下**：行间循环（分段开关 → 名称 → 地址 → 分组 → 取消/保存）
+/// - **左右**：分段开关行直接切换；末行在 取消/保存 间切换；输入框行
+///   聚焦后左右交给文本光标
+/// - **OK**：输入框行=聚焦打字；分段行=确认进下一行；末行=执行按钮
+/// - **返回**：打字态=退出打字回行导航；否则**只关本弹窗**
+///
+/// 按键走 HardwareKeyboard 通道（设置页/电台弹窗同款，实测在这台
+/// 机器上可靠；Focus.onKeyEvent 通道实测收不到）。
+class RemoteEditDialog extends StatefulWidget {
+  const RemoteEditDialog({
+    super.key,
+    required this.title,
+    required this.fields,
+    required this.actions,
+    this.segments,
+    this.initialSeg = 0,
+    this.onSegChanged,
+  });
+
+  final String title;
+
+  /// 顶部分段开关（网络地址/本地文件）；为 null 则没有这一行
+  final List<String>? segments;
+  final int initialSeg;
+  final ValueChanged<int>? onSegChanged;
+
+  /// 输入框行：按当前分段给（分段切换时整列重建）
+  final List<EditFieldSpec> Function(int seg) fields;
+
+  /// 末行按钮（取消 / 保存）
+  final List<(String, VoidCallback)> actions;
+
+  @override
+  State<RemoteEditDialog> createState() => _RemoteEditDialogState();
+}
+
+class _RemoteEditDialogState extends State<RemoteEditDialog> {
+  late int _seg = widget.initialSeg;
+  bool get _hasSeg => widget.segments != null && widget.segments!.isNotEmpty;
+
+  /// 行数 = 分段行(0/1) + 输入框行们 + 末行按钮排
+  int get _fieldRows => widget.fields(_seg).length;
+  int get _rowCount => (_hasSeg ? 1 : 0) + _fieldRows + 1;
+  int _row = 0;
+
+  /// 末行按钮游标：默认落在「保存」上（保存是高频动作，取消有返回键兜底）
+  int _btn = 1;
+
+  final Map<int, FocusNode> _fieldNodes = {};
+
+  FocusNode _node(int row) => _fieldNodes.putIfAbsent(
+      row, () => FocusNode(debugLabel: 'editDlg:row$row'));
+
+  @override
+  void initState() {
+    super.initState();
+    _editDialogDepth++;
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
+  }
+
+  @override
+  void dispose() {
+    _editDialogDepth--;
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+    for (final n in _fieldNodes.values) {
+      n.dispose();
+    }
+    super.dispose();
+  }
+
+  bool _isField(int row) => row >= (_hasSeg ? 1 : 0) && row < _rowCount - 1;
+
+  /// 是否正处于"往输入框里打字"的状态（鼠标点进输入框也算）
+  bool get _typing {
+    if (!_isField(_row)) return false;
+    return _node(_row).hasFocus;
+  }
+
+  bool _onHardwareKey(KeyEvent event) {
+    if (!mounted) return false;
+    // 上层还有别的弹窗（比如从这里再弹文件选择器）：按键归它
+    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return false;
+    final k = event.logicalKey;
+    final isDown = event is KeyDownEvent;
+
+    // 返回/菜单：打字态=退出打字回行导航；否则只关本弹窗
+    if (k == LogicalKeyboardKey.escape ||
+        k == LogicalKeyboardKey.goBack ||
+        k == LogicalKeyboardKey.contextMenu) {
+      if (!isDown) return true;
+      if (_typing) {
+        _node(_row).unfocus();
+        setState(() {});
+        return true;
+      }
+      Navigator.pop(context);
+      return true;
+    }
+
+    // 打字态：OK/回车=提交回行导航；其余（字母、方向、组词）全给输入框
+    if (_typing) {
+      if (isDown &&
+          (k == LogicalKeyboardKey.enter ||
+              k == LogicalKeyboardKey.numpadEnter ||
+              k == LogicalKeyboardKey.select ||
+              k == LogicalKeyboardKey.gameButtonA)) {
+        _node(_row).unfocus();
+        setState(() => _row = (_row + 1) % _rowCount);
+        return true;
+      }
+      return false;
+    }
+
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+
+    if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
+      final d = k == LogicalKeyboardKey.arrowUp ? -1 : 1;
+      setState(() => _row = (_row + d + _rowCount) % _rowCount);
+      return true;
+    }
+    if (k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight) {
+      final d = k == LogicalKeyboardKey.arrowLeft ? -1 : 1;
+      final lastRow = _rowCount - 1;
+      if (_hasSeg && _row == 0) {
+        // 分段开关：左右直接切换（用户定义的"左右调最上边"）
+        final n = widget.segments!.length;
+        setState(() {
+          _seg = (_seg + d + n) % n;
+          _row = 0;
+        });
+        widget.onSegChanged?.call(_seg);
+        return true;
+      }
+      if (_row == lastRow) {
+        // 按钮排：左右换 取消/保存
+        setState(() => _btn = (_btn + d + 2) % 2);
+        return true;
+      }
+      return true; // 输入框行导航态：吞掉防穿透
+    }
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA ||
+        k == LogicalKeyboardKey.space) {
+      if (!isDown) return true;
+      if (_isField(_row)) {
+        // OK 进输入框打字
+        _node(_row).requestFocus();
+        setState(() {});
+        return true;
+      }
+      if (_hasSeg && _row == 0) {
+        // 分段行 OK=确认，进下一行
+        setState(() => _row = 1 % _rowCount);
+        return true;
+      }
+      // 末行按钮排 OK=执行
+      final acts = widget.actions;
+      if (acts.isNotEmpty) {
+        acts[_btn.clamp(0, acts.length - 1)].$2();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// 当前行光标描边（导航态下白框标识停在哪一行）
+  BoxDecoration _rowRing(bool active) => BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: active ? Colors.white : Colors.transparent,
+          width: active ? 2 : 0,
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final fields = widget.fields(_seg);
+    final lastRow = _rowCount - 1;
+    final children = <Widget>[];
+
+    var row = 0;
+    if (_hasSeg) {
+      final r = row;
+      children.add(Container(
+        decoration: _rowRing(_row == r),
+        padding: const EdgeInsets.all(2),
+        child: SegmentedButton<int>(
+          segments: [
+            for (var i = 0; i < widget.segments!.length; i++)
+              ButtonSegment(value: i, label: Text(widget.segments![i])),
+          ],
+          selected: {_seg},
+          onSelectionChanged: (s) {
+            setState(() => _seg = s.first);
+            widget.onSegChanged?.call(_seg);
+          },
+        ),
+      ));
+      row++;
+    }
+
+    for (var i = 0; i < fields.length; i++) {
+      final spec = fields[i];
+      final r = row;
+      children.add(Container(
+        decoration: _rowRing(_row == r),
+        padding: const EdgeInsets.all(2),
+        child: ImeSafeTextField(
+          controller: spec.controller,
+          focusNode: _node(r),
+          style: const TextStyle(color: Colors.white),
+          decoration: _inputDecoration(spec.hint)
+              .copyWith(suffixIcon: spec.suffix?.call()),
+        ),
+      ));
+      if (i < fields.length - 1) {
+        children.add(const SizedBox(height: 8));
+      }
+      row++;
+    }
+
+    children.add(const SizedBox(height: 10));
+    children.add(Container(
+      decoration: _rowRing(_row == lastRow),
+      padding: const EdgeInsets.all(2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          for (var i = 0; i < widget.actions.length; i++) ...[
+            if (i > 0) const SizedBox(width: 8),
+            _actionButton(widget.actions[i].$1, i, widget.actions[i].$2),
+          ],
+        ],
+      ),
+    ));
+
+    return AlertDialog(
+      backgroundColor: AppColors.overlaySolid,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: AppColors.stroke),
+      ),
+      title: Text(widget.title,
+          style: const TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: children,
+        ),
+      ),
+    );
+  }
+
+  Widget _actionButton(String label, int index, VoidCallback onTap) {
+    final focused = _row == _rowCount - 1 && _btn == index;
+    final primary = index == 1; // 保存=主按钮
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _row = _rowCount - 1;
+          _btn = index;
+        });
+        onTap();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+        decoration: BoxDecoration(
+          color: primary
+              ? AppColors.accent.withValues(alpha: focused ? 0.30 : 0.18)
+              : Colors.white.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: focused
+                ? Colors.white
+                : (primary ? AppColors.accent : AppColors.stroke),
+            width: focused ? 2 : 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: primary ? Colors.white : AppColors.textSecondary,
+            fontSize: 13.5,
+            fontWeight: primary ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 InputDecoration _inputDecoration(String hint,
     [TextEditingController? pasteTarget]) {
   return InputDecoration(
@@ -3639,7 +3992,7 @@ class _BlacklistRowState extends State<_BlacklistRow> {
   Future<void> _open() async {
     await ChannelBlacklist.ensure();
     if (!mounted) return;
-    await showDialog<void>(
+    await showChildDialog<void>(
       context: context,
       barrierColor: AppColors.scrim,
       builder: (_) => const _BlacklistDialog(),

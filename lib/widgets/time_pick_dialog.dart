@@ -67,10 +67,14 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
   void initState() {
     super.initState();
     _openCount++;
+    // 遥控器按键走 HardwareKeyboard 通道（与在线电台弹窗/定时关闭弹窗
+    // 同一通道）。之前挂在 Focus.onKeyEvent 上，用户实测遥控器完全没反应。
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     _openCount--;
     _focus.dispose();
     super.dispose();
@@ -89,10 +93,12 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
   void _confirm() =>
       Navigator.pop(context, TimeOfDay(hour: _hour, minute: _minute));
 
-  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-      return KeyEventResult.ignored;
-    }
+  /// 遥控器/键盘按键（HardwareKeyboard 通道）。
+  /// 必须自己是栈顶弹窗才动手（上层不会再有弹窗，防御性保留）。
+  bool _onHardwareKey(KeyEvent event) {
+    if (!mounted) return false;
+    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final k = event.logicalKey;
     // 上 = 加，下 = 减（与滚轮/数字选择器的直觉一致）。
     // 焦点在按钮行时，上下都退回分钟框——数字区里上下只循环调数值，
@@ -103,7 +109,7 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
       } else {
         _step(k == LogicalKeyboardKey.arrowUp ? 1 : -1);
       }
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.arrowLeft) {
       setState(() {
@@ -113,7 +119,7 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
           _col = 0;
         }
       });
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.arrowRight) {
       setState(() {
@@ -127,7 +133,7 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
           _btn = 1;
         }
       });
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
@@ -136,18 +142,18 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
         k == LogicalKeyboardKey.space) {
       if (_col == 2 && _btn == 1) {
         Navigator.pop(context);
-      } else {
+      } else if (event is KeyDownEvent) {
         _confirm();
       }
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.escape ||
         k == LogicalKeyboardKey.goBack ||
         k == LogicalKeyboardKey.browserBack) {
-      Navigator.pop(context);
-      return KeyEventResult.handled;
+      if (event is KeyDownEvent) Navigator.pop(context);
+      return true;
     }
-    return KeyEventResult.ignored;
+    return false;
   }
 
   /// 一列数字：▲ / 数字 / ▼。点击数字本身切换当前列
@@ -212,83 +218,80 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Focus(
-      focusNode: _focus,
-      autofocus: true,
-      onKeyEvent: _onKey,
-      child: AlertDialog(
-        backgroundColor: AppColors.overlay,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: const BorderSide(color: AppColors.stroke),
-        ),
-        title: Text(
-          widget.title,
-          style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _column(
-                  value: _hour,
-                  active: _col == 0,
-                  onTapColumn: () => setState(() => _col = 0),
-                  onUp: () {
-                    setState(() => _col = 0);
-                    _step(1);
-                  },
-                  onDown: () {
-                    setState(() => _col = 0);
-                    _step(-1);
-                  },
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  child: Text(
-                    ':',
-                    style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontSize: 34,
-                      fontWeight: FontWeight.w600,
-                    ),
+    // 注意：按键在 _onHardwareKey（HardwareKeyboard 通道）处理，这里
+    // 不再包 Focus——两层会对同一个按键各执行一次，表现为跳两格
+    return AlertDialog(
+      backgroundColor: AppColors.overlay,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: AppColors.stroke),
+      ),
+      title: Text(
+        widget.title,
+        style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _column(
+                value: _hour,
+                active: _col == 0,
+                onTapColumn: () => setState(() => _col = 0),
+                onUp: () {
+                  setState(() => _col = 0);
+                  _step(1);
+                },
+                onDown: () {
+                  setState(() => _col = 0);
+                  _step(-1);
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  ':',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 34,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-                _column(
-                  value: _minute,
-                  active: _col == 1,
-                  onTapColumn: () => setState(() => _col = 1),
-                  onUp: () {
-                    setState(() => _col = 1);
-                    _step(1);
-                  },
-                  onDown: () {
-                    setState(() => _col = 1);
-                    _step(-1);
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              '上下调数值 · 左右切时/分 · 分钟上再按右到「确定」',
-              style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
-            ),
-            const SizedBox(height: 14),
-            // 确定 / 取消：只有从分钟框按右才出得来（用户定义的顺序），
-            // 所以这两个按钮不进焦点树，焦点状态由 _col/_btn 自己画
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                _actionButton('取消', 1, () => Navigator.pop(context)),
-                const SizedBox(width: 8),
-                _actionButton('确定', 0, _confirm),
-              ],
-            ),
-          ],
-        ),
+              ),
+              _column(
+                value: _minute,
+                active: _col == 1,
+                onTapColumn: () => setState(() => _col = 1),
+                onUp: () {
+                  setState(() => _col = 1);
+                  _step(1);
+                },
+                onDown: () {
+                  setState(() => _col = 1);
+                  _step(-1);
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            '上下调数值 · 左右切时/分 · 分钟上再按右到「确定」',
+            style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+          ),
+          const SizedBox(height: 14),
+          // 确定 / 取消：只有从分钟框按右才出得来（用户定义的顺序），
+          // 所以这两个按钮不进焦点树，焦点状态由 _col/_btn 自己画
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              _actionButton('取消', 1, () => Navigator.pop(context)),
+              const SizedBox(width: 8),
+              _actionButton('确定', 0, _confirm),
+            ],
+          ),
+        ],
       ),
     );
   }

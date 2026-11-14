@@ -41,8 +41,9 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     _observeMediaTitle();
   }
 
-  final Uri _url;
-  final Map<String, String>? _headers;
+  /// 当前流地址/HTTP 头：原地换源（[openInPlace]）会就地改写
+  Uri _url;
+  Map<String, String>? _headers;
   final bool _radioSpectrum;
 
   /// 是否挂音频电平表（电台「会动的波形」用）。
@@ -383,6 +384,53 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     } catch (e) {
       debugPrint('[OmiVideo] drop spectrum failed: $e');
     }
+  }
+
+  /// 原地换源：不新建 Player/VideoController，只让现有 mpv 换一路流。
+  ///
+  /// 专治「安卓通知栏切台后不出声」：后台没有 Surface，新建内核的
+  /// texture 管线拿不到画布，open 会卡在等纹理；而原地 open 复用已有
+  /// 音频输出，后台立刻换台出声。
+  @override
+  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
+    if (_disposed) throw StateError('controller released');
+    _url = url;
+    _headers = headers;
+    _videoDisabled = true;
+    await _applyFaultTolerance();
+    try {
+      // 后台没有 Surface：先把视频轨摘掉，open 才不会停在等纹理上
+      await _player.setVideoTrack(VideoTrack.no());
+    } catch (_) {}
+    final opening = _player.open(
+      Media(url.toString(), httpHeaders: headers),
+      play: false,
+    );
+    // mpv 的 `vid` 是每文件选项：open 之后会被新文件重置，抢在首帧
+    // 解码前再补一刀（与 initialize 里的处理一致）
+    Timer(const Duration(milliseconds: 200), () async {
+      if (_disposed) return;
+      try {
+        await _player.setVideoTrack(VideoTrack.no());
+      } catch (_) {}
+    });
+    try {
+      await opening.timeout(const Duration(seconds: 6));
+    } on TimeoutException {
+      debugPrint('[OmiVideo] 后台原地换台 open 超时：按已起播继续');
+    }
+    _playerOpened = true;
+    _set(
+      _value.copyWith(
+        isInitialized: true,
+        hasError: false,
+        isCompleted: false,
+        mediaTitle: '',
+        position: Duration.zero,
+        duration: Duration.zero,
+        bufferedEnd: Duration.zero,
+      ),
+    );
   }
 
   Future<void> play() async {

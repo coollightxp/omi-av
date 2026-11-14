@@ -473,7 +473,10 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
         policy: WidgetOrderTraversalPolicy(),
         child: Focus(
           focusNode: _rootFocus,
-          onKeyEvent: (_, event) => _handleKey(event),
+          // 注意：按键只走 HardwareKeyboard 通道（initState 里注册的
+          // _onHardwareKey）。这里不能挂 onKeyEvent——两条通道会对同一个
+          // 按键各执行一次 _handleKey，遥控器按一下左右就跳两格
+          // （2026-11-14 用户实测：地区/分类两行"两个两个跳"）
           child: Dialog(
             backgroundColor: Colors.transparent,
             insetPadding:

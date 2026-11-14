@@ -22,8 +22,7 @@ import 'omi_video_value.dart';
 /// - 没有 af-metadata → 波形退回模拟动画（[audioLevel] 恒为 -1）
 /// - 录制/截帧走 fvp 扩展（MDK 原生 `record` / `snapshot`，见 OMPlayer
 ///   同款实现），与 mpv 的 stream-record 一样可用
-class OmiVideoMdkController extends ChangeNotifier
-    implements OmiVideoBackend {
+class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoMdkController.network(
     Uri url, {
     Map<String, String>? headers,
@@ -128,8 +127,7 @@ class OmiVideoMdkController extends ChangeNotifier
         size: v.size,
         position: v.position,
         duration: v.duration,
-        bufferedEnd:
-            v.buffered.isEmpty ? Duration.zero : v.buffered.last.end,
+        bufferedEnd: v.buffered.isEmpty ? Duration.zero : v.buffered.last.end,
         mediaTitle: _value.mediaTitle,
         errorDescription: v.errorDescription,
       ),
@@ -186,8 +184,8 @@ class OmiVideoMdkController extends ChangeNotifier
       final w = _pc.value.size.width.round();
       final h = _pc.value.size.height.round();
       if (w <= 0 || h <= 0) return null;
-      final rgba = await fvp.FVPControllerExtensions(_pc)
-          .snapshot(width: w, height: h);
+      final rgba =
+          await fvp.FVPControllerExtensions(_pc).snapshot(width: w, height: h);
       if (rgba == null || rgba.isEmpty) return null;
       final buf = await ui.ImmutableBuffer.fromUint8List(rgba);
       final desc = ui.ImageDescriptor.raw(
@@ -238,6 +236,11 @@ class OmiVideoMdkController extends ChangeNotifier
 
   @override
   Future<void> setVideoOutputDisabled(bool disabled) async {}
+
+  @override
+  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
+    throw UnsupportedError('当前内核不支持原地换源');
+  }
 
   @override
   Future<void> release() async {

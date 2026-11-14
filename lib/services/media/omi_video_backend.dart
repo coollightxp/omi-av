@@ -45,6 +45,19 @@ abstract class OmiVideoBackend extends ChangeNotifier {
   /// MDK/Web 下为空实现。
   Future<void> setVideoOutputDisabled(bool disabled);
 
+  /// 原地换源：不重建内核，直接让现有播放器换一路流。
+  ///
+  /// 只给「安卓后台电台切台」用：后台没有 Surface，新建内核的 texture
+  /// 管线拿不到画布，open 会一直停在等纹理上（实测：通知栏点下一台，
+  /// 声音不响，回到界面才跳台）。原地 open 沿用已有的音频输出，
+  /// 后台照样出声。
+  ///
+  /// 默认实现抛 [UnsupportedError]（MDK/Web 不支持），调用方捕获后
+  /// 回退到重建内核的老路径。
+  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
+    throw UnsupportedError('当前内核不支持原地换源');
+  }
+
   /// 异步释放 native 资源（幂等，可重复调用）
   Future<void> release();
 }

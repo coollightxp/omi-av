@@ -13,8 +13,7 @@ import 'omi_video_value.dart';
 ///
 /// media_kit 的 web 支持尚不成熟，Web 保持原有 video_player 路径，
 /// 其余平台统一走 media_kit。两端 API 完全一致。
-class OmiVideoController extends ChangeNotifier
-    implements OmiVideoBackend {
+class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
     Map<String, String>? headers,
@@ -99,6 +98,11 @@ class OmiVideoController extends ChangeNotifier
   Future<void> setVideoOutputDisabled(bool disabled) async {}
 
   Future<void> stopRecord() async {}
+
+  @override
+  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
+    throw UnsupportedError('当前内核不支持原地换源');
+  }
 
   Future<void> release() async {
     if (_disposed) return;

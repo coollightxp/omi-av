@@ -96,7 +96,18 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
       });
 
   @override
+  void initState() {
+    super.initState();
+    // 遥控器按键走 HardwareKeyboard 通道（与在线电台弹窗同一通道）。
+    // 之前挂在 Focus.onKeyEvent 上，用户实测弹窗里遥控器完全没反应——
+    // 通道问题不在本弹窗的逻辑，而在按键根本没被派发进这条弹窗的
+    // 焦点链。硬件键盘通道已被设置页/电台弹窗证明在这台机器上可靠。
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
+  }
+
+  @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     for (final n in _nodes.values) {
       n.dispose();
     }
@@ -173,26 +184,29 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
     _tap[n]?.call();
   }
 
-  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-      return KeyEventResult.ignored;
-    }
+  /// 遥控器/键盘按键（HardwareKeyboard 通道）。
+  /// 返回 true 表示本弹窗消费；必须自己是栈顶弹窗才动手——
+  /// 从这里再打开时间选择器时，按键归它，不能两层一起动。
+  bool _onHardwareKey(KeyEvent event) {
+    if (!mounted) return false;
+    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final k = event.logicalKey;
     if (k == LogicalKeyboardKey.arrowUp) {
       _move(-1, 0);
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.arrowDown) {
       _move(1, 0);
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.arrowLeft) {
       _move(0, -1);
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.arrowRight) {
       _move(0, 1);
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
@@ -200,16 +214,16 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
         k == LogicalKeyboardKey.gameButtonA ||
         k == LogicalKeyboardKey.space) {
       if (event is KeyDownEvent) _activate();
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.escape ||
         k == LogicalKeyboardKey.goBack ||
         k == LogicalKeyboardKey.browserBack ||
         k == LogicalKeyboardKey.contextMenu) {
       if (event is KeyDownEvent) Navigator.pop(context);
-      return KeyEventResult.handled;
+      return true;
     }
-    return KeyEventResult.ignored;
+    return false;
   }
 
   Widget _chip(int row, String id, String label, bool on, VoidCallback onTap) {
@@ -266,61 +280,58 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
       });
     }
 
-    return Focus(
-      onKeyEvent: _onKey,
-      child: AlertDialog(
-        backgroundColor: AppColors.overlay,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: const BorderSide(color: AppColors.stroke),
-        ),
-        title: const Text('定时关闭',
-            style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
-        content: SizedBox(
-          width: 340,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+    return AlertDialog(
+      backgroundColor: AppColors.overlay,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: AppColors.stroke),
+      ),
+      title: const Text('定时关闭',
+          style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+      content: SizedBox(
+        width: 340,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (remain != null)
                 Text(
-                  remain == null
-                      ? '到点自动执行下方动作'
-                      : '${setAt == null ? '剩余' : '${_hhmm(setAt)} 关闭 · 剩余'}'
-                          ' ${_fmtRemain(remain)}',
+                  '${setAt == null ? '剩余' : '${_hhmm(setAt)} 关闭 · 剩余'}'
+                  ' ${_fmtRemain(remain)}',
                   style: const TextStyle(
                       color: AppColors.textSecondary, fontSize: 12.5),
                 ),
-                const SizedBox(height: 12),
-                const _SectionLabel('到点做什么'),
-                Wrap(spacing: 6, runSpacing: 6, children: actionChips),
-                const SizedBox(height: 10),
-                const _SectionLabel('倒计时'),
-                Wrap(spacing: 6, runSpacing: 6, children: timerChips),
-                const SizedBox(height: 10),
-                const _SectionLabel('固定时刻（点「设置」选几点，今天已过算明天）'),
-                Row(
-                  children: [
-                    Text(setAt != null ? _hhmm(setAt) : '23:30',
-                        style: const TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w600)),
-                    const SizedBox(width: 12),
-                    ...atChips,
-                  ],
-                ),
-                if (remain != null || setAt != null) ...[
-                  const SizedBox(height: 8),
-                  _chip(3, 'cancel', '取消定时', false,
-                      () => Navigator.pop(context, _SleepPick(null, _action))),
+              // 「到点自动执行下方动作」「到点做什么」都是废话（2026-11-14
+              // 用户实测点名去掉）；各段之间行距也一并收紧
+              const SizedBox(height: 8),
+              Wrap(spacing: 6, runSpacing: 5, children: actionChips),
+              const SizedBox(height: 8),
+              const _SectionLabel('倒计时'),
+              Wrap(spacing: 6, runSpacing: 5, children: timerChips),
+              const SizedBox(height: 8),
+              const _SectionLabel('固定时刻（点「设置」选几点，今天已过算明天）'),
+              Row(
+                children: [
+                  Text(setAt != null ? _hhmm(setAt) : '23:30',
+                      style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 12),
+                  ...atChips,
                 ],
+              ),
+              if (remain != null || setAt != null) ...[
                 const SizedBox(height: 6),
-                const Text('上下换一行 · 左右换一项 · OK 确定 · 返回退出',
-                    style:
-                        TextStyle(color: AppColors.textTertiary, fontSize: 11)),
+                _chip(3, 'cancel', '取消定时', false,
+                    () => Navigator.pop(context, _SleepPick(null, _action))),
               ],
-            ),
+              const SizedBox(height: 4),
+              const Text('上下换一行 · 左右换一项 · OK 确定 · 返回退出',
+                  style:
+                      TextStyle(color: AppColors.textTertiary, fontSize: 11)),
+            ],
           ),
         ),
       ),

@@ -2469,12 +2469,6 @@ class PlayerController extends ChangeNotifier {
       }
     }
 
-    await _disposeVideoController();
-
-    // 等待释放期间用户已切新台（新代已接管）：本代直接作废，
-    // 不再做预检/建播放器，避免慢源迟到后与新台两路并存
-    if (gen != _playGeneration) return;
-
     // 频道声明的自定义 UA（M3U http-user-agent）：部分源（如 APTV）
     // 必须带指定 UA，否则返回 404/广告。fvp 经 ffmpeg 透传 HTTP 头。
     // 注意：不要给投屏 URL 主动补 UA/Referer——视频号 CDN 实测对
@@ -2487,6 +2481,42 @@ class PlayerController extends ChangeNotifier {
     if (channel.httpReferer.trim().isNotEmpty) {
       headers['Referer'] = channel.httpReferer.trim();
     }
+
+    // 安卓后台电台换台（通知栏上一台/下一台）：**复用现有内核原地换源**。
+    //
+    // 后台没有 Surface：新建内核的 texture 管线拿不到画布，mpv 的 open
+    // 会停在等纹理上——用户实测就是「点了下一台，卡片台名变了但没声，
+    // 切回界面才跳台」。原地 open 不碰 texture，直接用已在跑的音频
+    // 输出换流，后台几秒内就出声。失败（内核释放/不支持）回退重建。
+    final live = _videoController;
+    if (channel.isRadio && _isBackgroundNow && live != null) {
+      try {
+        await live.openInPlace(
+          Uri.parse(channel.streamUrls[_sourceIndex]),
+          headers: headers.isEmpty ? null : headers,
+        );
+        if (gen != _playGeneration) return;
+        await live.play();
+        _state = PlayerState.playing;
+        _lastError = null;
+        _sniffedFromWeb = false;
+        _softErrPending = false;
+        _softErrSecondRound = false;
+        await _saveLastChannel();
+        // 卡片台名/曲目跟着换（原生只改标题不重建服务）
+        _syncAudioNotification();
+        notifyListeners();
+        return;
+      } catch (e) {
+        debugPrint('[Omi] 后台原地换台失败，回退重建内核: $e');
+      }
+    }
+
+    await _disposeVideoController();
+
+    // 等待释放期间用户已切新台（新代已接管）：本代直接作废，
+    // 不再做预检/建播放器，避免慢源迟到后与新台两路并存
+    if (gen != _playGeneration) return;
 
     // libmpv 自行嗅探容器格式，无需 formatHint；Web 端 video_player 仍需
     // 依据后缀/MIME 选择正确解析器，这里统一算好交给门面

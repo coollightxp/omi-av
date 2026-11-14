@@ -3,7 +3,8 @@ import 'dart:collection';
 import 'dart:convert';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
-import 'package:flutter/gestures.dart' show kPrimaryButton;
+import 'package:flutter/gestures.dart' show kPrimaryButton, kSecondaryButton;
+import 'package:flutter/rendering.dart' show RenderEditable, HitTestResult;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -845,6 +846,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           isOpen: _settingsOpen,
                           onClose: () {
                             setState(() => _settingsOpen = false);
+                            settingsChildOpen.value = false;
                             // 关闭后恢复低级钩子对数字键的选台拦截
                             _winHotkeys.setCapture(true);
                             WidgetsBinding.instance.addPostFrameCallback(
@@ -852,16 +854,26 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           },
                         ),
 
-                      // 鼠标右键 = 遥控器返回：按层级关闭 投屏→抽屉→面板，
-                      // 再按弹退出确认（网页频道前台时右键被 WebView 消费，
+                      // 鼠标右键 = 遥控器返回：按层级关闭 投屏→抽屉→设置
+                      // →再按弹退出确认（网页频道前台时右键被 WebView 消费，
                       // 网页区内不触发；网页菜单已在 JS 层禁用）。
-                      // 设置面板打开时不拦截：输入框里右键要能弹「全选/复制/
-                      // 粘贴」系统菜单，不能被当成返回。
-                      if (controller.isDesktop && !mini && !_settingsOpen)
+                      //
+                      // 用 Listener.onPointerDown 而不是 GestureDetector：
+                      // 手势竞技场里右键会被卡片内的 InkWell / 输入框的
+                      // TextSelectionGestureDetector 抢走，实测「设置卡片
+                      // 打开后右键退不出去」。Listener 在命中路径上无条件
+                      // 收到按下事件，不看谁赢了仲裁。
+                      // 命中输入框（RenderEditable）时放行——那里右键是
+                      // 全选/复制/粘贴系统菜单，不是返回。
+                      if (controller.isDesktop && !mini)
                         Positioned.fill(
-                          child: GestureDetector(
+                          child: Listener(
                             behavior: HitTestBehavior.translucent,
-                            onSecondaryTapUp: (_) => _handleBackPressed(),
+                            onPointerDown: (e) {
+                              if (e.buttons & kSecondaryButton == 0) return;
+                              if (_pointerHitsTextField(e.position)) return;
+                              unawaited(_handleBackPressed());
+                            },
                           ),
                         ),
 
@@ -959,6 +971,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 安卓返回键/遥控器返回处理（PopScope 拦截后调用）：
   /// 按层级关闭 设置→投屏→面板→全屏；都没有时弹退出确认
+  /// 这个全局坐标点是否落在文本输入框上（右键菜单归它自己）
+  bool _pointerHitsTextField(Offset globalPosition) {
+    try {
+      final result = HitTestResult();
+      WidgetsBinding.instance.hitTestInView(
+        result,
+        globalPosition,
+        View.of(context).viewId,
+      );
+      for (final entry in result.path) {
+        if (entry.target is RenderEditable) return true;
+      }
+    } catch (_) {
+      // 命中测试偶发异常（视图已销毁等）：当作不在输入框上
+    }
+    return false;
+  }
+
   Future<void> _handleBackPressed() async {
     // 数字选台输入中：返回键 = 取消输入（清缓存并隐藏 OSD），
     // 不落入退出确认等后续分支
@@ -984,8 +1014,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       c.unlock();
       return;
     }
+    if (_settingsOpen && settingsChildOpen.value) {
+      // 设置卡片上压着下一级卡片（编辑/确认/诊断/扫码…）：这一下返回
+      // 只关那一层，设置卡片留着。以前直接落到下面的分支，一下把
+      // 两层一起关掉（用户实测：退到上一级却连设置也没了）
+      Navigator.of(context).maybePop();
+      return;
+    }
     if (_settingsOpen) {
       setState(() => _settingsOpen = false);
+      // 兜底：万一某个下一级卡片的 Future 没能回来（路由被外部销毁），
+      // 这里复位，免得设置卡片一直停在透明状态
+      settingsChildOpen.value = false;
       // 与设置面板右上角关闭、S 键切换保持一致：恢复低级钩子的数字键
       // 拦截，否则网页前台时数字选台会失灵
       _winHotkeys.setCapture(true);
@@ -1325,6 +1365,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 这里若按「弹层统一收口」处理，方向键会被吞掉、OK 还会直接把弹窗
     // 关掉——遥控器根本没法在里面选台加台。放行给它自己的焦点树处理。
     if (RadioSearchDialog.active) return false;
+    // 设置编辑弹窗（编辑播放列表/编辑 EPG）：自带行导航，放行
+    if (settingsEditDialogOpen) return false;
     // 定时关闭弹窗 / 自绘时间选择器：自带遥控器焦点导航（上下 + OK），
     // 放行给它们自己处理。否则这里的「弹层收口」会把 OK 当关闭、
     // 把方向键全部吞掉——遥控器既选不了也改不了时间
@@ -1709,6 +1751,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 设置面板里有输入框（URL、数字等）：仅返回/菜单键负责关面板，
     // 其余按键放行给输入框
     if (_settingsOpen) {
+      // 设置里弹出的编辑弹窗（编辑播放列表/编辑 EPG）自带行导航：
+      // 返回只关弹窗这一层，不能落到 _handleBackPressed 把设置卡片
+      // 也一起关掉（2026-11-14 用户实测）
+      // settingsChildOpen：本文件之外（settings_panel 内统一包装）弹出的
+      // 下一级卡片，返回同样只关它那一层
+      if (settingsEditDialogOpen || settingsChildOpen.value) return false;
       if (isDown &&
           (k == LogicalKeyboardKey.escape ||
               k == LogicalKeyboardKey.contextMenu)) {
