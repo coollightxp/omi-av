@@ -167,6 +167,31 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   int _shutdownCountdown = 60;
   Timer? _shutdownTimer;
 
+  // 定时关闭卡片：**与退出/关机卡片完全同一套模式**——按键逻辑全部
+  // 在本页处理（_handleSleepCardKey / _handleTimePickKey），弹窗本体
+  // 只是纯视觉（buildSleepTimerCard / buildRemoteTimePickerCard）。
+  // 以前按键挂在弹窗自己身上（HardwareKeyboard / Focus / sink 转发
+  // 三条通道轮着试了三版），这台机器上遥控器始终一个键都收不到；
+  // 而按键写在本页的退出/关机卡片一直是好的
+  bool _sleepCardOpen = false;
+  int _sleepRow = 0; // 0=到点动作 1=倒计时 2=固定时刻 3=取消定时
+  int _sleepCol = 0;
+  SleepAction _sleepAction = SleepAction.pause;
+  bool _sleepShowShutdown = false;
+  Duration? _sleepRemain;
+  DateTime? _sleepSetAt;
+  StateSetter? _sleepRefresh;
+  BuildContext? _sleepDialogCtx;
+
+  // 时间选择卡片（从定时关闭卡片的「设置…」进入）
+  bool _timePickOpen = false;
+  int _tpHour = 23;
+  int _tpMin = 30;
+  int _tpCol = 0; // 0=时 1=分 2=按钮行
+  int _tpBtn = 0; // 0=确定 1=取消
+  StateSetter? _tpRefresh;
+  BuildContext? _tpDialogCtx;
+
   // 两个侧边面板的状态句柄：遥控器/键盘导航由本页统一分发
   // （HardwareKeyboard 与 Windows 低级钩子走同一入口）
   final GlobalKey<LeftChannelDrawerState> _leftDrawerKey = GlobalKey();
@@ -694,7 +719,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       // 定时关闭：视频/直播画面右上角（时间下方）常显倒计时，
                       // 最后 60 秒弹大卡片提示并可按返回键取消——电台画面里
                       // 台名一行已有同款徽标，那边不再重复
-                      if (!mini) const SleepBadgeOverlay(),
+                      if (!mini) SleepBadgeOverlay(onTap: _openSleepCard),
                       if (!mini) const SleepFinalCard(),
 
                       // 移动端：屏幕分三区，单击左/中/右分别呼出频道菜单/
@@ -1236,8 +1261,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _toggleSettings();
         break;
       case 'sleep':
-        // 已设过就报剩余，没设就报玩法；弹窗与底部面板/设置面板同一套
-        await showSleepTimerDialog(context);
+        // 定时关闭卡片：按键逻辑在本页（与退出卡片同一套）
+        await _openSleepCard();
         break;
       case 'shutdown':
         // 不直接执行 shutdown：先弹应用内关机卡片（60 秒倒计时，
@@ -1395,9 +1420,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (RadioSearchDialog.active) return false;
     // 设置编辑弹窗（编辑播放列表/编辑 EPG）：自带行导航，放行
     if (settingsEditDialogOpen) return false;
-    // 定时关闭弹窗 / 自绘时间选择器：按键统一从 `_onGlobalKeyEvent`
-    // 转发（sleepTimerKeySink / timePickerKeySink），这里只负责不再兜底
-    if (sleepTimerDialogOpen || remoteTimePickerOpen) return true;
+    // 定时关闭卡片 / 时间选择卡片：按键统一从 `_onGlobalKeyEvent`
+    // 进来（_handleSleepCardKey / _handleTimePickKey），这里只负责
+    // 不再兜底
+    if (_sleepCardOpen || _timePickOpen) return true;
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
@@ -1815,6 +1841,280 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// - 菜单键（contextMenu）：短按=EPG 节目单，长按=手机扫码管理二维码
   /// - 返回/Esc：按层级关闭 设置→投屏→面板→全屏，再按弹退出确认。
   ///   Windows 与 Android 行为一致（Android 系统 Back 走 PopScope）
+  // ==================== 定时关闭卡片（播放页管按键，弹窗只画） ====================
+
+  /// 打开定时关闭卡片。替代旧的 showSleepTimerDialog：卡片是纯视觉，
+  /// 行列/选中状态都在本页，按键走 _handleSleepCardKey。
+  Future<void> _openSleepCard() async {
+    if (_sleepCardOpen || _timePickOpen) return;
+    final c = context.read<PlayerController>();
+    var action = c.sleepAction;
+    // 移动端没有关机语义，界面也不显示；历史值兜底成退出
+    if (action == SleepAction.shutdown && !c.isDesktop) {
+      action = SleepAction.exit;
+    }
+    _sleepAction = action;
+    _sleepShowShutdown = c.isDesktop;
+    _sleepRemain = c.sleepRemain;
+    _sleepSetAt = c.sleepAt;
+    _sleepRow = 0;
+    _sleepCol = 0;
+    _sleepCardOpen = true;
+    SleepPick? picked;
+    try {
+      picked = await showDialog<SleepPick>(
+        context: context,
+        barrierColor: AppColors.scrim,
+        builder: (_) => StatefulBuilder(
+          builder: (ctx, setD) {
+            _sleepRefresh = setD;
+            _sleepDialogCtx = ctx;
+            return _buildSleepCard();
+          },
+        ),
+      );
+    } finally {
+      _sleepCardOpen = false;
+      _sleepRefresh = null;
+      _sleepDialogCtx = null;
+    }
+    if (picked == null || !mounted) return;
+    await c.setSleepAt(picked.at, action: picked.action);
+  }
+
+  /// 卡片行结构（与 buildSleepTimerCard 的渲染一一对应）。
+  /// 0=到点动作 / 1=倒计时 / 2=固定时刻（设置…）/ 3=取消定时（可省略）
+  List<List<SleepCardItem>> _sleepRows() {
+    final rows = <List<SleepCardItem>>[
+      [
+        SleepCardItem('暂停播放',
+            selected: _sleepAction == SleepAction.pause),
+        SleepCardItem('退出应用', selected: _sleepAction == SleepAction.exit),
+        if (_sleepShowShutdown)
+          SleepCardItem('退出并关机',
+              selected: _sleepAction == SleepAction.shutdown),
+      ],
+      const [
+        SleepCardItem('30 分钟'),
+        SleepCardItem('60 分钟'),
+        SleepCardItem('90 分钟'),
+        SleepCardItem('120 分钟'),
+      ],
+      const [SleepCardItem('设置…')],
+    ];
+    if (_sleepRemain != null || _sleepSetAt != null) {
+      rows.add(const [SleepCardItem('取消定时')]);
+    }
+    return rows;
+  }
+
+  Widget _buildSleepCard() {
+    final remainText = (_sleepRemain != null)
+        ? '${_sleepSetAt == null ? '剩余' : '${sleepHhmm(_sleepSetAt!)} 关闭 · 剩余'}'
+            ' ${sleepFmtRemain(_sleepRemain!)}'
+        : null;
+    return buildSleepTimerCard(
+      rows: _sleepRows(),
+      row: _sleepRow,
+      col: _sleepCol,
+      remainText: remainText,
+      atText: _sleepSetAt != null ? sleepHhmm(_sleepSetAt!) : '23:30',
+    );
+  }
+
+  void _popSleepCard(SleepPick? pick) {
+    final ctx = _sleepDialogCtx;
+    _sleepCardOpen = false;
+    if (ctx != null && ctx.mounted && Navigator.of(ctx).canPop()) {
+      Navigator.of(ctx).pop(pick);
+    }
+  }
+
+  /// 定时关闭卡片的遥控器/键盘按键。**在本页处理**（与退出卡片
+  /// _handleExitDialogKey 同一模式），返回 true=已消费。
+  bool _handleSleepCardKey(KeyEvent event) {
+    final isDown = event is KeyDownEvent;
+    // 抬起也吞掉：防止关卡片瞬间抬起事件落到底下的播放页
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return true;
+    final k = event.logicalKey;
+    final rows = _sleepRows();
+    switch (k) {
+      case LogicalKeyboardKey.arrowUp:
+        var r = (_sleepRow - 1 + rows.length) % rows.length;
+        _sleepRow = r;
+        _sleepCol = _sleepCol.clamp(0, rows[r].length - 1);
+        _sleepRefresh?.call(() {});
+        return true;
+      case LogicalKeyboardKey.arrowDown:
+        var r = (_sleepRow + 1) % rows.length;
+        _sleepRow = r;
+        _sleepCol = _sleepCol.clamp(0, rows[r].length - 1);
+        _sleepRefresh?.call(() {});
+        return true;
+      case LogicalKeyboardKey.arrowLeft:
+      case LogicalKeyboardKey.arrowRight:
+        final right = k == LogicalKeyboardKey.arrowRight;
+        if (_sleepRow == 0) {
+          // 动作行：左右键直接改选中（用户定稿的交互）
+          final n = rows[0].length;
+          var i = (_sleepCol + (right ? 1 : -1) + n) % n;
+          _sleepCol = i;
+          _sleepAction = i == 0
+              ? SleepAction.pause
+              : i == 1
+                  ? SleepAction.exit
+                  : SleepAction.shutdown;
+        } else {
+          final n = rows[_sleepRow].length;
+          _sleepCol = (_sleepCol + (right ? 1 : -1) + n) % n;
+        }
+        _sleepRefresh?.call(() {});
+        return true;
+      default:
+        break;
+    }
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA) {
+      if (!isDown) return true;
+      switch (_sleepRow) {
+        case 1:
+          final m = const [30, 60, 90, 120][_sleepCol.clamp(0, 3)];
+          _popSleepCard(
+              SleepPick(DateTime.now().add(Duration(minutes: m)), _sleepAction));
+        case 2:
+          // 进时间选择器：不关本卡片，选完一起生效
+          unawaited(_openTimePicker(TimeOfDay(
+            hour: _sleepSetAt?.hour ?? 23,
+            minute: _sleepSetAt?.minute ?? 30,
+          )));
+        case 3:
+          _popSleepCard(SleepPick(null, _sleepAction));
+        default:
+          // 动作行 OK 只是确认（选中已即时生效），不关闭
+          break;
+      }
+      return true;
+    }
+    if (k == LogicalKeyboardKey.escape ||
+        k == LogicalKeyboardKey.goBack ||
+        k == LogicalKeyboardKey.browserBack ||
+        k == LogicalKeyboardKey.contextMenu) {
+      if (isDown) _popSleepCard(null);
+      return true;
+    }
+    return true; // 其余键一律吞掉，绝不漏成切台
+  }
+
+  /// 打开时间选择卡片（纯视觉，按键在 _handleTimePickKey）。
+  /// 选完确定时：连同定时关闭卡片一起生效并关闭。
+  Future<void> _openTimePicker(TimeOfDay initial) async {
+    if (_timePickOpen) return;
+    _tpHour = initial.hour;
+    _tpMin = initial.minute;
+    _tpCol = 0;
+    _tpBtn = 0;
+    _timePickOpen = true;
+    TimeOfDay? result;
+    try {
+      result = await showDialog<TimeOfDay>(
+        context: context,
+        barrierColor: AppColors.scrim,
+        builder: (_) => StatefulBuilder(
+          builder: (ctx, setD) {
+            _tpRefresh = setD;
+            _tpDialogCtx = ctx;
+            return buildRemoteTimePickerCard(
+              title: '定时关闭时间',
+              hour: _tpHour,
+              minute: _tpMin,
+              col: _tpCol,
+              btn: _tpBtn,
+            );
+          },
+        ),
+      );
+    } finally {
+      _timePickOpen = false;
+      _tpRefresh = null;
+      _tpDialogCtx = null;
+    }
+    if (result != null && _sleepCardOpen) {
+      _popSleepCard(
+          SleepPick(nextSleepAt(result.hour, result.minute), _sleepAction));
+    }
+  }
+
+  /// 时间选择卡片的按键（本页处理）。规则与旧版完全一致：
+  /// 上下调数值 / 左右切列 / 分钟上再按右到按钮 / OK 执行 / 返回取消
+  bool _handleTimePickKey(KeyEvent event) {
+    final isDown = event is KeyDownEvent;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return true;
+    final k = event.logicalKey;
+    switch (k) {
+      case LogicalKeyboardKey.arrowUp:
+      case LogicalKeyboardKey.arrowDown:
+        if (_tpCol == 2) {
+          _tpCol = 1; // 按钮行里上下退回分钟列
+        } else {
+          final up = k == LogicalKeyboardKey.arrowUp;
+          if (_tpCol == 0) {
+            _tpHour = (_tpHour + (up ? 1 : -1) + 24) % 24;
+          } else {
+            _tpMin = (_tpMin + (up ? 1 : -1) + 60) % 60;
+          }
+        }
+        _tpRefresh?.call(() {});
+        return true;
+      case LogicalKeyboardKey.arrowLeft:
+        if (_tpCol == 2) {
+          _tpBtn = 0;
+        } else if (_tpCol == 1) {
+          _tpCol = 0;
+        }
+        _tpRefresh?.call(() {});
+        return true;
+      case LogicalKeyboardKey.arrowRight:
+        if (_tpCol == 0) {
+          _tpCol = 1;
+        } else if (_tpCol == 1) {
+          _tpCol = 2; // 分钟再往右 = 跳出数字区，落到「确定」
+          _tpBtn = 0;
+        } else {
+          _tpBtn = 1;
+        }
+        _tpRefresh?.call(() {});
+        return true;
+      default:
+        break;
+    }
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA ||
+        k == LogicalKeyboardKey.space) {
+      if (!isDown) return true;
+      final ctx = _tpDialogCtx;
+      if (_tpCol == 2 && _tpBtn == 1) {
+        if (ctx != null && ctx.mounted) Navigator.of(ctx).pop(); // 取消
+      } else if (ctx != null && ctx.mounted) {
+        Navigator.of(ctx).pop(TimeOfDay(hour: _tpHour, minute: _tpMin));
+      }
+      return true;
+    }
+    if (k == LogicalKeyboardKey.escape ||
+        k == LogicalKeyboardKey.goBack ||
+        k == LogicalKeyboardKey.browserBack) {
+      if (isDown) {
+        final ctx = _tpDialogCtx;
+        if (ctx != null && ctx.mounted) Navigator.of(ctx).pop();
+      }
+      return true;
+    }
+    return true; // 其余键吞掉
+  }
+
   bool _onGlobalKeyEvent(KeyEvent event) {
     final k = event.logicalKey;
     final isDown = event is KeyDownEvent;
@@ -1857,24 +2157,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
     }
 
-    // 定时关闭弹窗 / 自绘时间选择器：**单入口转发**。
-    //
-    // 以前弹窗自己注册 HardwareKeyboard，用户实测这台机器上「不管按哪个
-    // 键都没反应」——同一条键在多个 handler 之间谁先到不确定，先到的那个
-    // 返回 handled，后面的就永远收不到。播放页这一个 handler 已被设置页/
-    // 搜索弹窗证明可靠，所以只留它：收到就转给栈顶弹窗，弹窗不认的键也
-    // 吞掉，绝不能漏下去被当成切台。
-    // 顺序不能反：时间选择器是从定时弹窗里再弹出来的一层，两层都开着时
-    // 必须归上层。以前先判 sleepTimerDialogOpen，它的 sink 一看
-    // remoteTimePickerOpen 就 return false，结果上层永远收不到键
-    if (remoteTimePickerOpen) {
-      timePickerKeySink?.call(event);
-      return true;
-    }
-    if (sleepTimerDialogOpen) {
-      sleepTimerKeySink?.call(event);
-      return true;
-    }
+    // 定时关闭卡片 / 时间选择卡片：按键逻辑全部在本页（见
+    // _handleSleepCardKey / _handleTimePickKey），与退出/关机卡片同一套
+    // 模式。顺序不能反：时间选择是从定时卡片里再弹出来的一层，两层都
+    // 开着时必须归上层
+    if (_timePickOpen) return _handleTimePickKey(event);
+    if (_sleepCardOpen) return _handleSleepCardKey(event);
 
     // 在线电台弹窗（可能从设置面板里打开）自带完整的焦点与按键逻辑：
     // 所有按键一律交给它，否则按返回会把底下的设置面板关掉
@@ -7220,7 +7508,11 @@ class _BootSplash extends StatelessWidget {
 /// 电台画面在台名一行已经有同款徽标，这里只服务视频/直播；点一下
 /// 直接打开定时设置，方便躺床上改时间或取消。
 class SleepBadgeOverlay extends StatelessWidget {
-  const SleepBadgeOverlay({super.key});
+  const SleepBadgeOverlay({super.key, this.onTap});
+
+  /// 打开定时关闭卡片（状态与按键都在 _PlayerScreenState 上，
+  /// 徽标自己没有入口，由实例化处传入）
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -7240,7 +7532,7 @@ class SleepBadgeOverlay extends StatelessWidget {
             right: 28,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () => showSleepTimerDialog(context),
+              onTap: onTap,
               child: Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 5),

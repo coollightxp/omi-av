@@ -3053,8 +3053,27 @@ class PlayerController extends ChangeNotifier {
     _state = PlayerState.paused;
     _lastError = null;
     _lastAudioSig = '';
-    unawaited(audioStop());
+    // 兜底硬停：pause 在 mpv loadfile 中途不保证生效（后台换台正在
+    // openInPlace 时尤其如此），只有把内核整个释放才能保证「后台一定
+    // 没声」。回前台再按播放会重建内核（见 togglePlayPause）
+    unawaited(_hardStopForCardExit());
     notifyListeners();
+  }
+
+  /// 卡片 ❌ 之后的兜底硬停：先 pause，再释放内核，最后收前台服务。
+  /// 任何一步失败都不阻塞下一步（各自带超时）。
+  Future<void> _hardStopForCardExit() async {
+    try {
+      await _videoController
+          ?.pause()
+          .timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+    try {
+      await _disposeVideoController().timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
+      await audioStop().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
   }
 
   /// 真正退出应用前调用：把播放停干净 + 收掉前台服务。
@@ -3305,6 +3324,13 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     if (_videoController == null || !_videoController!.value.isInitialized) {
+      // 卡片 ❌ 的兜底硬停会把内核整个释放（pause 在 mpv loadfile 中途
+      // 不保证生效）：回前台后按「播放」要在这里重建内核，不能再静默
+      // return（用户按了没反应）
+      final ch = _currentChannel;
+      if (ch != null && ch.streamUrls.isNotEmpty) {
+        await playChannel(ch);
+      }
       return;
     }
     if (_videoController!.value.isPlaying) {
