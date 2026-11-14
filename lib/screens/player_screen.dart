@@ -582,6 +582,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                 controller.setWebForeground(true),
                             onWebKey: _onWebKey,
                             onPlayStateChanged: controller.setWebPlaying,
+                            onFramesReady: controller.setWebFramesReady,
                             onWebMouseMove: _pokeCursor,
                             onBridgeAttached: controller.attachWebBridge,
                             onBridgeDetached: controller.detachWebBridge,
@@ -2437,14 +2438,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           onPointerDown: (d) {
             if (d.buttons != kPrimaryButton) return;
             final x = d.localPosition.dx;
-            final inMiddle = x > width * 0.25 && x < width * 0.75;
+            // 严格三分区：左 1/3 亮度、右 1/3 音量、中间 1/3 可拖动。
+            // 边界必须与三个 Expanded 完全对齐，否则压在左/右区边界上
+            // 会「一边拖窗一边调亮度/音量」
+            final inMiddle = x > width / 3 && x < width * 2 / 3;
             beginWindowDrag(
                 enabled: controller.isDesktop &&
                     !controller.isFullscreen &&
                     !webMode &&
-                    (miniDrag || inMiddle));
+                    (miniDrag || inMiddle),
+                local: d.localPosition);
           },
-          onPointerMove: (_) => updateWindowDrag(),
+          onPointerMove: (d) => updateWindowDrag(local: d.localPosition),
           onPointerUp: (_) => endWindowDrag(),
           onPointerCancel: (_) => endWindowDrag(),
           child: Row(
@@ -3052,6 +3057,11 @@ class _WebChannelOverlay extends StatefulWidget {
   /// 网页播放/暂停状态变化（底部面板按钮图标）
   final ValueChanged<bool> onPlayStateChanged;
 
+  /// 网页画面是否真的出来了（探针判定：未暂停 + readyState≥2 +
+  /// 进度在走 + videoWidth 达标）。加载幕据此揭示，避免「起播事件
+  /// 先到、画面帧后到」期间露黑屏
+  final ValueChanged<bool> onFramesReady;
+
   /// 网页内鼠标移动（自动隐藏/呼出系统鼠标）
   final VoidCallback onWebMouseMove;
 
@@ -3072,6 +3082,7 @@ class _WebChannelOverlay extends StatefulWidget {
     required this.onForeground,
     required this.onWebKey,
     required this.onPlayStateChanged,
+    required this.onFramesReady,
     required this.onWebMouseMove,
     required this.onBridgeAttached,
     required this.onBridgeDetached,
@@ -6439,7 +6450,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
   }
 
   Future<void> _probe() async {
-    if (!mounted || widget.foreground) return;
+    if (!mounted) return;
     final c = _webController;
     if (c == null) return;
     // 每次探测顺带确保全屏样式/静音状态（SPA 页面可能被站点脚本改写）
@@ -6461,6 +6472,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
         playing = r == 1 || r?.toString() == '1';
         WebDiag.log('probe', 'p=${playing ? 1 : 0}');
       }
+      // 画面就绪信号（加载幕用）：前台后仍要持续上报，直到揭开为止
+      widget.onFramesReady(playing);
       // 站点页仍无 video：每 3 秒重新点台。慢站首屏频道列表渲染晚，
       // 首次点台常找不到频道节点，只点一次就永久黑屏（日志实锤：
       // load_stop 正常、mgtv_click 也执行，页面 25 秒仍 n=0）
@@ -7157,16 +7170,18 @@ String _sleepRemainText(Duration d) {
   return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
 }
 
-/// 网页频道的等待幕：从「打开网页」到「真的出画面」全程盖住网页。
+/// 网页频道的加载幕：从「打开网页」到「画面真的出来」全程盖住网页。
 ///
-/// 之前是固定 800ms 黑幕，机器慢 / 站点加载慢时 800ms 根本不够——幕一
-/// 揭开视频还在缓冲，露出来的就是站点页面（央视网首页）或站点白底，
-/// 用户看到的就是「一闪进入网页」。现在改成按真实播放态收幕：
+/// 之前按页面 play 事件 + 固定 800ms 收幕，但 play 事件只代表「开始取流」，
+/// 首帧往往还要好几秒，幕一揭开就是长时间纯黑、连个提示都没有。现在改成
+/// 按探针的真实画面信号收幕，幕上一直有动态提示（转圈 + 阶段文案 + 已等待秒数）：
 ///
-/// 判据：`controller.webPlaying` 连续稳定 [_stableMs] 毫秒（中途 pause /
-/// 缓冲会重新计时），另外硬上限 [_capSeconds] 秒兜底，防止页面压根没有
-/// video（或探针看不见）时永久黑屏。期间音频已在放，观感是「黑一下直接
-/// 出画面」。
+/// 揭开条件（任一）：
+/// 1. `webFramesReady`（未暂停 + readyState≥2 + 进度在走 + videoWidth 达标）
+///    且 `webPlaying` 连续稳定 [_stableMs]；
+/// 2. 只有声音没有画面（跨域 iframe 里探针看不到 video）时，
+///    `webPlaying` 连续稳定 [_audioFallbackMs] 兜底揭开；
+/// 3. 硬上限 [_capSeconds] 秒，防止页面压根没视频时永久黑屏。
 class _WebLoadingCurtain extends StatefulWidget {
   const _WebLoadingCurtain(
       {super.key, required this.controller, required this.foreground});
@@ -7181,33 +7196,47 @@ class _WebLoadingCurtain extends StatefulWidget {
 }
 
 class _WebLoadingCurtainState extends State<_WebLoadingCurtain> {
-  static const int _stableMs = 700;
+  static const int _stableMs = 500;
+  static const int _audioFallbackMs = 4000;
   static const int _capSeconds = 12;
 
   bool _revealed = false;
   DateTime? _playSince;
+  DateTime? _bornAt;
+  int _sec = 0;
   Timer? _poll;
   Timer? _cap;
 
   @override
   void initState() {
     super.initState();
+    _bornAt = DateTime.now();
     widget.controller.addListener(_check);
-    _poll = Timer.periodic(const Duration(milliseconds: 120), (_) => _check());
+    _poll = Timer.periodic(const Duration(milliseconds: 150), (_) => _check());
     _cap = Timer(const Duration(seconds: _capSeconds), _reveal);
   }
 
   void _check() {
     if (_revealed || !mounted) return;
-    if (!widget.controller.webPlaying) {
+    final ctl = widget.controller;
+    if (!ctl.webPlaying) {
       // 暂停/卡缓冲：重新计时，别在半成品画面上揭幕
       _playSince = null;
-      return;
+    } else {
+      _playSince ??= DateTime.now();
+      final ms = DateTime.now().difference(_playSince!).inMilliseconds;
+      if (ctl.webFramesReady && ms >= _stableMs) {
+        _reveal();
+        return;
+      }
+      if (ms >= _audioFallbackMs) {
+        _reveal();
+        return;
+      }
     }
-    _playSince ??= DateTime.now();
-    if (DateTime.now().difference(_playSince!).inMilliseconds >= _stableMs) {
-      _reveal();
-    }
+    // 已等待秒数：让用户知道还在动，不是卡死了
+    final sec = DateTime.now().difference(_bornAt!).inSeconds;
+    if (sec != _sec) setState(() => _sec = sec);
   }
 
   void _reveal() {
@@ -7225,6 +7254,13 @@ class _WebLoadingCurtainState extends State<_WebLoadingCurtain> {
     super.dispose();
   }
 
+  String get _stage {
+    final ctl = widget.controller;
+    if (ctl.webFramesReady) return '画面已就绪，正在显示…';
+    if (ctl.webPlaying) return '已连接，正在缓冲画面…';
+    return widget.foreground ? '正在加载播放器…' : '正在进入网页播放，请稍候…';
+  }
+
   @override
   Widget build(BuildContext context) {
     return IgnorePointer(
@@ -7237,11 +7273,21 @@ class _WebLoadingCurtainState extends State<_WebLoadingCurtain> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const CircularProgressIndicator(color: Colors.blueAccent),
-                const SizedBox(height: 12),
+                const SizedBox(
+                  width: 34,
+                  height: 34,
+                  child: CircularProgressIndicator(
+                      color: Colors.blueAccent, strokeWidth: 3),
+                ),
+                const SizedBox(height: 16),
                 Text(
-                  widget.foreground ? '网页已起播，正在等待画面…' : '正在进入网页播放，请稍候…',
+                  _stage,
                   style: const TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '已等待 $_sec 秒',
+                  style: const TextStyle(color: Colors.white38, fontSize: 12),
                 ),
               ],
             ),

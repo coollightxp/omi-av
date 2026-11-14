@@ -1729,6 +1729,18 @@ class PlayerController extends ChangeNotifier {
   /// 见 player_screen 里的 _WebLoadingCurtain）
   bool get webPlaying => _webPlaying;
 
+  /// 网页画面是否真的出来了（探针：未暂停 + readyState≥2 + 进度在走
+  /// + videoWidth 达标）。比 `webPlaying`（页面 play 事件）晚，用于
+  /// 决定加载幕什么时候可以揭开——事件先到、首帧后到，按事件揭幕会露黑屏
+  bool _webFramesReady = false;
+  bool get webFramesReady => _webFramesReady;
+
+  void setWebFramesReady(bool ready) {
+    if (_webFramesReady == ready) return;
+    _webFramesReady = ready;
+    notifyListeners();
+  }
+
   /// ===== 网页频道控制桥（由内嵌 WebView 注册/注销）=====
   /// 执行 JS 并返回结果
   Future<dynamic> Function(String)? _webEval;
@@ -1944,6 +1956,7 @@ class PlayerController extends ChangeNotifier {
   void setWebPlaying(bool playing) {
     if (_webPlaying == playing) return;
     _webPlaying = playing;
+    if (!playing) _webFramesReady = false;
     notifyListeners();
   }
 
@@ -2007,6 +2020,8 @@ class PlayerController extends ChangeNotifier {
       // 网页先在后台全屏缓冲（视频位保持黑屏），起播后再推到前台
       _webPageActive = true;
       _webPageForeground = false;
+      _webPlaying = false;
+      _webFramesReady = false;
       notifyListeners();
     } else {
       await launchExternal(channel.webPageUrl);
@@ -2027,6 +2042,8 @@ class PlayerController extends ChangeNotifier {
     } catch (_) {}
     _webPageActive = false;
     _webPageForeground = false;
+    _webPlaying = false;
+    _webFramesReady = false;
     WinHotkeys().setCursorHide(false);
     WinHotkeys().setWebForward(false);
     notifyListeners();

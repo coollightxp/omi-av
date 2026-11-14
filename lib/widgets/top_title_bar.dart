@@ -39,9 +39,10 @@ class TopTitleBar extends StatelessWidget {
                 behavior: HitTestBehavior.opaque,
                 // 拖动改 Listener 原始指针 + Win32 GetCursorPos 屏幕坐标，
                 // 见 window_drag_io 注释（pan 手势与 startDragging 都不可靠）
-                onPointerDown: (d) =>
-                    beginWindowDrag(enabled: d.buttons == kPrimaryButton),
-                onPointerMove: (_) => updateWindowDrag(),
+                onPointerDown: (d) => beginWindowDrag(
+                    enabled: d.buttons == kPrimaryButton,
+                    local: d.localPosition),
+                onPointerMove: (d) => updateWindowDrag(local: d.localPosition),
                 onPointerUp: (_) => endWindowDrag(),
                 onPointerCancel: (_) => endWindowDrag(),
                 child: GestureDetector(

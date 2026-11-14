@@ -7,12 +7,15 @@ import 'package:window_manager/window_manager.dart';
 
 /// 桌面端：按住鼠标拖动窗口（Windows）。
 ///
-/// 为什么不能只用 Flutter 事件：Flutter 的 globalPosition 是「窗口内
-/// 相对坐标」，窗口跟着鼠标走后同一物理位置对应的相对坐标不变，
-/// 手动 setPosition 永远算出零位移（v2.1.16 实测拖不动）；
-/// windowManager.startDragging 在置顶/无边框窗口下也时不时不生效
-/// （v2.1.14/15 实测）。这里改用 Win32 GetCursorPos 拿屏幕物理坐标，
-/// 配合窗口逻辑坐标手动跟手，两条路都不依赖 Flutter 坐标系。
+/// 两条路，按可靠性排序：
+///
+/// 1. **原生拖动（首选）**：位移超过阈值后调 `windowManager.startDragging()`
+///    （内部 ReleaseCapture + WM_NCLBUTTONDOWN/HTCAPTION），由 Windows 自己
+///    接管整段拖动。不依赖后续指针事件——手动 setPosition 方案里窗口一动，
+///    指针相对坐标就不变了，个别机器还会收到 PointerCancel，表现为
+///    「抖一下就不动」。
+/// 2. **手动跟手（兜底）**：原生调用异常时，用 Win32 `GetCursorPos` 取屏幕
+///    物理坐标，位移 ÷ devicePixelRatio 后 setPosition。
 final class _POINT extends ffi.Struct {
   @ffi.Long()
   external int x;
@@ -54,26 +57,32 @@ int? _screenY() {
   return _ptBuf!.ref.y;
 }
 
-/// 按下：[enabled] 为 false 时直接不武装（非桌面/全屏/网页区）。
-/// 记录按下时的光标屏幕坐标与窗口逻辑坐标，移动量全部由二者推出。
+/// 按下：记录按下点的窗口内坐标 [local] 与光标屏幕坐标。
 ///
-/// 光标坐标同步取（GetCursorPos 是同步 FFI），窗口坐标要 await；用
-/// [_armGen] 作废早期请求——手快时上一次按下的 await 可能晚于这一次落地。
-Future<void> beginWindowDrag({required bool enabled}) async {
+/// [enabled] 为 false 直接不武装（全屏/网页区/非桌面）。
+/// 光标坐标同步取（GetCursorPos 是同步 FFI）；窗口坐标要 await，用
+/// [_armGen] 作废过期请求——手快时上一次按下的 await 可能晚于这一次落地。
+Future<void> beginWindowDrag({
+  required bool enabled,
+  Offset? local,
+}) async {
   final gen = ++_armGen;
   _dragArmed = false;
   _dragStarted = false;
+  _nativeTried = false;
   _downCursor = null;
+  _downLocal = null;
   _downWindow = null;
   if (!enabled || !Platform.isWindows) return;
   final x = _screenX();
   final y = _screenY();
-  if (x == null || y == null) return;
-  final cur = Offset(x.toDouble(), y.toDouble());
+  final cur =
+      (x == null || y == null) ? null : Offset(x.toDouble(), y.toDouble());
   try {
     final pos = await windowManager.getPosition();
     if (gen != _armGen) return; // 期间又按下/松开了，本次作废
     _downCursor = cur;
+    _downLocal = local;
     _downWindow = pos;
     _dragArmed = true;
   } catch (_) {
@@ -85,31 +94,48 @@ int _armGen = 0;
 
 bool _dragArmed = false;
 bool _dragStarted = false;
+bool _nativeTried = false;
 Offset? _downCursor;
+Offset? _downLocal;
 Offset? _downWindow;
 
-/// 移动：光标离按下点超过 4 物理像素才开始真正拖（避免单击带歪窗口）。
-/// 位移用「屏幕物理像素差 ÷ devicePixelRatio」换算成窗口逻辑坐标。
-Future<void> updateWindowDrag() async {
-  if (!_dragArmed || _busy) return;
+/// 移动：[local] 传当前指针的窗口内坐标，用于判阈值。
+///
+/// 超过 6px 才算拖动（避免单击带歪窗口）。先请系统接管（原生拖动），
+/// 抛异常再退回手动 setPosition 跟手。
+Future<void> updateWindowDrag({Offset? local}) async {
+  if (!_dragArmed || _dragStarted) return;
+  final d0 = _downLocal;
+  final cur = local;
+  if (d0 != null && cur != null) {
+    final ddx = cur.dx - d0.dx;
+    final ddy = cur.dy - d0.dy;
+    if (ddx * ddx + ddy * ddy < 36) return;
+  } else if (_downCursor == null) {
+    return;
+  }
+  _dragStarted = true;
+  if (!_nativeTried) {
+    _nativeTried = true;
+    try {
+      await windowManager.startDragging();
+      return;
+    } catch (_) {
+      // 落回手动跟手
+    }
+  }
   final x = _screenX();
   final y = _screenY();
   final d = _downCursor;
   final w0 = _downWindow;
   if (x == null || y == null || d == null || w0 == null) return;
-  final dx = x - d.dx;
-  final dy = y - d.dy;
-  if (!_dragStarted) {
-    if (dx * dx + dy * dy < 16) return;
-    _dragStarted = true;
-  }
   final dpr = WidgetsBinding
           .instance.platformDispatcher.implicitView?.devicePixelRatio ??
       1.0;
-  // 一次只发一个 setPosition：指针事件比窗口移动快时排队会拖成橡皮筋
   _busy = true;
   try {
-    await windowManager.setPosition(Offset(w0.dx + dx / dpr, w0.dy + dy / dpr),
+    await windowManager.setPosition(
+        Offset(w0.dx + (x - d.dx) / dpr, w0.dy + (y - d.dy) / dpr),
         animate: false);
   } catch (_) {
   } finally {
@@ -123,6 +149,8 @@ void endWindowDrag() {
   _armGen++;
   _dragArmed = false;
   _dragStarted = false;
+  _nativeTried = false;
   _downCursor = null;
+  _downLocal = null;
   _downWindow = null;
 }
