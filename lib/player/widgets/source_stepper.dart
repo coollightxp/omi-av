@@ -66,30 +66,33 @@ class SourceStepper extends StatelessWidget {
         ),
         // 中央标签：可点击弹出线路菜单
         InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: (count > 1 && onSelect != null)
-                ? () => _showMenu(context, d, t)
-                : null,
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: d.intraGroupGap * 0.4,
-                vertical: 6,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    label,
-                    style: TextStyle(
-                      color: Colors.white54,
-                      fontSize: t.caption,
-                    ),
+          borderRadius: BorderRadius.circular(8),
+          // 不参与焦点遍历：遥控器焦点一旦落在「线路 n/m」上，
+          // 按 OK 就会弹出线路/分辨率菜单（切台时误弹的来源之一）
+          canRequestFocus: false,
+          onTap: (count > 1 && onSelect != null)
+              ? () => _showMenu(context, d, t)
+              : null,
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: d.intraGroupGap * 0.4,
+              vertical: 6,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: t.caption,
                   ),
-                  if (count > 1 && onSelect != null)
-                    Icon(Icons.arrow_drop_down,
-                        size: t.caption + 6, color: Colors.white54),
-                ],
-              ),
+                ),
+                if (count > 1 && onSelect != null)
+                  Icon(Icons.arrow_drop_down,
+                      size: t.caption + 6, color: Colors.white54),
+              ],
+            ),
           ),
         ),
         _arrow(
@@ -168,16 +171,15 @@ class SourceStepper extends StatelessWidget {
                   Text(
                     webLines![i],
                     style: TextStyle(
-                      color: i == index
-                          ? const Color(0xFFFFB35C)
-                          : Colors.white38,
+                      color:
+                          i == index ? const Color(0xFFFFB35C) : Colors.white38,
                       fontSize: t.caption,
                     ),
                   ),
                 if (i == index)
                   Text('当前',
-                      style:
-                          TextStyle(color: Colors.white38, fontSize: t.caption)),
+                      style: TextStyle(
+                          color: Colors.white38, fontSize: t.caption)),
               ],
             ),
           ),

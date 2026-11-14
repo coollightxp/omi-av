@@ -148,62 +148,74 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       left: hPad,
       right: hPad,
       bottom: widget.isVisible ? (screenW > 900 ? 16 : 8) : -320,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
-        onExit: (_) => widget.onHoverExit?.call(),
-        onHover: (_) => widget.onHoverMove?.call(),
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
-          opacity: widget.isVisible ? 1.0 : 0.0,
-          child: ScaledPanel(
-            alignment: Alignment.bottomCenter,
-            // 手机保持铺满宽度（scale=1 由上方 padding 逻辑控制），
-            // 桌面窗口变小时整体等比缩，卡片不变形
-            scale:
-                panelScaleOf(context) < 1.0 ? 1.0 : windowFitScaleOf(context),
-            child: Container(
-              decoration: BoxDecoration(
-                // 与设置面板 / 左右抽屉同一套表面色：深蓝灰 + 细描边
-                color: AppColors.overlay,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: AppColors.stroke),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.45),
-                    blurRadius: 24,
-                    offset: const Offset(0, 8),
+      child: IgnorePointer(
+        ignoring: !widget.isVisible,
+        // 永久退出焦点树：底部面板的交互全由 PlayerScreen 按 _kbId 分发
+        // （左右选按钮、OK 激活），从不依赖键盘焦点。留在焦点树里的后果
+        // 是方向键会被 FocusManager 先吃掉、把焦点挪到看不见的按钮/「线路」
+        // 标签上，一按 OK 就弹出线路/分辨率菜单（安卓实测：切台时突然
+        // 冒出「线路 1/3 1080P」选单）。
+        child: ExcludeFocus(
+          excluding: true,
+          child: MouseRegion(
+            onEnter: (_) => widget.onHoverEnter?.call(),
+            onExit: (_) => widget.onHoverExit?.call(),
+            onHover: (_) => widget.onHoverMove?.call(),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: widget.isVisible ? 1.0 : 0.0,
+              child: ScaledPanel(
+                alignment: Alignment.bottomCenter,
+                // 手机保持铺满宽度（scale=1 由上方 padding 逻辑控制），
+                // 桌面窗口变小时整体等比缩，卡片不变形
+                scale: panelScaleOf(context) < 1.0
+                    ? 1.0
+                    : windowFitScaleOf(context),
+                child: Container(
+                  decoration: BoxDecoration(
+                    // 与设置面板 / 左右抽屉同一套表面色：深蓝灰 + 细描边
+                    color: AppColors.overlay,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppColors.stroke),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              child: SafeArea(
-                top: false,
-                child: Padding(
-                  // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
-                  padding: scale < 1
-                      ? const EdgeInsets.fromLTRB(6, 12, 4, 10)
-                      : const EdgeInsets.fromLTRB(22, 12, 18, 8),
-                  child: Consumer<PlayerController>(
-                    builder: (context, c, _) => Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (c.isSeekable) _buildSeekBar(c),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
+                  child: SafeArea(
+                    top: false,
+                    child: Padding(
+                      // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
+                      padding: scale < 1
+                          ? const EdgeInsets.fromLTRB(6, 12, 4, 10)
+                          : const EdgeInsets.fromLTRB(22, 12, 18, 8),
+                      child: Consumer<PlayerController>(
+                        builder: (context, c, _) => Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            _buildLogo(c, scale),
-                            SizedBox(width: AppDensity.of(context).logoGap),
-                            Expanded(child: _buildInfo(c, scale)),
-                            Flexible(
-                              flex: 0,
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerRight,
-                                child: _buildButtons(c),
-                              ),
+                            if (c.isSeekable) _buildSeekBar(c),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                _buildLogo(c, scale),
+                                SizedBox(width: AppDensity.of(context).logoGap),
+                                Expanded(child: _buildInfo(c, scale)),
+                                Flexible(
+                                  flex: 0,
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    alignment: Alignment.centerRight,
+                                    child: _buildButtons(c),
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),

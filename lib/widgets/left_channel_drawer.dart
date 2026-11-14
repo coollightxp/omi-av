@@ -581,36 +581,43 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       top: 0,
       bottom: 0,
       width: drawerW,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
-        onExit: (_) => widget.onHoverExit?.call(),
-        onHover: (_) => widget.onHoverMove?.call(),
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
-          opacity: widget.isOpen ? 1.0 : 0.0,
-          child: ScaledPanel(
-            alignment: Alignment.centerLeft,
-            // 桌面窗口变小时整体等比缩，固定宽度的抽屉不被挤压变形
-            scale: windowFitScaleOf(context),
-            child: MediaQuery(
-              // 只在面板内缩小文字，不影响主界面其它区域
-              data: MediaQuery.of(context).copyWith(
-                textScaler: TextScaler.linear(
-                  MediaQuery.textScalerOf(context).scale(1.0) *
-                      (compact ? 0.78 : 1.0),
-                ),
-              ),
-              child: Material(
-                // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
-                color: AppColors.overlay,
-                elevation: 28,
-                shape: const Border(right: BorderSide(color: AppColors.stroke)),
-                child: SafeArea(
-                  child: Column(
-                    children: [
-                      _buildHeader(),
-                      Expanded(child: _buildBody()),
-                    ],
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
+        child: ExcludeFocus(
+          excluding: !widget.isOpen,
+          child: MouseRegion(
+            onEnter: (_) => widget.onHoverEnter?.call(),
+            onExit: (_) => widget.onHoverExit?.call(),
+            onHover: (_) => widget.onHoverMove?.call(),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: widget.isOpen ? 1.0 : 0.0,
+              child: ScaledPanel(
+                alignment: Alignment.centerLeft,
+                // 桌面窗口变小时整体等比缩，固定宽度的抽屉不被挤压变形
+                scale: windowFitScaleOf(context),
+                child: MediaQuery(
+                  // 只在面板内缩小文字，不影响主界面其它区域
+                  data: MediaQuery.of(context).copyWith(
+                    textScaler: TextScaler.linear(
+                      MediaQuery.textScalerOf(context).scale(1.0) *
+                          (compact ? 0.78 : 1.0),
+                    ),
+                  ),
+                  child: Material(
+                    // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
+                    color: AppColors.overlay,
+                    elevation: 28,
+                    shape: const Border(
+                        right: BorderSide(color: AppColors.stroke)),
+                    child: SafeArea(
+                      child: Column(
+                        children: [
+                          _buildHeader(),
+                          Expanded(child: _buildBody()),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -799,9 +806,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               OutlinedButton.icon(
                 onPressed: radioOnlySource
                     ? () => _switchTab(1)
-                    : (isRadioTab
-                        ? _openRadioSearch
-                        : widget.onOpenSettings),
+                    : (isRadioTab ? _openRadioSearch : widget.onOpenSettings),
                 icon: Icon(
                     radioOnlySource
                         ? Icons.radio
