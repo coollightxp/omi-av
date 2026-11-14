@@ -192,6 +192,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   StateSetter? _tpRefresh;
   BuildContext? _tpDialogCtx;
 
+  // 临时诊断（v2.1.37，确认后删）：两条按键通道各收到多少次、最近一个是
+  // 什么，直接画在卡片底部。用户截一张图就能判断「键到底进没进程序」，
+  // 不用再一轮一轮猜。
+  int _dbgHook = 0;
+  int _dbgKey = 0;
+  String _dbgLast = '无';
+
   // 两个侧边面板的状态句柄：遥控器/键盘导航由本页统一分发
   // （HardwareKeyboard 与 Windows 低级钩子走同一入口）
   final GlobalKey<LeftChannelDrawerState> _leftDrawerKey = GlobalKey();
@@ -1867,6 +1874,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   ///   Windows 与 Android 行为一致（Android 系统 Back 走 PopScope）
   // ==================== 定时关闭卡片（播放页管按键，弹窗只画） ====================
 
+  /// 卡片期间的原生钩子捕获开关。
+  ///
+  /// Windows 的 WH_KEYBOARD_LL 在捕获开启时会**吞掉**所有动作键，
+  /// 只通过 win_hotkeys 通道转给 `_onNativeAction`。定时卡片前几版一直
+  /// 「按什么都没反应」，说明这条通道在这张卡片上没把键送到位；而设置
+  /// 面板关掉捕获后一直是好的——所以卡片打开期间直接关捕获，让键走
+  /// Flutter 那条被验证过的路（本页 `_onGlobalKeyEvent`）。
+  void _syncRemoteCapture() {
+    unawaited(_winHotkeys
+        .setCapture(!_settingsOpen && !_sleepCardOpen && !_timePickOpen));
+  }
+
   /// 打开定时关闭卡片。替代旧的 showSleepTimerDialog：卡片是纯视觉，
   /// 行列/选中状态都在本页，按键走 _handleSleepCardKey。
   Future<void> _openSleepCard() async {
@@ -1884,6 +1903,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _sleepRow = 0;
     _sleepCol = 0;
     _sleepCardOpen = true;
+    // 卡片期间关掉原生钩子捕获：捕获开着时钩子把键全吞掉，只走
+    // win_hotkeys 通道；关掉后键直接进 Flutter（设置面板一直是这么工作的）
+    _syncRemoteCapture();
     SleepPick? picked;
     try {
       picked = await showDialog<SleepPick>(
@@ -1901,6 +1923,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       _sleepCardOpen = false;
       _sleepRefresh = null;
       _sleepDialogCtx = null;
+      _syncRemoteCapture();
     }
     if (picked == null || !mounted) return;
     await c.setSleepAt(picked.at, action: picked.action);
@@ -1944,6 +1967,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       remainText: remainText,
       atText: _sleepSetAt != null ? sleepHhmm(_sleepSetAt!) : '23:30',
       onTap: _onSleepChipTap,
+      debugText: '按键诊断：钩子 $_dbgHook · 键盘 $_dbgKey · 最近 $_dbgLast',
     );
   }
 
@@ -2107,6 +2131,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _tpCol = 0;
     _tpBtn = 0;
     _timePickOpen = true;
+    _syncRemoteCapture();
     TimeOfDay? result;
     try {
       result = await showDialog<TimeOfDay>(
@@ -2131,6 +2156,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       _timePickOpen = false;
       _tpRefresh = null;
       _tpDialogCtx = null;
+      _syncRemoteCapture();
     }
     if (result != null && _sleepCardOpen) {
       _popSleepCard(
@@ -2268,6 +2294,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final k = event.logicalKey;
     final isDown = event is KeyDownEvent;
     final isUp = event is KeyUpEvent;
+    _dbgKey++;
+    _dbgLast = '键盘 ${k.debugName ?? '?'}'
+        '${isDown ? '↓' : isUp ? '↑' : '↻'}';
+    if (_sleepCardOpen) _sleepRefresh?.call(() {});
+    if (_timePickOpen) _tpRefresh?.call(() {});
 
     // 键盘/遥控器一有动作就隐藏鼠标指针（鼠标一移动原生侧自动恢复）
     if (isDown) _hidePointerForRemote();
@@ -3419,6 +3450,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// isDown=true 按下边沿、false 抬起边沿，与 Flutter 路径共用
   /// 同一套短按/长按/面板导航逻辑。
   void _onNativeAction(String action, bool isDown) {
+    _dbgHook++;
+    _dbgLast = '钩子 $action${isDown ? '↓' : '↑'}';
+    if (_sleepCardOpen) _sleepRefresh?.call(() {});
+    if (_timePickOpen) _tpRefresh?.call(() {});
     if (!mounted) return;
     if (isDown) _hidePointerForRemote();
     if (isDown) {
