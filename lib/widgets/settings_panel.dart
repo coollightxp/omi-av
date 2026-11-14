@@ -1223,8 +1223,11 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                           () => _diagnoseSource(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
                         () => controller.refreshChannels()),
-                    _RowAction(Icons.delete, Colors.redAccent, '删除',
-                        () => controller.removePlaylist(p.id)),
+                    // 内置源删不掉（删了也会被自动补回），不给删除按钮：
+                    // 摆在那只会让用户以为能删（2026-11-14 用户点名）
+                    if (!p.isBuiltin)
+                      _RowAction(Icons.delete, Colors.redAccent, '删除',
+                          () => controller.removePlaylist(p.id)),
                   ],
                 );
               }),
@@ -1345,11 +1348,14 @@ class _RadioSourcesTab extends StatelessWidget {
                     // 刷新增只刷电台目录：电视清单不受影响
                     _RowAction(Icons.refresh, Colors.amber, '刷新电台目录',
                         () => controller.reloadRadioCatalog()),
-                    _RowAction(
-                        Icons.delete,
-                        Colors.redAccent,
-                        isLibrary ? '清空我的电台' : '整源移除',
-                        () => controller.removePlaylist(p.id)),
+                    // 内置精选不给「整源移除」：删掉还会留一条恢复入口，
+                    // 多出来的只是误操作（用户要求内置的不显示删除）
+                    if (!p.isBuiltin)
+                      _RowAction(
+                          Icons.delete,
+                          Colors.redAccent,
+                          isLibrary ? '清空我的电台' : '整源移除',
+                          () => controller.removePlaylist(p.id)),
                   ],
                 );
               }),
@@ -2139,8 +2145,10 @@ class _EpgTabState extends State<_EpgTab> {
                         () => builtin
                             ? controller.updateBuiltinEpg()
                             : controller.refreshEpg()),
-                    _RowAction(Icons.delete, Colors.redAccent, '删除',
-                        () => controller.removeEpg(e.id)),
+                    // 内置节目单是随包自带的，删了没意义
+                    if (!builtin)
+                      _RowAction(Icons.delete, Colors.redAccent, '删除',
+                          () => controller.removeEpg(e.id)),
                   ],
                 );
               }),

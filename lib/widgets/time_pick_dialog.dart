@@ -40,6 +40,10 @@ Future<TimeOfDay?> showRemoteTimePicker(
 bool get remoteTimePickerOpen => _openCount > 0;
 int _openCount = 0;
 
+/// 按键接收器：打开期间由播放页的全局键盘 handler 转发（与定时关闭弹窗
+/// 同一套）。不在弹窗内自己注册 HardwareKeyboard——多入口会互相抢同一颗键。
+bool Function(KeyEvent event)? timePickerKeySink;
+
 class _RemoteTimePickerDialog extends StatefulWidget {
   const _RemoteTimePickerDialog({required this.initial, required this.title});
 
@@ -71,14 +75,13 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
   void initState() {
     super.initState();
     _openCount++;
-    // 遥控器按键走 HardwareKeyboard 通道（与在线电台弹窗/定时关闭弹窗
-    // 同一通道）。之前挂在 Focus.onKeyEvent 上，用户实测遥控器完全没反应。
-    HardwareKeyboard.instance.addHandler(_onHardwareKey);
+    // 交给播放页转发（见 timePickerKeySink）
+    timePickerKeySink = _onHardwareKey;
   }
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+    if (timePickerKeySink == _onHardwareKey) timePickerKeySink = null;
     _openCount--;
     _focus.dispose();
     super.dispose();

@@ -1381,10 +1381,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (RadioSearchDialog.active) return false;
     // 设置编辑弹窗（编辑播放列表/编辑 EPG）：自带行导航，放行
     if (settingsEditDialogOpen) return false;
-    // 定时关闭弹窗 / 自绘时间选择器：自带遥控器焦点导航（上下 + OK），
-    // 放行给它们自己处理。否则这里的「弹层收口」会把 OK 当关闭、
-    // 把方向键全部吞掉——遥控器既选不了也改不了时间
-    if (sleepTimerDialogOpen || remoteTimePickerOpen) return false;
+    // 定时关闭弹窗 / 自绘时间选择器：按键统一从 `_onGlobalKeyEvent`
+    // 转发（sleepTimerKeySink / timePickerKeySink），这里只负责不再兜底
+    if (sleepTimerDialogOpen || remoteTimePickerOpen) return true;
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
@@ -1844,11 +1843,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
     }
 
-    // 定时关闭弹窗 / 自绘时间选择器：自带遥控器行导航，所有按键无条件
-    // 交给它们。以前只在 _modalRouteOpen 分支里放行，但退出卡片是页面内
-    // overlay，弹窗打开时 ModalRoute 未必判成 current → 方向键落到播放页
-    // 被当作切台/切源吞掉，用户实测「定时卡片遥控器按了没反应」
-    if (sleepTimerDialogOpen || remoteTimePickerOpen) return false;
+    // 定时关闭弹窗 / 自绘时间选择器：**单入口转发**。
+    //
+    // 以前弹窗自己注册 HardwareKeyboard，用户实测这台机器上「不管按哪个
+    // 键都没反应」——同一条键在多个 handler 之间谁先到不确定，先到的那个
+    // 返回 handled，后面的就永远收不到。播放页这一个 handler 已被设置页/
+    // 搜索弹窗证明可靠，所以只留它：收到就转给栈顶弹窗，弹窗不认的键也
+    // 吞掉，绝不能漏下去被当成切台。
+    if (sleepTimerDialogOpen) {
+      sleepTimerKeySink?.call(event);
+      return true;
+    }
+    if (remoteTimePickerOpen) {
+      timePickerKeySink?.call(event);
+      return true;
+    }
 
     // 在线电台弹窗（可能从设置面板里打开）自带完整的焦点与按键逻辑：
     // 所有按键一律交给它，否则按返回会把底下的设置面板关掉

@@ -11,6 +11,14 @@ import 'time_pick_dialog.dart';
 /// 遥控器用户根本进不到「设置…」里去选时间。
 bool sleepTimerDialogOpen = false;
 
+/// 按键接收器：弹窗打开期间，按键由播放页那一个全局键盘 handler 转发进来。
+///
+/// 以前弹窗自己在 initState 里注册 `HardwareKeyboard`，用户实测这台机器上
+/// 「不管按哪个键都没反应」——同一颗键在多个 handler 之间谁先谁后不确定，
+/// 先到的那个若返回 handled，后面的就永远收不到。播放页的 handler 已被
+/// 设置页与搜索弹窗证明可靠，所以只留这一个入口。
+bool Function(KeyEvent event)? sleepTimerKeySink;
+
 /// 定时关闭设置弹窗（退出卡片上的「定时关闭」入口）。
 ///
 /// 三段：
@@ -103,16 +111,14 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
   @override
   void initState() {
     super.initState();
-    // 遥控器按键走 HardwareKeyboard 通道（与在线电台弹窗同一通道）。
-    // 之前挂在 Focus.onKeyEvent 上，用户实测弹窗里遥控器完全没反应——
-    // 通道问题不在本弹窗的逻辑，而在按键根本没被派发进这条弹窗的
-    // 焦点链。硬件键盘通道已被设置页/电台弹窗证明在这台机器上可靠。
-    HardwareKeyboard.instance.addHandler(_consume);
+    // 交给播放页转发（见 sleepTimerKeySink）：不在自己这里注册
+    // HardwareKeyboard，避免多个 handler 抢同一颗键
+    sleepTimerKeySink = _consume;
   }
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_consume);
+    if (sleepTimerKeySink == _consume) sleepTimerKeySink = null;
     for (final n in _nodes.values) {
       n.dispose();
     }
@@ -293,13 +299,9 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
       });
     }
 
-    return Focus(
-      // 双保险：硬件通道收不到时，按键沿焦点链冒泡到这里
-      autofocus: true,
-      onKeyEvent: (_, e) => _consume(e)
-          ? KeyEventResult.handled
-          : KeyEventResult.ignored,
-      child: AlertDialog(
+    // 不包 Focus：按键统一由播放页转发（sleepTimerKeySink）。
+    // 两处都挂会对同一颗键各执行一次，表现为「按一下跳两格」
+    return AlertDialog(
       backgroundColor: AppColors.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
@@ -357,7 +359,6 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
             ],
           ),
         ),
-      ),
       ),
     );
   }

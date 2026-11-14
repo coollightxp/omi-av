@@ -515,9 +515,19 @@ class PlayerController extends ChangeNotifier {
     // 频道加载完毕后，恢复上次退出时播放的频道。
     // 设置里关掉「启动时恢复上次频道」→ 停在待选台画面，
     // 不发任何网络请求（待选台壳由播放页渲染）
+    //
+    // 顺序很关键：这里**只解析、不起播**。以前在撤屏前 await 起播，
+    // 机器快的时候声音比画面先到——启动动画还盖着，台已经响了。
+    Channel? resumeTarget;
     if (_settings.resumeLastChannel) {
       _boot('正在恢复上次播放的频道…');
-      await restoreLastChannel();
+      resumeTarget = await _resolveLastChannel();
+      if (resumeTarget != null) {
+        // 台名/台标先给播放页：撤屏时不至于闪一下待选台再跳到播放页
+        _currentChannel = resumeTarget;
+        _state = PlayerState.loading;
+        notifyListeners();
+      }
     } else {
       _awaitingChannelPick = true;
       _state = PlayerState.idle;
@@ -539,6 +549,14 @@ class PlayerController extends ChangeNotifier {
     }
     _bootReady = true;
     notifyListeners();
+
+    // 启动画面退场之后再拉流：先把这一帧画出来（界面已切到播放页、
+    // 台标台名就位），再让内核起播。多给 200ms 是给首帧合成留余量，
+    // 否则刚撤屏就出声，仍然像"动画没走完就播了"
+    if (resumeTarget != null) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      unawaited(_startResumePlayback(resumeTarget));
+    }
   }
 
   // ==================== 网络状态处理 ====================
@@ -662,9 +680,12 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 启动时恢复上次播放的频道：优先在当前播放列表中精确匹配，
-  /// 匹配不到则用记录的播放地址构造临时频道播放
-  Future<void> restoreLastChannel() async {
+  /// 解析「上次播放的频道」：只读 prefs + 在已加载列表里找，**不发起播放**。
+  ///
+  /// 拆两段是为了启动时序——先把台名/台标给播放页，等启动动画退场之后
+  /// 再拉流。否则机器快的时候声音会比画面先到（用户实测「启动界面还没
+  /// 过去，台就响起来了」）。
+  Future<Channel?> _resolveLastChannel() async {
     try {
       final p = await SharedPreferences.getInstance();
       // 上次在哪个域就在哪个域恢复；该域没记录时回落到另一个域
@@ -674,14 +695,14 @@ class PlayerController extends ChangeNotifier {
       if (str == null || str.isEmpty) {
         str = p.getString(isRadio ? _kLastChannel : _kLastRadioChannel);
       }
-      if (str == null || str.isEmpty) return;
+      if (str == null || str.isEmpty) return null;
       final Map<String, dynamic> data = jsonDecode(str) as Map<String, dynamic>;
       final urls = (data['streamUrls'] as List<dynamic>?)
               ?.map((e) => e.toString())
               .where((e) => e.isNotEmpty)
               .toList() ??
           const <String>[];
-      if (urls.isEmpty) return;
+      if (urls.isEmpty) return null;
       final id = data['id'] as String? ?? '';
       final name = data['name'] as String? ?? '';
       final srcIdx = (data['sourceIndex'] as int?) ?? 0;
@@ -710,21 +731,33 @@ class PlayerController extends ChangeNotifier {
         userAgent: data['userAgent'] as String? ?? '',
       );
       _sourceIndex = srcIdx < target.streamUrls.length ? srcIdx : 0;
-      // 上次是网页频道：启动时也自动打开网页播放
-      await playChannel(target);
-      // 开机时系统网络/DNS 可能尚未就绪，首次拉流偶发超时失败。
-      // 3 秒后在用户无操作（未手动切台/未投屏）的前提下自动重试一次
+      return target;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 启动时恢复上次播放的频道：优先在当前播放列表中精确匹配，
+  /// 匹配不到则用记录的播放地址构造临时频道播放
+  Future<void> restoreLastChannel() async {
+    final target = await _resolveLastChannel();
+    if (target == null) return;
+    await _startResumePlayback(target);
+  }
+
+  /// 恢复播放：起播 + 开机偶发超时的兜底重试（系统网络/DNS 尚未就绪）
+  Future<void> _startResumePlayback(Channel target) async {
+    await playChannel(target);
+    if (_state == PlayerState.error &&
+        !_isCasting &&
+        identical(_currentChannel, target)) {
+      await Future.delayed(const Duration(seconds: 3));
       if (_state == PlayerState.error &&
           !_isCasting &&
           identical(_currentChannel, target)) {
-        await Future.delayed(const Duration(seconds: 3));
-        if (_state == PlayerState.error &&
-            !_isCasting &&
-            identical(_currentChannel, target)) {
-          await playChannel(target);
-        }
+        await playChannel(target);
       }
-    } catch (_) {}
+    }
   }
 
   /// DLNA 服务状态（设置面板展示，方便确认是否开启）
@@ -1613,6 +1646,8 @@ class PlayerController extends ChangeNotifier {
     if (_currentChannel?.id != channel.id) {
       _radioTracks.clear();
       _lastMediaTitle = '';
+      // 换了台：即使之前点过卡片上的 ❌，也应该重新出卡片
+      _audioCardClosed = false;
     }
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
@@ -2896,6 +2931,11 @@ class PlayerController extends ChangeNotifier {
 
   String _lastAudioSig = '';
 
+  /// 用户点了通知卡片上的「关闭」：卡片收起来之后**不要再自动弹回来**。
+  /// 以前 stop 只是暂停 + 关卡片，而暂停会走 notifyListeners → 签名变化
+  /// → 又推一次 audioUpdate，表现就是「卡片闪一下又回来了」。
+  bool _audioCardClosed = false;
+
   /// 通知权限只申请一次（系统窗只弹一次，之后拒绝就只能去设置里开）
   bool _notifAsked = false;
 
@@ -2913,6 +2953,8 @@ class PlayerController extends ChangeNotifier {
   void _syncAudioNotification() {
     // 电视/盒子不做后台播放：没有通知栏，息屏也不该挂着前台服务
     if (!_androidNative || _isTv) return;
+    // 用户主动关掉了卡片：等他回 App 重新播放，不要自动弹回来
+    if (_audioCardClosed) return;
     final ch = _currentChannel;
     if (ch == null || !ch.isRadio) {
       if (_lastAudioSig.isNotEmpty) {
@@ -2956,6 +2998,8 @@ class PlayerController extends ChangeNotifier {
       case 'next':
         if (radio) unawaited(playAdjacentChannel(1));
       case 'stop':
+        // 卡片上的 ❌ = 退出听电视：停播 + 收卡片，并且不再自动弹回
+        _audioCardClosed = true;
         if (isPlaying) unawaited(togglePlayPause());
         _lastAudioSig = '';
         unawaited(audioStop());
@@ -3190,6 +3234,8 @@ class PlayerController extends ChangeNotifier {
     } else {
       await _videoController!.play();
       _state = PlayerState.playing;
+      // 用户重新开始播：允许卡片重新出现（此前按过 ❌ 收起来过）
+      _audioCardClosed = false;
     }
     notifyListeners();
   }
