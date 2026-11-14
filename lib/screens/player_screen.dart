@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io' show exit;
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart' show kPrimaryButton, kSecondaryButton;
@@ -1181,6 +1182,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           await windowManager.close();
         } else {
           await SystemNavigator.pop();
+          // 移动端把进程杀干净：pop 之后 Activity finish 了，但进程可能
+          // 作为缓存再活几十秒。这段时间里从桌面点图标会复用残留进程，
+          // 旧 mpv 线程还挂着 → 起播崩溃（实测「再进来闪退，第二次才
+          // 正常」）或两路声音。上面已手动收尾完毕，这里直接退出进程
+          if (!kIsWeb &&
+              (defaultTargetPlatform == TargetPlatform.android ||
+                  defaultTargetPlatform == TargetPlatform.iOS)) {
+            exit(0);
+          }
         }
         break;
       case 'lock':
@@ -1854,12 +1864,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 返回 handled，后面的就永远收不到。播放页这一个 handler 已被设置页/
     // 搜索弹窗证明可靠，所以只留它：收到就转给栈顶弹窗，弹窗不认的键也
     // 吞掉，绝不能漏下去被当成切台。
-    if (sleepTimerDialogOpen) {
-      sleepTimerKeySink?.call(event);
-      return true;
-    }
+    // 顺序不能反：时间选择器是从定时弹窗里再弹出来的一层，两层都开着时
+    // 必须归上层。以前先判 sleepTimerDialogOpen，它的 sink 一看
+    // remoteTimePickerOpen 就 return false，结果上层永远收不到键
     if (remoteTimePickerOpen) {
       timePickerKeySink?.call(event);
+      return true;
+    }
+    if (sleepTimerDialogOpen) {
+      sleepTimerKeySink?.call(event);
       return true;
     }
 

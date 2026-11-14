@@ -3036,6 +3036,11 @@ class PlayerController extends ChangeNotifier {
   void _exitFromCard() {
     _audioCardClosed = true;
     _cardExitAt = DateTime.now();
+    // 作废所有在飞的播放流程：❌ 到达时后台换台可能正跑到一半
+    // （openInPlace / 预检 / 建内核），这些流程的每个 await 检查点都会
+    // 因代际变化退出。没有这一刀，迟到的换台会建出新内核开播——
+    // 卡片没了、界面显示暂停、声音却还在响（用户实测）
+    _playGeneration++;
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     _softErrTimer?.cancel();
@@ -3060,6 +3065,10 @@ class PlayerController extends ChangeNotifier {
   Future<void> shutdownForExit() async {
     _audioCardClosed = true;
     _cardExitAt = DateTime.now();
+    // 作废在飞的换台（同 _exitFromCard），然后**真正释放内核**：
+    // 只 pause 的话 isolate 销毁后 mpv 原生实例的清理没有着落，
+    // 进程残留 + 再次启动就是两路声音甚至起播崩溃
+    _playGeneration++;
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     _softErrTimer?.cancel();
@@ -3070,8 +3079,13 @@ class PlayerController extends ChangeNotifier {
           .timeout(const Duration(milliseconds: 400));
     } catch (_) {}
     try {
+      await _disposeVideoController().timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
       await audioStop().timeout(const Duration(milliseconds: 400));
     } catch (_) {}
+    // 给原生侧留一点收尾时间（服务 stopForeground / mpv 线程退出）
+    await Future<void>.delayed(const Duration(milliseconds: 200));
   }
 
   // ---------- 睡眠定时（方案 12.4 / 13.3：睡前听广播的高频场景） ----------

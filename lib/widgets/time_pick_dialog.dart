@@ -41,7 +41,7 @@ bool get remoteTimePickerOpen => _openCount > 0;
 int _openCount = 0;
 
 /// 按键接收器：打开期间由播放页的全局键盘 handler 转发（与定时关闭弹窗
-/// 同一套）。不在弹窗内自己注册 HardwareKeyboard——多入口会互相抢同一颗键。
+/// 同一套），另外自己注册一份 HardwareKeyboard，三通道 + 60ms 去重。
 bool Function(KeyEvent event)? timePickerKeySink;
 
 class _RemoteTimePickerDialog extends StatefulWidget {
@@ -75,13 +75,16 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
   void initState() {
     super.initState();
     _openCount++;
-    // 交给播放页转发（见 timePickerKeySink）
+    // 与定时关闭弹窗同一套三通道：播放页转发 + 弹窗根部 Focus +
+    // 自己注册硬件键盘。_onHardwareKey 里 60ms 同键去重保证只执行一次
     timePickerKeySink = _onHardwareKey;
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
   }
 
   @override
   void dispose() {
     if (timePickerKeySink == _onHardwareKey) timePickerKeySink = null;
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     _openCount--;
     _focus.dispose();
     super.dispose();

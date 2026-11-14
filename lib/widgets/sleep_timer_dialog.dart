@@ -13,10 +13,9 @@ bool sleepTimerDialogOpen = false;
 
 /// 按键接收器：弹窗打开期间，按键由播放页那一个全局键盘 handler 转发进来。
 ///
-/// 以前弹窗自己在 initState 里注册 `HardwareKeyboard`，用户实测这台机器上
-/// 「不管按哪个键都没反应」——同一颗键在多个 handler 之间谁先谁后不确定，
-/// 先到的那个若返回 handled，后面的就永远收不到。播放页的 handler 已被
-/// 设置页与搜索弹窗证明可靠，所以只留这一个入口。
+/// 实测这台机器上任何**单一路径**都出现过「整张卡片按不动」，所以三条
+/// 一起挂：播放页转发 + 弹窗根部 Focus + 自己注册 HardwareKeyboard。
+/// 三份都到也无所谓，_consume 里 60ms 同键去重只执行第一次。
 bool Function(KeyEvent event)? sleepTimerKeySink;
 
 /// 定时关闭设置弹窗（退出卡片上的「定时关闭」入口）。
@@ -111,14 +110,20 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
   @override
   void initState() {
     super.initState();
-    // 交给播放页转发（见 sleepTimerKeySink）：不在自己这里注册
-    // HardwareKeyboard，避免多个 handler 抢同一颗键
+    // 三条通道同时挂，哪条能到都行（这台机器上多次出现「只挂一条就整张
+    // 卡片按不动」）：
+    //   1. 播放页全局 handler 转发过来（sleepTimerKeySink）
+    //   2. 弹窗根部 Focus.onKeyEvent（焦点链）
+    //   3. 自己注册 HardwareKeyboard（搜索弹窗用这条一直是好的）
+    // 三条重复到达也无所谓：_consume 里 60ms 同键去重只执行第一次
     sleepTimerKeySink = _consume;
+    HardwareKeyboard.instance.addHandler(_consume);
   }
 
   @override
   void dispose() {
     if (sleepTimerKeySink == _consume) sleepTimerKeySink = null;
+    HardwareKeyboard.instance.removeHandler(_consume);
     for (final n in _nodes.values) {
       n.dispose();
     }
@@ -299,9 +304,15 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
       });
     }
 
-    // 不包 Focus：按键统一由播放页转发（sleepTimerKeySink）。
-    // 两处都挂会对同一颗键各执行一次，表现为「按一下跳两格」
-    return AlertDialog(
+    // 三重保险：sink（播放页转发）+ 焦点链兜底。
+    // 同一颗键两个通道都到时，_consume 里 60ms 去重会吞掉第二次——
+    // 不会出现「按一下跳两格」。单独依赖任何一个通道在这台机器上
+    // 都出现过「按什么都没反应」，所以两个都挂
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (_, e) =>
+          _consume(e) ? KeyEventResult.handled : KeyEventResult.ignored,
+      child: AlertDialog(
       backgroundColor: AppColors.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
@@ -360,6 +371,7 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
           ),
         ),
       ),
+    ),
     );
   }
 }
