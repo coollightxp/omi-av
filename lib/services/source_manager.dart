@@ -1,4 +1,5 @@
-import 'dart:convert' show base64Decode, base64Encode, jsonDecode, jsonEncode, utf8;
+import 'dart:convert'
+    show base64Decode, base64Encode, jsonDecode, jsonEncode, utf8;
 import 'dart:io';
 import 'dart:async';
 
@@ -24,8 +25,10 @@ class SourceManager {
   static const String _currentPlaylistKey = 'omi_current_playlist';
   static const String _epgKey = 'omi_epgs';
   static const String _currentEpgKey = 'omi_current_epg';
+
   /// 用户删掉内置源后置 true，不再自动补回（设置页可手动恢复）
   static const String _builtinRemovedKey = 'omi_builtin_radio_removed';
+
   /// 用户删掉内置 EPG 后置 true，不再自动补回
   static const String _builtinEpgRemovedKey = 'omi_builtin_epg_removed';
 
@@ -44,8 +47,10 @@ class SourceManager {
   // 缓存解析后的数据
   List<ChannelCategory> _cachedChannels = [];
   Map<String, List<EpgProgram>> _cachedEpg = {};
+
   /// EPG 频道 id -> 显示名列表
   Map<String, List<String>> _cachedEpgChannelNames = {};
+
   /// EPG 频道 id -> 台标地址
   Map<String, String> _cachedEpgChannelIcons = {};
   bool _channelsLoaded = false;
@@ -116,6 +121,17 @@ class SourceManager {
     // 内置节目单：默认就有一个，用户一个 EPG 都没配也能看到节目表。
     // 用户删过就不再塞回来（设置页可重新加）。
     await _ensureBuiltinEpg(prefs);
+
+    // 历史遗留迁移：老版本把电台源选成了「当前源」，电视域就被电台清单
+    // 占着（电视那栏看着是空的、而且再也选不回电视源）。电台本来走独立
+    // 目录，这里把槽位还给电视：有内置央视就落央视，否则置空等用户选
+    if (PlaylistSource.isRadioSourceId(_currentPlaylistId)) {
+      _currentPlaylistId =
+          _playlists.any((p) => p.id == PlaylistSource.builtinCctvId)
+              ? PlaylistSource.builtinCctvId
+              : null;
+      await _savePlaylists();
+    }
   }
 
   /// 内置电台精选：出厂自带，排在源列表首位。
@@ -285,8 +301,8 @@ class SourceManager {
   Future<int> builtinCctvChannelCount() async {
     final p = await SharedPreferences.getInstance();
     final cached = p.getString(_kBuiltinCctvCache);
-    final text = cached ??
-        await rootBundle.loadString(PlaylistSource.builtinCctvAsset);
+    final text =
+        cached ?? await rootBundle.loadString(PlaylistSource.builtinCctvAsset);
     return text
         .split('\n')
         .where((l) => l.trimLeft().startsWith('#EXTINF'))
@@ -298,8 +314,7 @@ class SourceManager {
     final days = await getBuiltinCctvIntervalDays();
     if (days <= 0) return;
     final at = await getBuiltinCctvFetchedAt();
-    if (at != null &&
-        DateTime.now().difference(at).inDays < days) {
+    if (at != null && DateTime.now().difference(at).inDays < days) {
       return;
     }
     await updateBuiltinCctv();
@@ -327,8 +342,8 @@ class SourceManager {
   Future<int> builtinRadioStationCount() async {
     final p = await SharedPreferences.getInstance();
     final cached = p.getString(_kBuiltinRadioCache);
-    final text = cached ??
-        await rootBundle.loadString(PlaylistSource.builtinRadioAsset);
+    final text =
+        cached ?? await rootBundle.loadString(PlaylistSource.builtinRadioAsset);
     return text
         .split('\n')
         .where((l) => l.trimLeft().startsWith('#EXTINF'))
@@ -455,9 +470,11 @@ class SourceManager {
             .map((l) => l.trim())
             .where((l) => l.isNotEmpty && !l.startsWith('#'))
             .toList();
-        final good = links.where((l) =>
-            l.toLowerCase().startsWith('webview://') ||
-            l.toLowerCase().startsWith('http')).length;
+        final good = links
+            .where((l) =>
+                l.toLowerCase().startsWith('webview://') ||
+                l.toLowerCase().startsWith('http'))
+            .length;
         if (count < 10 || good < count * 0.8) continue;
 
         final prefs = await SharedPreferences.getInstance();
@@ -533,8 +550,7 @@ class SourceManager {
 
   /// 删除播放列表源
   Future<void> removePlaylist(String id) async {
-    final wasBuiltin =
-        _playlists.any((p) => p.id == id && p.isBuiltin);
+    final wasBuiltin = _playlists.any((p) => p.id == id && p.isBuiltin);
     _playlists.removeWhere((p) => p.id == id);
     if (_currentPlaylistId == id) {
       _currentPlaylistId = null;
@@ -569,14 +585,27 @@ class SourceManager {
     // 在列表里越攒越多（历史上网页保存一次多一批电台源的教训）
     final seen = <String>{};
     _playlists = List.of(list)..retainWhere((p) => seen.add(p.id));
-    _currentPlaylistId =
-        _playlists.any((p) => p.id == currentId) ? currentId : null;
+    // 电台源不能当电视当前源（网页端/旧版本可能发来这种值）。
+    // 这种请求多半是「只改了电台那一段」，电视源保持原样，不能顺手清空
+    if (PlaylistSource.isRadioSourceId(currentId)) {
+      if (!_playlists.any((p) => p.id == _currentPlaylistId)) {
+        _currentPlaylistId = null;
+      }
+    } else {
+      _currentPlaylistId =
+          _playlists.any((p) => p.id == currentId) ? currentId : null;
+    }
     await _savePlaylists();
     return _currentPlaylistId != null;
   }
 
-  /// 选择当前使用的播放列表
+  /// 选择当前使用的播放列表（仅电视域）
+  ///
+  /// 电台源（内置精选 / 我的电台）不参与选择：电台目录走 RadioCatalog，
+  /// 与电视清单互不相干。这里直接忽略，避免电台页签的「选中」把电视源
+  /// 顶掉（历史 bug：选完电台，电视直播源那栏变成空的）
   Future<void> selectPlaylist(String? id) async {
+    if (PlaylistSource.isRadioSourceId(id)) return;
     _currentPlaylistId = id;
     await _savePlaylists();
   }
@@ -609,8 +638,7 @@ class SourceManager {
       final content = _decodePlaylistBytes(bytes);
       // 三级解析：m3u/txt 直接解析；HTML 聚合页提取 data-copy 接口地址；
       // TVBox 配置 JSON（lives）/多仓 JSON（urls）递归展开合并
-      var cats =
-          await _resolveContent(content, source.url, 2, {source.url});
+      var cats = await _resolveContent(content, source.url, 2, {source.url});
       // 内置电台精选整份都是电台流：按地址/分组猜类型会漏判（音频 HLS
       // 的 m3u8 会落到 tv），必须整体强制 radio——否则这 60 个台会漏进
       // 电视域，左侧两个标签看到一模一样的列表。
@@ -676,12 +704,10 @@ class SourceManager {
   Future<List<int>> _fetchPlaylistBytes(String url,
       {Duration timeout = const Duration(seconds: 60)}) async {
     Future<List<int>> get(String ua) async {
-      final resp = await http
-          .get(
-            Uri.parse(url),
-            headers: {'User-Agent': ua, 'Accept': '*/*'},
-          )
-          .timeout(timeout);
+      final resp = await http.get(
+        Uri.parse(url),
+        headers: {'User-Agent': ua, 'Accept': '*/*'},
+      ).timeout(timeout);
       if (resp.statusCode != 200) {
         throw Exception('HTTP ${resp.statusCode}');
       }
@@ -740,9 +766,8 @@ class SourceManager {
             hops.add('→$current');
             continue;
           }
-          final bytes = await resp
-              .fold<List<int>>(<int>[], (a, b) => a..addAll(b))
-              .timeout(const Duration(seconds: 20));
+          final bytes = await resp.fold<List<int>>(<int>[],
+              (a, b) => a..addAll(b)).timeout(const Duration(seconds: 20));
           final html = _looksLikeHtmlBytes(bytes);
           final text = _decodePlaylistBytes(bytes);
           String parsed = '';
@@ -813,8 +838,7 @@ class SourceManager {
   // 递归展开并合并所有频道路径；深度限制 + 已访问集合防自引用死循环。
 
   static final _htmlTagRe = RegExp(r'<[^>]+>');
-  static final _copyAttrRe =
-      RegExp('data-copy\\s*=\\s*["\']([^"\']+)["\']');
+  static final _copyAttrRe = RegExp('data-copy\\s*=\\s*["\']([^"\']+)["\']');
 
   Future<List<ChannelCategory>> _resolveContent(
       String content, String url, int depth, Set<String> visited) async {
@@ -928,8 +952,8 @@ class SourceManager {
     }
     visited.add(u);
     try {
-      final bytes = await _fetchPlaylistBytes(u,
-          timeout: const Duration(seconds: 15));
+      final bytes =
+          await _fetchPlaylistBytes(u, timeout: const Duration(seconds: 15));
       final content = _decodePlaylistBytes(bytes);
       final cats = await _resolveContent(content, u, depth, visited);
       if (cats.isNotEmpty) return cats;
@@ -969,8 +993,7 @@ class SourceManager {
           // 按频道 ID 去重：多源重复的同名同地址频道只保留一个，
           // 避免列表里一大片同时显示选中态
           for (final ch in c.channels) {
-            final idx = merged[c.name]!
-                .indexWhere((e) => e.id == ch.id);
+            final idx = merged[c.name]!.indexWhere((e) => e.id == ch.id);
             if (idx < 0) {
               merged[c.name]!.add(ch);
             } else {
@@ -1102,8 +1125,8 @@ class SourceManager {
       }
 
       // 写缓存（base64 序列化，SharedPreferences 只吃字符串）
-      await _writeEpgCache(source.id, parsed.programs, parsed.channelNames,
-          parsed.channelIcons);
+      await _writeEpgCache(
+          source.id, parsed.programs, parsed.channelNames, parsed.channelIcons);
     } catch (e) {
       // 联网失败：如果有任何缓存（哪怕过期），退而用之
       final cacheStr = prefs.getString(_cacheKey(source.id));
@@ -1186,8 +1209,7 @@ class SourceManager {
     }
     _cachedEpgChannelNames = <String, List<String>>{};
     for (final entry in n.entries) {
-      _cachedEpgChannelNames[entry.key] =
-          (entry.value as List).cast<String>();
+      _cachedEpgChannelNames[entry.key] = (entry.value as List).cast<String>();
     }
     _cachedEpgChannelIcons = i;
   }

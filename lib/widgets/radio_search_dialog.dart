@@ -156,7 +156,9 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
         _switchTab(p == _tabSearchFocus ? 1 : 0);
         return KeyEventResult.handled;
       }
-      return KeyEventResult.ignored;
+      // 其余控件没有横向兄弟：左右一律吞掉。以前放行会给 Flutter 默认
+      // 方向导航，焦点横向窜到别的控件上，遥控器感觉像"乱跳"
+      return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
   }
@@ -171,12 +173,10 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     return c.isValid && !c.isCollapsed;
   }
 
-  /// 上下：按控件树顺序走一格（与设置中心同一套逻辑，行为可预测）
+  /// 上下：按控件树顺序走一格，**到头绕回**（与设置页内容区同一套逻辑：
+  /// 上下只在本卡片里循环，永远不会掉进/掉出别的控件）
   void _moveVertical({required bool up}) {
-    final stops = <FocusNode>[];
-    for (final n in _rootFocus.traversalDescendants) {
-      if (n.canRequestFocus && n.context != null) stops.add(n);
-    }
+    final stops = _navStops();
     if (stops.isEmpty) return;
     final cur = FocusManager.instance.primaryFocus;
     final idx = stops.indexWhere((n) => n == cur || n.hasFocus);
@@ -185,10 +185,27 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
       _ensureVisible();
       return;
     }
-    final next = idx + (up ? -1 : 1);
-    if (next < 0 || next >= stops.length) return;
+    // Dart 的 % 对负数返回非负值，绕回不用额外判断
+    final next = (idx + (up ? -1 : 1)) % stops.length;
     stops[next].requestFocus();
     _ensureVisible();
+  }
+
+  /// 上下导航的停靠点（树顺序）。
+  ///
+  /// 输入框不算停靠点：一旦焦点落进去，上下键就被输入框/输入法吃掉，
+  /// 遥控器再也走不出来（设置页踩过同一个坑）。输入框仍可鼠标点击或
+  /// OK 进入编辑，只是不参与上下循环。
+  List<FocusNode> _navStops() {
+    final stops = <FocusNode>[];
+    for (final n in _rootFocus.traversalDescendants) {
+      if (!n.canRequestFocus || n.context == null) continue;
+      if (n.context!.findAncestorWidgetOfExactType<EditableText>() != null) {
+        continue;
+      }
+      stops.add(n);
+    }
+    return stops;
   }
 
   /// 左右：在快捷筛选横排内移动。返回 false 表示当前焦点不在这一排
@@ -224,10 +241,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
 
   /// 打开时把焦点放到第一个可选项：遥控器进来就能直接上下选
   void _focusFirstReady() {
-    final stops = <FocusNode>[];
-    for (final n in _rootFocus.traversalDescendants) {
-      if (n.canRequestFocus && n.context != null) stops.add(n);
-    }
+    final stops = _navStops();
     if (stops.isNotEmpty) stops.first.requestFocus();
   }
 

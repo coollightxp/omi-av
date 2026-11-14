@@ -131,8 +131,44 @@ class VideoPlayerWidget extends StatelessWidget {
       return _RadioStage(controller: controller, channel: radioCh);
     }
 
-    // 空闲状态
+    // 空闲状态：只有「真的没有播放意图」时才显示选台提示。
+    //
+    // 换台 / 切引擎 / 接入投屏的瞬间，videoController 会被拆掉重建
+    // （vc 为 null 或 isInitialized 短暂为 false），而 state 还是
+    // playing/buffering——旧逻辑此时露出「请选择频道开始观看」，
+    // 用户看到的就是「一切换就闪一下选台页」（接投屏时最明显）。
+    // 只要还在播放意图里，就用黑底 + 转圈过渡，别闪文案。
     if (vc == null || !vc.value.isInitialized) {
+      final switching = controller.state != PlayerState.idle ||
+          controller.isCasting ||
+          controller.castWaiting;
+      if (switching) {
+        return Container(
+          color: Colors.black,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.4,
+                    color: Colors.white54,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  controller.isCasting || controller.castWaiting
+                      ? '正在接入投屏…'
+                      : '正在切换…',
+                  style: const TextStyle(color: Colors.white54, fontSize: 14),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
       return Container(
         color: Colors.black,
         child: const Center(

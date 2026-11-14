@@ -14,8 +14,7 @@ import 'omi_video_value.dart';
 /// - 与旧 video_player/fvp 栈保持同构 API，业务层零改动迁移；
 /// - libmpv 自带 HLS/DASH/RTSP 与断点续传，不再需要 fvp 注册与 MDK SDK；
 /// - 事件全部转成 [OmiVideoValue]，上层只依赖值对象。
-class OmiVideoController extends ChangeNotifier
-    implements OmiVideoBackend {
+class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
     Map<String, String>? headers,
@@ -23,11 +22,11 @@ class OmiVideoController extends ChangeNotifier
     int bufferSeconds = 5,
     bool radioSpectrum = false,
     bool audioMeter = false,
-  }) : _url = url,
-       _headers = headers,
-       _radioSpectrum = radioSpectrum,
-       _audioMeter = audioMeter,
-       _meterActive = audioMeter {
+  })  : _url = url,
+        _headers = headers,
+        _radioSpectrum = radioSpectrum,
+        _audioMeter = audioMeter,
+        _meterActive = audioMeter {
     MediaKit.ensureInitialized();
     final bytes = (bufferSeconds.clamp(3, 120)) * 1024 * 1024;
     _player = Player(
@@ -50,6 +49,7 @@ class OmiVideoController extends ChangeNotifier
   /// 走 mpv 的 af-metadata 读 astats 的 RMS，是**真实电平**，
   /// 不依赖 vo/showwaves，纯音频流也能拿到。
   final bool _audioMeter;
+
   /// 电平表当前是否真的挂在链上（取不到数据后置 false 并摘掉滤镜）
   bool _meterActive = false;
 
@@ -176,10 +176,22 @@ class OmiVideoController extends ChangeNotifier
     // 必须在 open 之前设：这是 demuxer 的 AVOption，open 时读一次
     await _applyFaultTolerance();
     if (_radioSpectrum) await _applySpectrumFilter();
+    // 后台起播（安卓通知栏切台）：open 前就把视频轨关掉。
+    //
+    // 只在 open 之后设 vid=no 是没用的——新文件打开时 mpv 会重新选轨，
+    // 视频解码仍要拿 Surface，后台拿不到就卡在起播（实测：通知栏按
+    // 下一台，声音停着不动，回到界面才接着放）。open 前设才真正跳过
+    // 视频管线，纯音频立刻出声。
+    if (_videoDisabled) {
+      try {
+        await _player.setVideoTrack(VideoTrack.no());
+      } catch (_) {}
+    }
     await _player.open(
       Media(_url.toString(), httpHeaders: _headers),
       play: false,
     );
+    _playerOpened = true;
     // open 返回即 demuxer 就绪；画面尺寸可能稍后才上报，
     // 这里用当前已知值兜底，后续由 stream 持续修正。
     final w = _player.state.width ?? 0;
@@ -202,8 +214,7 @@ class OmiVideoController extends ChangeNotifier
     }
     // 电平表要等 mpv 起来才能挂（af 在 _create 之前设大概率丢）；
     // 同理，均衡器预设也在这里补挂一次，避免首个滤镜调用打在空内核上
-    if (_audioMeter ||
-        (_lastAudioFilter ?? '').trim().isNotEmpty) {
+    if (_audioMeter || (_lastAudioFilter ?? '').trim().isNotEmpty) {
       await applyAudioFilter(_lastAudioFilter);
       if (_audioMeter) _startMeter();
     }
@@ -427,13 +438,23 @@ class OmiVideoController extends ChangeNotifier
   /// label 的滤镜，所以整条链打一个 label。
   @override
   Future<void> setVideoOutputDisabled(bool disabled) async {
+    // 先同步记下标记：可能还没 initialize（后台切台 = 新建实例后立刻
+    // 调这个方法），交给 open 前统一生效
+    _videoDisabled = disabled;
+    if (!_playerOpened) return;
     try {
-      await _player.setVideoTrack(
-          disabled ? VideoTrack.no() : VideoTrack.auto());
+      await _player
+          .setVideoTrack(disabled ? VideoTrack.no() : VideoTrack.auto());
     } catch (_) {
       // 轨道切换失败不影响音频播放
     }
   }
+
+  /// 视频输出是否被关闭（后台起播时 open 前要跳过视频轨）
+  bool _videoDisabled = false;
+
+  /// 播放器是否已经 open 过（open 之前的轨道设置要在 initialize 里做）
+  bool _playerOpened = false;
 
   Future<void> applyAudioFilter(String? lavfi) async {
     _lastAudioFilter = lavfi;

@@ -411,11 +411,12 @@ class PlayerController extends ChangeNotifier {
           unawaited(refreshChannels());
         }
       }));
-      // 内置电台清单：同一套到期机制，互不影响
-      unawaited(sourceManager.maybeAutoUpdateBuiltinRadio().then((_) {
-        if (sourceManager.currentPlaylistId == PlaylistSource.builtinRadioId) {
-          unawaited(refreshChannels());
-        }
+      // 内置电台清单：同一套到期机制，互不影响。
+      // 电台目录读的就是这份清单缓存：更新后直接重建电台目录，
+      // 绝不能去 refreshChannels（那是电视域，会把正在看的电视列表换掉）
+      unawaited(sourceManager.maybeAutoUpdateBuiltinRadio().then((_) async {
+        RadioCatalog.invalidate();
+        await reloadRadioCatalog();
       }));
       // 内置节目单：每天从央视网抓「今天 + 明天」，只有真更新过才重解析
       unawaited(BuiltinEpg.maybeAutoRefresh().then((updated) async {
@@ -473,12 +474,15 @@ class PlayerController extends ChangeNotifier {
       notifyListeners();
     });
 
-    // 一个源都没有时（新装/刚删光）：把内置电台精选设为当前源，
-    // 让首启就有内容，而不是一进来面对空列表
-    if (sourceManager.currentPlaylist == null &&
-        sourceManager.playlists
-            .any((p) => p.id == PlaylistSource.builtinRadioId)) {
-      await sourceManager.selectPlaylist(PlaylistSource.builtinRadioId);
+    // 一个源都没有时（新装/刚删光）：落到内置央视频道。
+    // 以前这里塞的是内置电台——电台是独立目录（RadioCatalog），当「当前
+    // 电视源」用会把电视那栏占住，用户看着像空的还选不回来
+    if (sourceManager.currentPlaylist == null) {
+      final hasCctv = sourceManager.playlists
+          .any((p) => p.id == PlaylistSource.builtinCctvId);
+      if (hasCctv) {
+        await sourceManager.selectPlaylist(PlaylistSource.builtinCctvId);
+      }
     }
 
     // 如果有选中的播放列表，加载频道；否则保持空列表，等用户添加
@@ -594,6 +598,14 @@ class PlayerController extends ChangeNotifier {
   /// 等待网络可用（最多等 30 秒），返回是否有网
   Future<bool> _waitForNetwork() async {
     if (NetworkMonitor.instance.hasNetwork) return true;
+    // 已有播放器实例（正在播/刚暂停）= 网络是通的，直接放行。
+    //
+    // 安卓息屏或后台时 DNS 探测常被系统限流，缓存值会被误判成"断网"；
+    // 照它去等 30 秒，用户看到的就是「通知栏按下一台没反应，
+    // 回到 App 才突然跳台」。播放本身能连上就说明网没问题。
+    if (_videoController != null || isPlaying) return true;
+    // 缓存说没网：实时补检一次（刚连 Wi-Fi / 后台转前台时缓存滞后）
+    if (await NetworkMonitor.instance.checkNow()) return true;
     _state = PlayerState.waitingForNetwork;
     notifyListeners();
     return NetworkMonitor.instance.waitForNetwork(
@@ -849,8 +861,9 @@ class PlayerController extends ChangeNotifier {
             }
           },
           selectPlaylist: (id) async {
-            await sourceManager.selectPlaylist(id);
-            await refreshChannels();
+            // 走控制器同一个入口：电台源在这里只刷电台目录，
+            // 不把电视当前源顶掉（网页端和本机是同一套规则）
+            await selectPlaylist(id);
           },
           restoreBuiltinRadio: () => restoreBuiltinRadio(),
           // 内置节目单：网页上「立即更新」直接让电脑端去央视网抓
@@ -1626,7 +1639,13 @@ class PlayerController extends ChangeNotifier {
     }
     // 无网络时等待网络（开机启动时系统网络可能未就绪）
     if (!await _waitForNetwork()) {
-      // 30 秒内仍无网络，保持等待状态，后台继续检测
+      // 30 秒内仍无网络：保持等待状态，后台继续检测。
+      // 但必须先把「目标频道」记下来——否则等网这段里 _currentChannel
+      // 还是上一台，网络一恢复 _onNetworkRestored 又会播回旧台，
+      // 用户刚点的这一台就丢了
+      _currentChannel = channel;
+      _sourceIndex = 0;
+      notifyListeners();
       return;
     }
     // 切到与「网页→内置接管」无关的频道（普通换台/启动恢复）：
@@ -4844,6 +4863,13 @@ class PlayerController extends ChangeNotifier {
     _radioCategories = rebuilt;
   }
 
+  /// 整表重读电台目录（内置清单更新 / 设置页「刷新」）：
+  /// 与电视当前源完全无关，不碰 _categories
+  Future<void> reloadRadioCatalog() async {
+    _radioCatalogLoaded = false;
+    await ensureRadioCatalog();
+  }
+
   bool isStationSaved(String stationId) => RadioLibrary.contains(stationId);
 
   /// 把在线目录里的电台加进「我的电台」
@@ -4860,42 +4886,27 @@ class PlayerController extends ChangeNotifier {
     await _afterRadioLibraryChanged();
   }
 
-  /// 库变化后：补源条目、必要时重载频道列表
+  /// 库变化后：补源条目、必要时重载电台目录
+  ///
+  /// 只动电台域：电台目录与电视当前源互不相干，这里绝不 refreshChannels
   Future<void> _afterRadioLibraryChanged() async {
     // 最后一个台被删：把「我的电台」源一并收回，源列表里不留空条目
     if (RadioLibrary.isEmpty) {
-      final wasCurrent =
-          sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId;
       await sourceManager.removePlaylist(PlaylistSource.radioLibraryId);
-      if (wasCurrent) {
-        // 当前源没了就落回内置精选；正在响的这台不被掐断
-        if (!sourceManager.builtinRadioRemoved) {
-          await sourceManager.selectPlaylist(PlaylistSource.builtinRadioId);
-        }
-        await refreshChannels();
-      } else {
-        _refreshRadioCatalog();
-        notifyListeners();
-      }
+      _refreshRadioCatalog();
+      notifyListeners();
       return;
     }
     await sourceManager.ensureRadioLibrarySource();
     _refreshRadioCatalog();
-    if (sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId) {
-      await refreshChannels();
-    } else {
-      notifyListeners();
-    }
+    notifyListeners();
   }
 
-  /// 恢复被删除的内置电台源
+  /// 恢复被删除的内置电台源（只重建电台目录，不碰电视当前源）
   Future<void> restoreBuiltinRadio() async {
     await sourceManager.restoreBuiltinRadio();
-    if (sourceManager.currentPlaylistId == null) {
-      await selectPlaylist(PlaylistSource.builtinRadioId);
-    } else {
-      notifyListeners();
-    }
+    RadioCatalog.invalidate();
+    await reloadRadioCatalog();
   }
 
   bool get builtinRadioRemoved => sourceManager.builtinRadioRemoved;
@@ -4922,6 +4933,13 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> selectPlaylist(String? id) async {
+    // 电台源不是「电视当前源」的一种：电台页签里点它只刷电台目录，
+    // 不许动电视清单（以前这里会 refreshChannels，电视那栏直接清空）
+    if (PlaylistSource.isRadioSourceId(id)) {
+      await reloadRadioCatalog();
+      notifyListeners();
+      return;
+    }
     await sourceManager.selectPlaylist(id);
     if (id != null) {
       await refreshChannels();

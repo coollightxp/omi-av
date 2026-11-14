@@ -25,10 +25,10 @@ import '../services/scene_favorites.dart';
 import '../services/radio_recorder.dart';
 import '../services/recording_share.dart';
 import '../services/radio_library.dart';
+import '../services/radio_catalog.dart';
 import '../services/web_diag.dart';
 import 'ime_safe_text_field.dart';
 import 'scaled_panel.dart';
-import 'sleep_timer_dialog.dart';
 
 export 'ime_safe_text_field.dart' show ImeSafeTextField;
 
@@ -164,15 +164,14 @@ class _SettingsPanelState extends State<SettingsPanel>
     }
   }
 
-  /// 上下键改为在设置内容里纵向移动焦点。
+  /// 遥控器/键盘导航（用户定义的逻辑）：
+  /// - 左栏分类（整栏只有 _navFocus 一个停靠点）：上下**循环**切分类，
+  ///   OK / 右键进右栏内容区；
+  /// - 右栏内容：上下**循环**走控件，互不越区；左右归控件（滑块/分段
+  ///   选择），调到最左再按左才退回左栏（见 _onPanelKeyEvent）。
   ///
-  /// 明确两区模型（修「按一下左右之后两个高亮同时跳」）：
-  /// - 焦点在左侧分类栏（整栏只有 _navFocus 一个停靠点）：
-  ///   上下 = 切分类；左右/OK 由 _SettingsNav 自己处理（右 = 进内容区）；
-  /// - 焦点在右侧内容区：上下 = 在内容控件间移动（不含分类栏），
-  ///   到顶再按上回分类栏；宽屏下按左也回分类栏（见 _onPanelKeyEvent）。
-  /// 分类项不再可聚焦（ExcludeFocus），焦点框永远只有一个，
-  /// 不会出现「分类高亮 + 内容焦点框各跳各的」。
+  /// 关键取舍：上下永远不跨区——跨区只走左右。这样遥控器用户按上下
+  /// 不会突然"跳上去"，也不会在输入框里被困住（输入框不做停靠点）。
   bool _onVerticalKey(KeyEvent event) {
     if (!widget.isOpen) return false;
     // 设置里弹出对话框（编辑源、二维码等）时放行：焦点属于对话框，
@@ -208,28 +207,39 @@ class _SettingsPanelState extends State<SettingsPanel>
     final stops = <FocusNode>[];
     for (final n in _panelFocusNode.traversalDescendants) {
       if (n == _navFocus) continue;
-      if (n.canRequestFocus && n.context != null) stops.add(n);
+      if (!n.canRequestFocus || n.context == null) continue;
+      // 输入框不作为上下导航的停靠点：遥控器/键盘的上下要能一路走完
+      // 所有设置项，一旦落在输入框上就再也走不动（用户实测"上下进到
+      // 输入框里就出不来了"）。输入框仍可用鼠标点/OK 键进入编辑
+      final inField =
+          n.context!.findAncestorWidgetOfExactType<EditableText>() != null;
+      if (inField) continue;
+      stops.add(n);
     }
     return stops;
   }
 
+  /// 上下键在设置里移动焦点：
+  ///
+  /// 两区模型（用户定义的遥控器逻辑）：
+  /// - 左栏分类：上下在 6 个分类间**循环**；OK / 右键进入右栏内容区；
+  /// - 右栏内容：上下在控件间**循环**（到底再按下回最上，到顶再按上回
+  ///   最下）；左右留给控件自己（滑块/分段选择），没有左右语义或已调到
+  ///   最左时按左，一路退回左栏分类（见 _onPanelKeyEvent）。
+  ///
+  /// 不再有「到顶按上跳回分类栏」——用户明确要求上下只在页内循环，
+  /// 只有左右才在两区之间跳。
   bool _handleVertical(KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final key = event.logicalKey;
     final isUp = key == LogicalKeyboardKey.arrowUp;
     if (!isUp && key != LogicalKeyboardKey.arrowDown) return false;
 
-    // 焦点在输入框内时放行：输入法（尤其是中文）用上下键选候选词，
-    // 面板不能在这里抢焦点切控件——否则选词过程被中断，老系统
-    // （Win10 1607）上还会出现输入框无响应（AppHangB1）
-    if (_focusInEditableText) return false;
-
-    // 分类栏持有焦点：上下直接切分类（分类项不可聚焦，没有第二个停靠点）
+    // 分类栏持有焦点：上下循环切换分类
     if (_navFocus.hasFocus) {
-      final i = _tabController.index + (isUp ? -1 : 1);
-      if (i >= 0 && i < _tabController.length) {
-        _tabController.index = i;
-      }
+      final n = _tabController.length;
+      if (n <= 1) return true;
+      _tabController.index = (_tabController.index + (isUp ? -1 : 1) + n) % n;
       return true;
     }
 
@@ -241,20 +251,13 @@ class _SettingsPanelState extends State<SettingsPanel>
     final focus = FocusManager.instance.primaryFocus;
     final idx = stops.indexWhere((n) => n == focus || n.hasFocus);
     if (idx < 0) {
-      // 焦点还停在面板外（刚打开时）：从分类栏进入
-      _navFocus.requestFocus();
+      // 焦点停在输入框等"非停靠点"上：上下各取一头，直接回到内容区
+      (isUp ? stops.last : stops.first).requestFocus();
+      _scrollFocusedIntoView();
       return true;
     }
-    final target = idx + (isUp ? -1 : 1);
-    if (target < 0) {
-      // 内容区到顶：回分类栏
-      _navFocus.requestFocus();
-      return true;
-    }
-    if (target >= stops.length) {
-      // 已到底：吞掉按键，停在原处
-      return true;
-    }
+    // 循环：越过最后一格回第一格，越过第一格回最后一格
+    final target = (idx + (isUp ? -1 : 1) + stops.length) % stops.length;
     stops[target].requestFocus();
     _scrollFocusedIntoView();
     return true;
@@ -264,14 +267,10 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 焦点变更在微任务里生效，下一帧再取 primaryFocus。
   /// 从分类栏进入内容区：聚焦右栏第一个可聚焦控件
   void _focusFirstContent() {
-    for (final n in _panelFocusNode.traversalDescendants) {
-      if (n == _navFocus) continue;
-      if (n.canRequestFocus && n.context != null) {
-        n.requestFocus();
-        _scrollFocusedIntoView();
-        return;
-      }
-    }
+    final stops = _contentStops();
+    if (stops.isEmpty) return;
+    stops.first.requestFocus();
+    _scrollFocusedIntoView();
   }
 
   void _scrollFocusedIntoView() {
@@ -483,8 +482,10 @@ class _SettingsNav extends StatelessWidget {
         ? LogicalKeyboardKey.arrowRight
         : LogicalKeyboardKey.arrowDown;
 
+    // 上下（窄屏为左右）在分类间循环：最后一个再往下回第一个，
+    // 第一个再往上回最后一个
     if (k == prev) {
-      if (index > 0) onChanged(index - 1);
+      onChanged((index - 1 + _items.length) % _items.length);
       return KeyEventResult.handled;
     }
     // 宽屏左栏在最左侧：向左没有去处，吞掉，避免焦点穿出设置面板
@@ -492,7 +493,7 @@ class _SettingsNav extends StatelessWidget {
       return KeyEventResult.handled;
     }
     if (k == next) {
-      if (index < _items.length - 1) onChanged(index + 1);
+      onChanged((index + 1) % _items.length);
       return KeyEventResult.handled;
     }
     if (k == enter ||
@@ -1058,8 +1059,6 @@ class _RadioSourcesTab extends StatelessWidget {
             else
               ...List.generate(radioPlaylists.length, (index) {
                 final p = radioPlaylists[index];
-                final isCurrent =
-                    controller.sourceManager.currentPlaylistId == p.id;
                 final isLibrary = p.id == PlaylistSource.radioLibraryId;
                 return _SourceRow(
                   title: p.isBuiltin ? '${p.name} · 内置' : p.name,
@@ -1069,12 +1068,18 @@ class _RadioSourcesTab extends StatelessWidget {
                       : '在线目录加入的电台 · 共 ${RadioLibrary.count} 个 · '
                           '单个移除/清空都在「在线电台」搜索页里',
                   icon: p.isBuiltin ? Icons.radio : Icons.podcasts,
-                  isCurrent: isCurrent,
-                  onSelect:
-                      isCurrent ? null : () => controller.selectPlaylist(p.id),
+                  // 电台源不参与「当前源」选择：内置精选随包自带不用选，
+                  // 我的电台是自动并进电台目录的。以前这里能选，一选就把
+                  // 电视直播源顶掉（电视那栏变空），两个域必须分开
+                  isCurrent: false,
+                  onSelect: () => OsdBus.show(
+                    '电台源随包内置，无需选择（左侧「电台」标签直接可听）',
+                    icon: Icons.radio,
+                  ),
                   actions: [
-                    _RowAction(Icons.refresh, Colors.amber, '刷新',
-                        () => controller.refreshChannels()),
+                    // 刷新增只刷电台目录：电视清单不受影响
+                    _RowAction(Icons.refresh, Colors.amber, '刷新电台目录',
+                        () => controller.reloadRadioCatalog()),
                     _RowAction(
                         Icons.delete,
                         Colors.redAccent,
@@ -2411,6 +2416,10 @@ class _NavSliderState extends State<_NavSlider> {
         (widget.value + (key == LogicalKeyboardKey.arrowRight ? _step : -_step))
             .clamp(widget.min, widget.max)
             .toDouble();
+    // 已经到头还继续按同方向：不吞掉按键，让它冒泡到设置面板——
+    // 最左再按左 = 退回左侧分类栏（遥控器用户的"离开内容区"手势），
+    // 否则滑块把左右键永远吃掉，焦点被困在这一行里
+    if (next == widget.value) return KeyEventResult.ignored;
     widget.onChanged!(next);
     return KeyEventResult.handled;
   }
@@ -2517,26 +2526,9 @@ class _SystemSettingsTab extends StatelessWidget {
                 activeColor: Colors.blueAccent,
               ),
             ],
-            // 定时关闭：倒计时 / 固定时刻，到点可暂停、退出或退出并关机
-            // （关机只在桌面端出现，移动端降级为退出）
-            ListTile(
-              leading: Icon(
-                controller.sleepRemain == null
-                    ? Icons.bedtime_outlined
-                    : Icons.bedtime,
-                color: controller.sleepRemain == null
-                    ? Colors.white70
-                    : Colors.amberAccent,
-              ),
-              title: const Text('定时关闭',
-                  style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: Text(
-                _sleepSubtitle(controller),
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-              trailing: const Icon(Icons.chevron_right, color: Colors.white38),
-              onTap: () => showSleepTimerDialog(context),
-            ),
+            // 定时关闭不做在这里：它跟「退出/关机」同一类动作，入口统一
+            // 收在退出卡片（长按返回键 / 遥控器退出键）的「定时关闭」里，
+            // 两处并存只会让人不知道该信哪个
             // 开关状态由独立 clockVisible 驱动：切换只重建时钟，不触发
             // 整棵播放 Stack 重建（旧做法反复切换会灰屏）
             ValueListenableBuilder<bool>(
@@ -2727,25 +2719,6 @@ class _SystemSettingsTab extends StatelessWidget {
         );
       },
     );
-  }
-
-  /// 定时关闭的状态文案：未设定时说明玩法，已设定时报时刻+剩余+动作
-  static String _sleepSubtitle(PlayerController c) {
-    final remain = c.sleepRemain;
-    final at = c.sleepAt;
-    final tail = switch (c.sleepAction) {
-      SleepAction.pause => '暂停播放',
-      SleepAction.exit => '退出应用',
-      SleepAction.shutdown => '退出并关机',
-    };
-    if (remain == null || at == null) {
-      return '未设定：可选 30/60/90/120 分钟，或固定时刻（如每晚 23:30）';
-    }
-    final h = remain.inHours;
-    final m = remain.inMinutes % 60;
-    final left = h > 0 ? '$h 小时 $m 分' : '$m 分';
-    return '${at.hour.toString().padLeft(2, '0')}:'
-        '${at.minute.toString().padLeft(2, '0')} $tail · 还剩 $left';
   }
 }
 
@@ -3667,8 +3640,12 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
     await _load();
     OsdBus.show(msg, icon: ok ? Icons.check_circle : Icons.error_outline);
     if (ok) {
-      // 正在用这个源就把列表刷新掉
-      if (c.sourceManager.currentPlaylistId == widget.config.sourceId) {
+      // 电台清单更新：只重建电台目录（它读的就是这份缓存）；
+      // 电视源更新：当前正在用才重建电视列表
+      if (widget.config.sourceId == PlaylistSource.builtinRadioId) {
+        RadioCatalog.invalidate();
+        await c.reloadRadioCatalog();
+      } else if (c.sourceManager.currentPlaylistId == widget.config.sourceId) {
         await c.refreshChannels();
       }
     }

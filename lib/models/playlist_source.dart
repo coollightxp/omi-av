@@ -2,8 +2,8 @@ import 'dart:convert';
 
 /// 播放列表来源类型
 enum PlaylistSourceType {
-  url,    // 网络地址
-  local,  // 本地文件
+  url, // 网络地址
+  local, // 本地文件
   builtin, // 出厂内置（随安装包发布，从 asset 读取，可停用可删除）
   radioLibrary, // 「我的电台」：在线目录搜到后加进来的台，存在本地
 }
@@ -18,8 +18,8 @@ enum PlaylistFormat {
 /// 播放列表源 - 用户添加的频道列表来源
 class PlaylistSource {
   final String id;
-  final String name;           // 用户自定义名称
-  final String url;            // URL 或本地文件路径
+  final String name; // 用户自定义名称
+  final String url; // URL 或本地文件路径
   final PlaylistSourceType type;
   final PlaylistFormat format;
   final DateTime addedAt;
@@ -54,6 +54,14 @@ class PlaylistSource {
   static const String radioLibraryId = 'omi-radio-library';
 
   bool get isBuiltin => type == PlaylistSourceType.builtin;
+
+  /// 电台域源（内置精选 / 我的电台）。
+  ///
+  /// 电台是独立目录（RadioCatalog），不占「当前电视直播源」这个槽位。
+  /// 以前两者共用一个 `currentPlaylistId`，在电台页签按 OK 会把电视源
+  /// 换成一个电台清单，电视那侧就整个空了——两个域必须是两条路。
+  static bool isRadioSourceId(String? id) =>
+      id == builtinRadioId || id == radioLibraryId;
 
   /// 内置源无法编辑地址（地址是安装包内资源）
   PlaylistSource builtinRadio() => PlaylistSource(

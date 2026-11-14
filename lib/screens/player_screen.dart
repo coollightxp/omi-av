@@ -32,6 +32,7 @@ import '../widgets/radio_search_dialog.dart';
 import '../widgets/right_epg_panel.dart';
 import '../widgets/settings_panel.dart';
 import '../widgets/sleep_timer_dialog.dart';
+import '../widgets/time_pick_dialog.dart';
 import '../widgets/top_title_bar.dart';
 import '../widgets/video_player_widget.dart';
 
@@ -1320,6 +1321,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 这里若按「弹层统一收口」处理，方向键会被吞掉、OK 还会直接把弹窗
     // 关掉——遥控器根本没法在里面选台加台。放行给它自己的焦点树处理。
     if (RadioSearchDialog.active) return false;
+    // 定时关闭弹窗 / 自绘时间选择器：自带遥控器焦点导航（上下 + OK），
+    // 放行给它们自己处理。否则这里的「弹层收口」会把 OK 当关闭、
+    // 把方向键全部吞掉——遥控器既选不了也改不了时间
+    if (sleepTimerDialogOpen || remoteTimePickerOpen) return false;
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
