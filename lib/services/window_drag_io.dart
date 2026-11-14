@@ -34,8 +34,8 @@ int? _screenX() {
   try {
     _getCursorPos ??= () {
       final user32 = ffi.DynamicLibrary.open('user32.dll');
-      final fn = user32.lookupFunction<_GetCursorPosC, _GetCursorPosDart>(
-          'GetCursorPos');
+      final fn = user32
+          .lookupFunction<_GetCursorPosC, _GetCursorPosDart>('GetCursorPos');
       _ptBuf = calloc<_POINT>();
       return fn;
     }();
@@ -56,21 +56,32 @@ int? _screenY() {
 
 /// 按下：[enabled] 为 false 时直接不武装（非桌面/全屏/网页区）。
 /// 记录按下时的光标屏幕坐标与窗口逻辑坐标，移动量全部由二者推出。
+///
+/// 光标坐标同步取（GetCursorPos 是同步 FFI），窗口坐标要 await；用
+/// [_armGen] 作废早期请求——手快时上一次按下的 await 可能晚于这一次落地。
 Future<void> beginWindowDrag({required bool enabled}) async {
+  final gen = ++_armGen;
   _dragArmed = false;
   _dragStarted = false;
+  _downCursor = null;
+  _downWindow = null;
   if (!enabled || !Platform.isWindows) return;
   final x = _screenX();
   final y = _screenY();
   if (x == null || y == null) return;
+  final cur = Offset(x.toDouble(), y.toDouble());
   try {
-    _downCursor = Offset(x.toDouble(), y.toDouble());
-    _downWindow = await windowManager.getPosition();
+    final pos = await windowManager.getPosition();
+    if (gen != _armGen) return; // 期间又按下/松开了，本次作废
+    _downCursor = cur;
+    _downWindow = pos;
     _dragArmed = true;
   } catch (_) {
     _dragArmed = false;
   }
 }
+
+int _armGen = 0;
 
 bool _dragArmed = false;
 bool _dragStarted = false;
@@ -80,7 +91,7 @@ Offset? _downWindow;
 /// 移动：光标离按下点超过 4 物理像素才开始真正拖（避免单击带歪窗口）。
 /// 位移用「屏幕物理像素差 ÷ devicePixelRatio」换算成窗口逻辑坐标。
 Future<void> updateWindowDrag() async {
-  if (!_dragArmed) return;
+  if (!_dragArmed || _busy) return;
   final x = _screenX();
   final y = _screenY();
   final d = _downCursor;
@@ -92,16 +103,24 @@ Future<void> updateWindowDrag() async {
     if (dx * dx + dy * dy < 16) return;
     _dragStarted = true;
   }
-  final dpr =
-      WidgetsBinding.instance.platformDispatcher.implicitView?.devicePixelRatio ??
-          1.0;
+  final dpr = WidgetsBinding
+          .instance.platformDispatcher.implicitView?.devicePixelRatio ??
+      1.0;
+  // 一次只发一个 setPosition：指针事件比窗口移动快时排队会拖成橡皮筋
+  _busy = true;
   try {
-    await windowManager
-        .setPosition(Offset(w0.dx + dx / dpr, w0.dy + dy / dpr));
-  } catch (_) {}
+    await windowManager.setPosition(Offset(w0.dx + dx / dpr, w0.dy + dy / dpr),
+        animate: false);
+  } catch (_) {
+  } finally {
+    _busy = false;
+  }
 }
 
+bool _busy = false;
+
 void endWindowDrag() {
+  _armGen++;
   _dragArmed = false;
   _dragStarted = false;
   _downCursor = null;

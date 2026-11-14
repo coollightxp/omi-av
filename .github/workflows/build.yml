@@ -682,7 +682,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/Omi-android-*.apk --clobber --repo "$GITHUB_REPOSITORY"
+          for i in 1 2 3 4 5; do
+            gh release upload "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/Omi-android-*.apk --clobber --repo "$GITHUB_REPOSITORY" && break
+            echo "upload retry $i / 5"; sleep 15
+          done
 
   # ==================== Web ====================
   build-web:
@@ -1169,12 +1172,23 @@ jobs:
           path: Omi-windows.zip
 
       # 上传改走 gh CLI（原因见 Android 同名步骤注释）
+      # 重试 5 次：release 刚发布时 Windows job 偶发 "release not found"/
+      # 422 Bad Size（v2.1.16/17/18/19 连续复现），只是瞬时可见性/上传竞态，
+      # 15 秒后重试必成功；不再让整个 job 红叉
       - name: Upload to Release
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" Omi-windows.zip --clobber --repo "$GITHUB_REPOSITORY"
+          $ok = $false
+          foreach ($i in 1..5) {
+            gh release upload "$env:GITHUB_REF_NAME" Omi-windows.zip --clobber --repo "$env:GITHUB_REPOSITORY"
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "upload retry $i / 5"
+            Start-Sleep -Seconds 15
+          }
+          if (-not $ok) { exit 1 }
 
   # ==================== Linux Desktop ====================
   build-linux:
@@ -1229,7 +1243,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" Omi-linux.zip --clobber --repo "$GITHUB_REPOSITORY"
+          for i in 1 2 3 4 5; do
+            gh release upload "$GITHUB_REF_NAME" Omi-linux.zip --clobber --repo "$GITHUB_REPOSITORY" && break
+            echo "upload retry $i / 5"; sleep 15
+          done
 
   # ==================== 打 tag 自动建 Release（方案 14.2） ====================
   # 版本号唯一来源 = git 标签（14.1）：

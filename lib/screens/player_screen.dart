@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
+import 'package:flutter/gestures.dart' show kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -438,8 +439,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // （数字键切频道等 Flutter 侧交互不会触发网页 JS 事件）
     if (controller.webPageActive && controller.webController != null) {
       try {
-        controller.webController
-            .evaluateJavascript(source: 'window.__omShowCursor && window.__omShowCursor()');
+        controller.webController.evaluateJavascript(
+            source: 'window.__omShowCursor && window.__omShowCursor()');
       } catch (_) {}
     }
     if (!controller.isPlaying) return;
@@ -505,449 +506,450 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   @override
   Widget build(BuildContext context) {
-      // 返回键始终拦截，统一交给 _handleBackPressed 处理
-      // （含无面板时的退出确认）；否则 canPop=true 时系统会直接退出
-      return Focus(
-        focusNode: _rootFocusNode,
-        autofocus: true,
-        child: PopScope(
-          canPop: false,
-          onPopInvoked: (didPop) {
-            if (!didPop) _handleBackPressed();
-          },
-          child: Scaffold(
-      backgroundColor: Colors.black,
-      body: MouseRegion(
-        cursor: _cursorHidden ? SystemMouseCursors.none : MouseCursor.defer,
-        onHover: (event) {
-          _pokeCursor();
-          // 小窗里不呼出顶部标题栏（窗口只有 420×236，标题栏会盖住画面）
-          if (_controllerRef?.miniWindow ?? false) return;
-          // 鼠标靠近屏幕顶部时呼出悬停标题栏
-          final nearTop = event.position.dy < 40;
-          if (nearTop != _topBarVisible) {
-            setState(() => _topBarVisible = nearTop);
-          }
+    // 返回键始终拦截，统一交给 _handleBackPressed 处理
+    // （含无面板时的退出确认）；否则 canPop=true 时系统会直接退出
+    return Focus(
+      focusNode: _rootFocusNode,
+      autofocus: true,
+      child: PopScope(
+        canPop: false,
+        onPopInvoked: (didPop) {
+          if (!didPop) _handleBackPressed();
         },
-        child: Listener(
-          // 任何鼠标/触摸活动都恢复显示鼠标，并把快捷键焦点收回根节点
-          onPointerDown: (_) {
-            _pokeCursor();
-            // 待选台画面：点一下就开列表（触屏设备没有方向键）
-            if (context.read<PlayerController>().awaitingChannelPick) {
-              _openStandbyChannelList();
-            }
-            // 面板可能在静止光标下滑出（无 hover 事件），
-            // 用户开始点击时保持面板不自动隐藏
-            if (_leftDrawerOpen || _rightEpgOpen) {
-              _cancelDrawerHide();
-            }
-            _ensureShortcutFocus();
-          },
-          onPointerMove: (_) {
-            _pokeCursor();
-          },
-          child: Consumer<PlayerController>(
-            builder: (context, controller, _) {
-              // 信息面板显隐完全由 _bottomPanelVisible 控制：
-              // 用户主动呼出（长按 OK / 鼠标 hover）或底部边缘 hover 打开；
-              // 不再因 buffering/loading 强制显示——这会让 _bottomPanelActive
-              // 判断与视觉不同步，导致遥控器左右键被 seek 逻辑接管而面板
-              // 按钮收不到焦点，返回键也关不掉面板
-              final panelVisible = _bottomPanelVisible;
-              // 小窗（420×236）：所有面板/OSD 都按大屏尺寸排版，在小窗里
-              // 会把画面整个盖住，这里统一不渲染（只留左上角恢复按钮）
-              final mini = controller.miniWindow;
-              final webUrl = controller.webPageActive
-                  ? controller.currentChannel?.webPageUrl ?? ''
-                  : '';
-              return Stack(
-                children: [
-                  // 最底层：网页频道控件。网页在后台缓冲时也存在于此，
-                  // 被上方黑屏占位盖住；起播后黑屏移走，网页显露到全屏
-                  if (webUrl.isNotEmpty)
-                    Positioned.fill(
-                      child: _WebChannelOverlay(
-                        // key 只带重载序号，**不带 URL**：
-                        // 切台不再销毁重建 WebView（WebView2 销毁+创建
-                        // 相邻会在部分 Windows 机器上弹 0xc0000005 系统
-                        // 错误框），URL 变化走控件内 loadUrl 页内导航；
-                        // 手动/自动重载改序号，仍按"彻底重来"重建
-                        key: ValueKey('web_${controller.webReloadSerial}'),
-                        url: webUrl,
-                        title: controller.currentChannel?.name ?? '',
-                        foreground: controller.webPageForeground,
-                        onForeground: () =>
-                            controller.setWebForeground(true),
-                        onWebKey: _onWebKey,
-                        onPlayStateChanged: controller.setWebPlaying,
-                        onWebMouseMove: _pokeCursor,
-                        onBridgeAttached: controller.attachWebBridge,
-                        onBridgeDetached: controller.detachWebBridge,
-                      ),
-                    ),
-
-                  // 视频层：
-                  // - 普通频道：正常视频控件
-                  // - 网页频道后台缓冲中：黑屏占位（网页在其下方缓冲）
-                  // - 网页频道前台播放：空层（让下方网页全屏显露）
-                  // - 等待网络：显示网络等待提示
-                  Positioned.fill(
-                    child: controller.state == PlayerState.waitingForNetwork
-                        ? Container(
-                            color: Colors.black,
-                            child: Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: const [
-                                  CircularProgressIndicator(
-                                      color: Colors.blueAccent),
-                                  SizedBox(height: 16),
-                                  Text('正在等待网络连接...',
-                                      style: TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 16)),
-                                  SizedBox(height: 8),
-                                  Text('网络恢复后将自动开始播放',
-                                      style: TextStyle(
-                                          color: Colors.white54,
-                                          fontSize: 13)),
-                                ],
-                              ),
-                            ),
-                          )
-                        : !controller.webPageActive
-                            // 视频单独成层：面板滑入/OSD 淡入只重绘自己那一层，
-                            // 不必带着视频纹理整屏重绘（老显卡上会闪黑一帧）
-                            ? const RepaintBoundary(
-                                child: VideoPlayerWidget())
-                        : _WebLoadingCurtain(
-                            // 换台要重新盖幕：同一频道内不重建，换台时换 key
-                            key: ValueKey(
-                                'curtain_${controller.currentChannel?.id}'),
-                            controller: controller,
-                            foreground: controller.webPageForeground,
-                          ),
-                  ),
-
-                  // Windows 桌面亮度遮罩：原生 gamma ramp 在台式机/外接
-                  // 显示器上普遍无效（调了没反应），改为在视频层上压一层
-                  // 黑色遮罩调暗画面。仅内置播放；网页频道走 CSS filter，
-                  // 安卓/macOS 走系统亮度。IgnorePointer 不拦手势。
-                  if (!kIsWeb &&
-                      defaultTargetPlatform == TargetPlatform.windows &&
-                      !controller.webPageActive &&
-                      controller.brightness < 1.0)
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: Container(
-                          color: Colors.black.withOpacity(
-                              (1.0 - controller.brightness) * 0.85),
-                        ),
-                      ),
-                    ),
-
-                  // 切台 OSD（左上角序号/台名/节目名）
-                  // 放在手势层与各面板【之下】：面板滑出时盖住它，
-                  // 避免 OSD 卡片挡住频道面板顶部的返回按钮
-                  if (!mini) _buildChannelOsd(controller),
-
-                  // 右上角系统时间：独立自治，切换不重建整棵 Stack
-                  if (!mini) const ClockOverlay(),
-
-                  // 锁定角标：顶部居中提示已锁定与解锁方式
-                  if (controller.locked) _buildLockBadge(),
-
-                  // 手势检测层：普通模式全功能；网页模式仅保留左右两侧
-                  // 垂直滑动（亮度/音量），中间区域完全穿透不拦截网页点击，
-                  // 面板由边缘触发区弹出
-                  _buildGestureLayer(controller,
-                      webMode: controller.webPageActive),
-
-                  // 网页模式的双击全屏：JS 侧已屏蔽网页自身 dblclick，
-                  // 这里接管为 App 窗口全屏切换（双击手势不吞单击，网页播放器
-                  // 的单击暂停/播放不受影响）。后台缓冲（黑屏占位）期间同样
-                  // 需要——此时网页还没推前台，双击全屏不该失效
-                  if (controller.webPageActive && controller.isDesktop)
-                    Positioned.fill(
-                      child: _WebDoubleTapFullScreen(
-                        // 小窗模式下双击 = 恢复原窗口（此时切换全屏没有意义）
-                        onToggle: () => controller.miniWindow
-                            ? controller.toggleMiniWindow()
-                            : controller.toggleFullscreen(),
-                      ),
-                    ),
-
-                  // 小窗模式：左上角常驻「恢复窗口」按钮。小窗口（420×236）
-                  // 里底部控制面板会被窄窗口裁切，只靠面板按钮容易点不到
-                  if (controller.isDesktop && controller.miniWindow)
-                    _buildMiniRestoreButton(controller),
-
-                  // 定时关闭：视频/直播画面右上角（时间下方）常显倒计时，
-                  // 最后 60 秒弹大卡片提示并可按返回键取消——电台画面里
-                  // 台名一行已有同款徽标，那边不再重复
-                  if (!mini) const SleepBadgeOverlay(),
-                  if (!mini) const SleepFinalCard(),
-
-                  // 移动端：屏幕分三区，单击左/中/右分别呼出频道菜单/
-                  // 控制面板/EPG（见 _buildGestureLayer），不再使用贴边
-                  // 窄热区；桌面端保留 hover 边缘自动弹出
-
-                  // 桌面端 hover 边缘自动弹出（小窗里不响应，避免面板盖画面）
-                  if (controller.isDesktop && !mini) ...[
-                    // 左边缘：不在 onExit 里启动隐藏计时——面板滑入会覆盖
-                    // 这个 20px 触发区，触发区合成 onExit 与面板 onEnter 的
-                    // 回调顺序若为「先入后出」，会把面板刚取消的隐藏定时器
-                    // 重新启动，导致光标明明停在面板内、3 秒后仍自动关闭，
-                    // 表现为顶部返回/关闭钮点不到。隐藏统一由面板自身
-                    // onExit 负责。
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: 20,
-                      child: MouseRegion(
-                        onEnter: (_) {
-                          if (_leftDrawerOpen) {
-                            _cancelDrawerHide();
-                          } else {
-                            _openDrawer(left: true);
-                          }
-                        },
-                      ),
-                    ),
-                    // 右边缘
-                    Positioned(
-                      right: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: 20,
-                      child: MouseRegion(
-                        onEnter: (_) {
-                          if (_rightEpgOpen) {
-                            _cancelDrawerHide();
-                          } else {
-                            _openDrawer(left: false);
-                          }
-                        },
-                      ),
-                    ),
-                    // 底部边缘
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      height: 20,
-                      child: MouseRegion(
-                        onEnter: (_) => _showBottomPanel(),
-                        onExit: (_) => _scheduleBottomHide(),
-                      ),
-                    ),
-                  ],
-
-                  // 底部信息/控制面板（hover 回调由面板内部 MouseRegion 处理，
-                  // 不能在外面用 MouseRegion 包裹：根是 AnimatedPositioned 的
-                  // 组件被其它 RenderObjectWidget 包裹会破坏 Stack parentData，
-                  // release 下直接灰屏）
-                  if (!mini)
-                    BottomProgramPanel(
-                      key: _bottomPanelKey,
-                      isVisible: panelVisible,
-                      onHoverEnter: _cancelBottomHide,
-                      onHoverExit: _scheduleBottomHide,
-                      onHoverMove: _cancelBottomHide,
-                      onTogglePlayPause: controller.togglePlayPause,
-                      onScreenshot: _takeScreenshot,
-                      onToggleRecord: () => _toggleRecording(controller),
-                      onSwitchWebNative: () =>
-                          controller.switchWebNativePlayback(),
-                      onReload: controller.reloadCurrentChannel,
-                      onDismissRemote: () {
-                        if (_bottomPanelVisible) {
-                          setState(() => _bottomPanelVisible = false);
-                        }
-                        _bottomHideTimer?.cancel();
-                      },
-                    ),
-
-                  // 待机壳：投屏等待 / 待选台（方案 3.7、第九节）
-                  // 盖住视频层，但让下面的抽屉/面板仍能覆盖它
-                  if (!mini && (controller.castWaiting ||
-                      controller.awaitingChannelPick))
-                    Positioned.fill(
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: controller.awaitingChannelPick
-                            ? _openStandbyChannelList
-                            : null,
-                        child: controller.castWaiting
-                            ? StandbyShell(
-                                icon: Icons.cast,
-                                topBadge: '投屏',
-                                title: '正在等待投屏',
-                                subtitle: controller.castWaitRemain > 0
-                                    ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
-                                    : '发送端连播可直接接上',
-                                hint: '双击返回键  返回直播',
-                              )
-                            : const StandbyShell(
-                                icon: Icons.live_tv,
-                                title: '请选择频道',
-                                subtitle: '按 OK 或方向键打开频道列表',
-                              ),
-                      ),
-                    ),
-
-                  // 左侧频道抽屉（小窗里不渲染，下同）
-                  if (!mini)
-                    LeftChannelDrawer(
-                      key: _leftDrawerKey,
-                      isOpen: _leftDrawerOpen,
-                      onClose: () {
-                        setState(() => _leftDrawerOpen = false);
-                        WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => _ensureShortcutFocus());
-                      },
-                      onHoverEnter: _cancelDrawerHide,
-                      onHoverExit: _startDrawerHideTimer,
-                      onHoverMove: _cancelDrawerHide,
-                      onOpenSettings: () {
-                        setState(() => _leftDrawerOpen = false);
-                        _toggleSettings();
-                      },
-                    ),
-
-                  // 右侧 EPG 面板
-                  if (!mini)
-                    RightEpgPanel(
-                      key: _rightEpgKey,
-                      isOpen: _rightEpgOpen,
-                      onClose: () {
-                        setState(() => _rightEpgOpen = false);
-                        WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => _ensureShortcutFocus());
-                      },
-                      onHoverEnter: _cancelDrawerHide,
-                      onHoverExit: _startDrawerHideTimer,
-                      onHoverMove: _cancelDrawerHide,
-                    ),
-
-                  // 设置面板
-                  if (!mini)
-                    SettingsPanel(
-                      isOpen: _settingsOpen,
-                      onClose: () {
-                        setState(() => _settingsOpen = false);
-                        // 关闭后恢复低级钩子对数字键的选台拦截
-                        _winHotkeys.setCapture(true);
-                        WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => _ensureShortcutFocus());
-                      },
-                    ),
-
-                  // 鼠标右键 = 遥控器返回：按层级关闭 投屏→抽屉→面板，
-                  // 再按弹退出确认（网页频道前台时右键被 WebView 消费，
-                  // 网页区内不触发；网页菜单已在 JS 层禁用）。
-                  // 设置面板打开时不拦截：输入框里右键要能弹「全选/复制/
-                  // 粘贴」系统菜单，不能被当成返回。
-                  if (controller.isDesktop && !mini && !_settingsOpen)
-                    Positioned.fill(
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.translucent,
-                        onSecondaryTapUp: (_) => _handleBackPressed(),
-                      ),
-                    ),
-
-                  // 亮度调节指示
-                  GestureIndicatorOverlay(
-                    isVisible: _showBrightnessIndicator,
-                    icon: Icons.brightness_6,
-                    iconColor: Colors.amber,
-                    value: controller.brightness,
-                    label: '亮度 ${(controller.brightness * 100).round()}%',
-                  ),
-
-                  // 音量调节指示
-                  GestureIndicatorOverlay(
-                    isVisible: _showVolumeIndicator,
-                    icon: controller.volume == 0
-                        ? Icons.volume_off
-                        : (controller.volume < 0.5
-                            ? Icons.volume_down
-                            : Icons.volume_up),
-                    iconColor: Colors.blueAccent,
-                    value: controller.volume,
-                    label: '音量 ${(controller.volume * 100).round()}%',
-                  ),
-
-                  // 点播长按左右键：数字进度 OSD（不拦截手势）
-                  _buildSeekOsd(),
-
-                  // 屏幕中央消息 OSD（截图/录制/关机等提示）
-                  _buildMessageOsd(),
-
-                  // 录制指示器（网页/原生均显示）
-                  if (controller.isRecording)
-                    Positioned(
-                      top: 48,
-                      left: 16,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: const BoxDecoration(
-                              color: Colors.red,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            controller.webPageActive
-                                ? 'REC · ${_formatBytes(controller.webRecordingBytes)}'
-                                : 'REC',
-                            style: const TextStyle(
-                              color: Colors.red,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                  // 顶部悬停标题栏（桌面端，置于最顶层，
-                  // 避免被右上角时钟/切台 OSD 遮挡导致点不到）
-                  // 频道抽屉 / EPG / 设置打开时不显示，以免挡住它们
-                  // 顶部的关闭、返回按钮
-                  if (controller.isDesktop &&
-                      !mini &&
-                      !_leftDrawerOpen &&
-                      !_rightEpgOpen &&
-                      !_settingsOpen)
-                    TopTitleBar(
-                      visible: _topBarVisible,
-                      onHide: () {
-                        if (_topBarVisible) {
-                          setState(() => _topBarVisible = false);
-                        }
-                      },
-                    ),
-
-                  // 启动画面：配置、节目列表、EPG 读入期间盖住全屏，
-                  // 读完后自动消失（详见 PlayerController.bootReady）
-                  if (!controller.bootReady)
-                    _BootSplash(status: controller.bootStatus),
-                ],
-              );
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: MouseRegion(
+            cursor: _cursorHidden ? SystemMouseCursors.none : MouseCursor.defer,
+            onHover: (event) {
+              _pokeCursor();
+              // 小窗里不呼出顶部标题栏（窗口只有 420×236，标题栏会盖住画面）
+              if (_controllerRef?.miniWindow ?? false) return;
+              // 鼠标靠近屏幕顶部时呼出悬停标题栏
+              final nearTop = event.position.dy < 40;
+              if (nearTop != _topBarVisible) {
+                setState(() => _topBarVisible = nearTop);
+              }
             },
+            child: Listener(
+              // 任何鼠标/触摸活动都恢复显示鼠标，并把快捷键焦点收回根节点
+              onPointerDown: (_) {
+                _pokeCursor();
+                // 待选台画面：点一下就开列表（触屏设备没有方向键）
+                if (context.read<PlayerController>().awaitingChannelPick) {
+                  _openStandbyChannelList();
+                }
+                // 面板可能在静止光标下滑出（无 hover 事件），
+                // 用户开始点击时保持面板不自动隐藏
+                if (_leftDrawerOpen || _rightEpgOpen) {
+                  _cancelDrawerHide();
+                }
+                _ensureShortcutFocus();
+              },
+              onPointerMove: (_) {
+                _pokeCursor();
+              },
+              child: Consumer<PlayerController>(
+                builder: (context, controller, _) {
+                  // 信息面板显隐完全由 _bottomPanelVisible 控制：
+                  // 用户主动呼出（长按 OK / 鼠标 hover）或底部边缘 hover 打开；
+                  // 不再因 buffering/loading 强制显示——这会让 _bottomPanelActive
+                  // 判断与视觉不同步，导致遥控器左右键被 seek 逻辑接管而面板
+                  // 按钮收不到焦点，返回键也关不掉面板
+                  final panelVisible = _bottomPanelVisible;
+                  // 小窗（420×236）：所有面板/OSD 都按大屏尺寸排版，在小窗里
+                  // 会把画面整个盖住，这里统一不渲染（只留左上角恢复按钮）
+                  final mini = controller.miniWindow;
+                  final webUrl = controller.webPageActive
+                      ? controller.currentChannel?.webPageUrl ?? ''
+                      : '';
+                  return Stack(
+                    children: [
+                      // 最底层：网页频道控件。网页在后台缓冲时也存在于此，
+                      // 被上方黑屏占位盖住；起播后黑屏移走，网页显露到全屏
+                      if (webUrl.isNotEmpty)
+                        Positioned.fill(
+                          child: _WebChannelOverlay(
+                            // key 只带重载序号，**不带 URL**：
+                            // 切台不再销毁重建 WebView（WebView2 销毁+创建
+                            // 相邻会在部分 Windows 机器上弹 0xc0000005 系统
+                            // 错误框），URL 变化走控件内 loadUrl 页内导航；
+                            // 手动/自动重载改序号，仍按"彻底重来"重建
+                            key: ValueKey('web_${controller.webReloadSerial}'),
+                            url: webUrl,
+                            title: controller.currentChannel?.name ?? '',
+                            foreground: controller.webPageForeground,
+                            onForeground: () =>
+                                controller.setWebForeground(true),
+                            onWebKey: _onWebKey,
+                            onPlayStateChanged: controller.setWebPlaying,
+                            onWebMouseMove: _pokeCursor,
+                            onBridgeAttached: controller.attachWebBridge,
+                            onBridgeDetached: controller.detachWebBridge,
+                          ),
+                        ),
+
+                      // 视频层：
+                      // - 普通频道：正常视频控件
+                      // - 网页频道后台缓冲中：黑屏占位（网页在其下方缓冲）
+                      // - 网页频道前台播放：空层（让下方网页全屏显露）
+                      // - 等待网络：显示网络等待提示
+                      Positioned.fill(
+                        child: controller.state == PlayerState.waitingForNetwork
+                            ? Container(
+                                color: Colors.black,
+                                child: Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: const [
+                                      CircularProgressIndicator(
+                                          color: Colors.blueAccent),
+                                      SizedBox(height: 16),
+                                      Text('正在等待网络连接...',
+                                          style: TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 16)),
+                                      SizedBox(height: 8),
+                                      Text('网络恢复后将自动开始播放',
+                                          style: TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 13)),
+                                    ],
+                                  ),
+                                ),
+                              )
+                            : !controller.webPageActive
+                                // 视频单独成层：面板滑入/OSD 淡入只重绘自己那一层，
+                                // 不必带着视频纹理整屏重绘（老显卡上会闪黑一帧）
+                                ? const RepaintBoundary(
+                                    child: VideoPlayerWidget())
+                                : _WebLoadingCurtain(
+                                    // 换台要重新盖幕：同一频道内不重建，换台时换 key
+                                    key: ValueKey(
+                                        'curtain_${controller.currentChannel?.id}'),
+                                    controller: controller,
+                                    foreground: controller.webPageForeground,
+                                  ),
+                      ),
+
+                      // Windows 桌面亮度遮罩：原生 gamma ramp 在台式机/外接
+                      // 显示器上普遍无效（调了没反应），改为在视频层上压一层
+                      // 黑色遮罩调暗画面。仅内置播放；网页频道走 CSS filter，
+                      // 安卓/macOS 走系统亮度。IgnorePointer 不拦手势。
+                      if (!kIsWeb &&
+                          defaultTargetPlatform == TargetPlatform.windows &&
+                          !controller.webPageActive &&
+                          controller.brightness < 1.0)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: Container(
+                              color: Colors.black.withOpacity(
+                                  (1.0 - controller.brightness) * 0.85),
+                            ),
+                          ),
+                        ),
+
+                      // 切台 OSD（左上角序号/台名/节目名）
+                      // 放在手势层与各面板【之下】：面板滑出时盖住它，
+                      // 避免 OSD 卡片挡住频道面板顶部的返回按钮
+                      if (!mini) _buildChannelOsd(controller),
+
+                      // 右上角系统时间：独立自治，切换不重建整棵 Stack
+                      if (!mini) const ClockOverlay(),
+
+                      // 锁定角标：顶部居中提示已锁定与解锁方式
+                      if (controller.locked) _buildLockBadge(),
+
+                      // 手势检测层：普通模式全功能；网页模式仅保留左右两侧
+                      // 垂直滑动（亮度/音量），中间区域完全穿透不拦截网页点击，
+                      // 面板由边缘触发区弹出
+                      _buildGestureLayer(controller,
+                          webMode: controller.webPageActive),
+
+                      // 网页模式的双击全屏：JS 侧已屏蔽网页自身 dblclick，
+                      // 这里接管为 App 窗口全屏切换（双击手势不吞单击，网页播放器
+                      // 的单击暂停/播放不受影响）。后台缓冲（黑屏占位）期间同样
+                      // 需要——此时网页还没推前台，双击全屏不该失效
+                      if (controller.webPageActive && controller.isDesktop)
+                        Positioned.fill(
+                          child: _WebDoubleTapFullScreen(
+                            // 小窗模式下双击 = 恢复原窗口（此时切换全屏没有意义）
+                            onToggle: () => controller.miniWindow
+                                ? controller.toggleMiniWindow()
+                                : controller.toggleFullscreen(),
+                          ),
+                        ),
+
+                      // 小窗模式：左上角常驻「恢复窗口」按钮。小窗口（420×236）
+                      // 里底部控制面板会被窄窗口裁切，只靠面板按钮容易点不到
+                      if (controller.isDesktop && controller.miniWindow)
+                        _buildMiniRestoreButton(controller),
+
+                      // 定时关闭：视频/直播画面右上角（时间下方）常显倒计时，
+                      // 最后 60 秒弹大卡片提示并可按返回键取消——电台画面里
+                      // 台名一行已有同款徽标，那边不再重复
+                      if (!mini) const SleepBadgeOverlay(),
+                      if (!mini) const SleepFinalCard(),
+
+                      // 移动端：屏幕分三区，单击左/中/右分别呼出频道菜单/
+                      // 控制面板/EPG（见 _buildGestureLayer），不再使用贴边
+                      // 窄热区；桌面端保留 hover 边缘自动弹出
+
+                      // 桌面端 hover 边缘自动弹出（小窗里不响应，避免面板盖画面）
+                      if (controller.isDesktop && !mini) ...[
+                        // 左边缘：不在 onExit 里启动隐藏计时——面板滑入会覆盖
+                        // 这个 20px 触发区，触发区合成 onExit 与面板 onEnter 的
+                        // 回调顺序若为「先入后出」，会把面板刚取消的隐藏定时器
+                        // 重新启动，导致光标明明停在面板内、3 秒后仍自动关闭，
+                        // 表现为顶部返回/关闭钮点不到。隐藏统一由面板自身
+                        // onExit 负责。
+                        Positioned(
+                          left: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 20,
+                          child: MouseRegion(
+                            onEnter: (_) {
+                              if (_leftDrawerOpen) {
+                                _cancelDrawerHide();
+                              } else {
+                                _openDrawer(left: true);
+                              }
+                            },
+                          ),
+                        ),
+                        // 右边缘
+                        Positioned(
+                          right: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 20,
+                          child: MouseRegion(
+                            onEnter: (_) {
+                              if (_rightEpgOpen) {
+                                _cancelDrawerHide();
+                              } else {
+                                _openDrawer(left: false);
+                              }
+                            },
+                          ),
+                        ),
+                        // 底部边缘
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          height: 20,
+                          child: MouseRegion(
+                            onEnter: (_) => _showBottomPanel(),
+                            onExit: (_) => _scheduleBottomHide(),
+                          ),
+                        ),
+                      ],
+
+                      // 底部信息/控制面板（hover 回调由面板内部 MouseRegion 处理，
+                      // 不能在外面用 MouseRegion 包裹：根是 AnimatedPositioned 的
+                      // 组件被其它 RenderObjectWidget 包裹会破坏 Stack parentData，
+                      // release 下直接灰屏）
+                      if (!mini)
+                        BottomProgramPanel(
+                          key: _bottomPanelKey,
+                          isVisible: panelVisible,
+                          onHoverEnter: _cancelBottomHide,
+                          onHoverExit: _scheduleBottomHide,
+                          onHoverMove: _cancelBottomHide,
+                          onTogglePlayPause: controller.togglePlayPause,
+                          onScreenshot: _takeScreenshot,
+                          onToggleRecord: () => _toggleRecording(controller),
+                          onSwitchWebNative: () =>
+                              controller.switchWebNativePlayback(),
+                          onReload: controller.reloadCurrentChannel,
+                          onDismissRemote: () {
+                            if (_bottomPanelVisible) {
+                              setState(() => _bottomPanelVisible = false);
+                            }
+                            _bottomHideTimer?.cancel();
+                          },
+                        ),
+
+                      // 待机壳：投屏等待 / 待选台（方案 3.7、第九节）
+                      // 盖住视频层，但让下面的抽屉/面板仍能覆盖它
+                      if (!mini &&
+                          (controller.castWaiting ||
+                              controller.awaitingChannelPick))
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: controller.awaitingChannelPick
+                                ? _openStandbyChannelList
+                                : null,
+                            child: controller.castWaiting
+                                ? StandbyShell(
+                                    icon: Icons.cast,
+                                    topBadge: '投屏',
+                                    title: '正在等待投屏',
+                                    subtitle: controller.castWaitRemain > 0
+                                        ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
+                                        : '发送端连播可直接接上',
+                                    hint: '双击返回键  返回直播',
+                                  )
+                                : const StandbyShell(
+                                    icon: Icons.live_tv,
+                                    title: '请选择频道',
+                                    subtitle: '按 OK 或方向键打开频道列表',
+                                  ),
+                          ),
+                        ),
+
+                      // 左侧频道抽屉（小窗里不渲染，下同）
+                      if (!mini)
+                        LeftChannelDrawer(
+                          key: _leftDrawerKey,
+                          isOpen: _leftDrawerOpen,
+                          onClose: () {
+                            setState(() => _leftDrawerOpen = false);
+                            WidgetsBinding.instance.addPostFrameCallback(
+                                (_) => _ensureShortcutFocus());
+                          },
+                          onHoverEnter: _cancelDrawerHide,
+                          onHoverExit: _startDrawerHideTimer,
+                          onHoverMove: _cancelDrawerHide,
+                          onOpenSettings: () {
+                            setState(() => _leftDrawerOpen = false);
+                            _toggleSettings();
+                          },
+                        ),
+
+                      // 右侧 EPG 面板
+                      if (!mini)
+                        RightEpgPanel(
+                          key: _rightEpgKey,
+                          isOpen: _rightEpgOpen,
+                          onClose: () {
+                            setState(() => _rightEpgOpen = false);
+                            WidgetsBinding.instance.addPostFrameCallback(
+                                (_) => _ensureShortcutFocus());
+                          },
+                          onHoverEnter: _cancelDrawerHide,
+                          onHoverExit: _startDrawerHideTimer,
+                          onHoverMove: _cancelDrawerHide,
+                        ),
+
+                      // 设置面板
+                      if (!mini)
+                        SettingsPanel(
+                          isOpen: _settingsOpen,
+                          onClose: () {
+                            setState(() => _settingsOpen = false);
+                            // 关闭后恢复低级钩子对数字键的选台拦截
+                            _winHotkeys.setCapture(true);
+                            WidgetsBinding.instance.addPostFrameCallback(
+                                (_) => _ensureShortcutFocus());
+                          },
+                        ),
+
+                      // 鼠标右键 = 遥控器返回：按层级关闭 投屏→抽屉→面板，
+                      // 再按弹退出确认（网页频道前台时右键被 WebView 消费，
+                      // 网页区内不触发；网页菜单已在 JS 层禁用）。
+                      // 设置面板打开时不拦截：输入框里右键要能弹「全选/复制/
+                      // 粘贴」系统菜单，不能被当成返回。
+                      if (controller.isDesktop && !mini && !_settingsOpen)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onSecondaryTapUp: (_) => _handleBackPressed(),
+                          ),
+                        ),
+
+                      // 亮度调节指示
+                      GestureIndicatorOverlay(
+                        isVisible: _showBrightnessIndicator,
+                        icon: Icons.brightness_6,
+                        iconColor: Colors.amber,
+                        value: controller.brightness,
+                        label: '亮度 ${(controller.brightness * 100).round()}%',
+                      ),
+
+                      // 音量调节指示
+                      GestureIndicatorOverlay(
+                        isVisible: _showVolumeIndicator,
+                        icon: controller.volume == 0
+                            ? Icons.volume_off
+                            : (controller.volume < 0.5
+                                ? Icons.volume_down
+                                : Icons.volume_up),
+                        iconColor: Colors.blueAccent,
+                        value: controller.volume,
+                        label: '音量 ${(controller.volume * 100).round()}%',
+                      ),
+
+                      // 点播长按左右键：数字进度 OSD（不拦截手势）
+                      _buildSeekOsd(),
+
+                      // 屏幕中央消息 OSD（截图/录制/关机等提示）
+                      _buildMessageOsd(),
+
+                      // 录制指示器（网页/原生均显示）
+                      if (controller.isRecording)
+                        Positioned(
+                          top: 48,
+                          left: 16,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: const BoxDecoration(
+                                  color: Colors.red,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                controller.webPageActive
+                                    ? 'REC · ${_formatBytes(controller.webRecordingBytes)}'
+                                    : 'REC',
+                                style: const TextStyle(
+                                  color: Colors.red,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                      // 顶部悬停标题栏（桌面端，置于最顶层，
+                      // 避免被右上角时钟/切台 OSD 遮挡导致点不到）
+                      // 频道抽屉 / EPG / 设置打开时不显示，以免挡住它们
+                      // 顶部的关闭、返回按钮
+                      if (controller.isDesktop &&
+                          !mini &&
+                          !_leftDrawerOpen &&
+                          !_rightEpgOpen &&
+                          !_settingsOpen)
+                        TopTitleBar(
+                          visible: _topBarVisible,
+                          onHide: () {
+                            if (_topBarVisible) {
+                              setState(() => _topBarVisible = false);
+                            }
+                          },
+                        ),
+
+                      // 启动画面：配置、节目列表、EPG 读入期间盖住全屏，
+                      // 读完后自动消失（详见 PlayerController.bootReady）
+                      if (!controller.bootReady)
+                        _BootSplash(status: controller.bootStatus),
+                    ],
+                  );
+                },
+              ),
+            ),
           ),
         ),
       ),
-        ),
-        ),
-      );
+    );
   }
 
   /// 安卓返回键/遥控器返回处理（PopScope 拦截后调用）：
@@ -1102,10 +1104,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                             for (var i = 0; i < options.length; i++)
                               Padding(
                                 padding: EdgeInsets.only(
-                                    right:
-                                        i == options.length - 1 ? 0 : 16),
-                                child: _buildExitIconOption(
-                                    ctx, i, options[i]),
+                                    right: i == options.length - 1 ? 0 : 16),
+                                child: _buildExitIconOption(ctx, i, options[i]),
                               ),
                           ],
                         ),
@@ -1198,47 +1198,39 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 桌面端的小窗是缩窗口置顶而不是画中画，仍按「小窗/恢复窗口」。
     final radio = c.currentChannel?.isRadio ?? false;
     return <_ExitOption>[
-        const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
-        if (!c.locked)
-          const _ExitOption(
-              Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
-        // 小窗播放：桌面端窗口置顶缩小；移动端系统画中画（Web 端不支持，不显示）
-        if (!kIsWeb && c.isDesktop)
-          _ExitOption(
-              c.miniWindow
-                  ? Icons.fullscreen
-                  : Icons.picture_in_picture_alt,
-              c.miniWindow ? '恢复窗口' : '小窗播放',
-              Colors.greenAccent,
-              'mini'),
-        if (!kIsWeb && !c.isDesktop)
-          _ExitOption(
-              radio ? Icons.headphones : Icons.picture_in_picture_alt,
-              radio ? '后台播放' : '小窗播放',
-              Colors.greenAccent,
-              'mini'),
-        // Web 扫码管理：局域网管理服务未启动（地址为空）时不显示
-        if (c.remoteAdminUrl.isNotEmpty)
-          const _ExitOption(
-              Icons.qr_code_2, '扫码管理', Colors.lightBlueAccent,
-              'remoteAdmin'),
-        const _ExitOption(Icons.settings, '设置', Colors.tealAccent, 'settings'),
-        // 定时关闭：属于「退出」这一类（到点暂停/退程序/关机），
-        // 放在退出卡片里对全场景生效——看视频和听电台都走同一条链路，
-        // 跟当前播的是什么无关
+      const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
+      if (!c.locked)
+        const _ExitOption(Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
+      // 小窗播放：桌面端窗口置顶缩小；移动端系统画中画（Web 端不支持，不显示）
+      if (!kIsWeb && c.isDesktop)
         _ExitOption(
-          c.sleepRemain == null ? Icons.bedtime_outlined : Icons.bedtime,
-          _sleepLabel(c),
-          Colors.deepPurpleAccent,
-          'sleep',
-        ),
-        const _ExitOption(Icons.logout, '退出', Colors.redAccent, 'exit'),
-        // 关闭系统仅 Windows/Linux 原生显示
-        if (_canShutdownSystem)
-          const _ExitOption(
-              Icons.power_settings_new, '关机', Colors.orangeAccent,
-              'shutdown'),
-      ];
+            c.miniWindow ? Icons.fullscreen : Icons.picture_in_picture_alt,
+            c.miniWindow ? '恢复窗口' : '小窗播放',
+            Colors.greenAccent,
+            'mini'),
+      if (!kIsWeb && !c.isDesktop)
+        _ExitOption(radio ? Icons.headphones : Icons.picture_in_picture_alt,
+            radio ? '后台播放' : '小窗播放', Colors.greenAccent, 'mini'),
+      // Web 扫码管理：局域网管理服务未启动（地址为空）时不显示
+      if (c.remoteAdminUrl.isNotEmpty)
+        const _ExitOption(
+            Icons.qr_code_2, '扫码管理', Colors.lightBlueAccent, 'remoteAdmin'),
+      const _ExitOption(Icons.settings, '设置', Colors.tealAccent, 'settings'),
+      // 定时关闭：属于「退出」这一类（到点暂停/退程序/关机），
+      // 放在退出卡片里对全场景生效——看视频和听电台都走同一条链路，
+      // 跟当前播的是什么无关
+      _ExitOption(
+        c.sleepRemain == null ? Icons.bedtime_outlined : Icons.bedtime,
+        _sleepLabel(c),
+        Colors.deepPurpleAccent,
+        'sleep',
+      ),
+      const _ExitOption(Icons.logout, '退出', Colors.redAccent, 'exit'),
+      // 关闭系统仅 Windows/Linux 原生显示
+      if (_canShutdownSystem)
+        const _ExitOption(
+            Icons.power_settings_new, '关机', Colors.orangeAccent, 'shutdown'),
+    ];
   }
 
   /// 退出框按钮数（锁定项随锁定状态消失，关机仅桌面端显示）
@@ -1247,8 +1239,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 构建退出框中的一个方块图标按钮（不取键盘焦点，高亮由全局按键维护）。
   /// 方块仅显示图标；鼠标悬停或遥控器框选时，方块下方显示文字标签。
-  Widget _buildExitIconOption(
-      BuildContext ctx, int index, _ExitOption opt) {
+  Widget _buildExitIconOption(BuildContext ctx, int index, _ExitOption opt) {
     final selected = _exitDialogFocusIndex == index;
     final color = opt.color;
     return MouseRegion(
@@ -1264,8 +1255,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         // 一次性守卫：先摘标志再 pop，鼠标点击与遥控器 OK 都不会双 pop
         onTap: () {
           _exitDialogOpen = false;
-          Navigator.of(ctx).pop<String?>(
-              opt.action == 'back' ? null : opt.action);
+          Navigator.of(ctx)
+              .pop<String?>(opt.action == 'back' ? null : opt.action);
         },
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1322,14 +1313,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 对话框打开期间的遥控器/键盘按键收口。
   /// 返回 true=已消费；不认识的键放行给弹层内控件（如输入框）。
-  bool _handleKeyWhileModal(
-      LogicalKeyboardKey k, bool isDown, bool isUp) {
+  bool _handleKeyWhileModal(LogicalKeyboardKey k, bool isDown, bool isUp) {
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
         k == LogicalKeyboardKey.gameButtonA;
-    final isLr = k == LogicalKeyboardKey.arrowLeft ||
-        k == LogicalKeyboardKey.arrowRight;
+    final isLr =
+        k == LogicalKeyboardKey.arrowLeft || k == LogicalKeyboardKey.arrowRight;
     // 关机确认卡片有独立按键逻辑，优先于退出框处理
     if (_shutdownDialogOpen) {
       return _handleShutdownDialogKey(k, isDown, isUp);
@@ -1360,8 +1350,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return true;
     }
-    if (k == LogicalKeyboardKey.arrowUp ||
-        k == LogicalKeyboardKey.arrowDown) {
+    if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
       return true; // 弹层内无列表导航需求，吞掉防穿透切台
     }
     if (k == LogicalKeyboardKey.contextMenu) {
@@ -1382,23 +1371,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 退出确认对话框的遥控器按键处理：
   /// ←/→ 在「取消」「退出」间移动高亮，OK 确认当前选中项，返回/Esc 直接取消
-  bool _handleExitDialogKey(
-      LogicalKeyboardKey k, bool isDown, bool isUp) {
+  bool _handleExitDialogKey(LogicalKeyboardKey k, bool isDown, bool isUp) {
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
         k == LogicalKeyboardKey.gameButtonA;
-    final isLr = k == LogicalKeyboardKey.arrowLeft ||
-        k == LogicalKeyboardKey.arrowRight;
+    final isLr =
+        k == LogicalKeyboardKey.arrowLeft || k == LogicalKeyboardKey.arrowRight;
     if (isOk) {
       if (isDown && _exitDialogOpen) {
         // 先置标志位，防止同一按键事件被路由双处理（全局 handler + 按钮 Focus）
         final opts = _exitOptions(context.read<PlayerController>());
-        final idx =
-            _exitDialogFocusIndex.clamp(0, opts.length - 1) as int;
+        final idx = _exitDialogFocusIndex.clamp(0, opts.length - 1) as int;
         _exitDialogOpen = false;
-        Navigator.of(context).pop<String?>(
-            opts[idx].action == 'back' ? null : opts[idx].action);
+        Navigator.of(context)
+            .pop<String?>(opts[idx].action == 'back' ? null : opts[idx].action);
       }
       return true;
     }
@@ -1408,15 +1395,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         // 需要内部 setState 才能看到高亮移动
         final count = _exitOptionCount;
         final step = k == LogicalKeyboardKey.arrowRight ? 1 : -1;
-        _exitDialogFocusIndex =
-            (_exitDialogFocusIndex + step) % count;
+        _exitDialogFocusIndex = (_exitDialogFocusIndex + step) % count;
         if (_exitDialogFocusIndex < 0) _exitDialogFocusIndex += count;
         _exitDialogRefresh?.call(() {});
       }
       return true;
     }
-    if (k == LogicalKeyboardKey.arrowUp ||
-        k == LogicalKeyboardKey.arrowDown) {
+    if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
       return true; // 两按钮水平排列，上下无意义
     }
     if (k == LogicalKeyboardKey.contextMenu) {
@@ -1600,8 +1585,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 关机确认卡片按键处理：
   /// ←/→ 在「取消」「关机」间切换；OK 确认当前选中；返回/Esc/菜单键 = 取消
-  bool _handleShutdownDialogKey(
-      LogicalKeyboardKey k, bool isDown, bool isUp) {
+  bool _handleShutdownDialogKey(LogicalKeyboardKey k, bool isDown, bool isUp) {
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
@@ -1621,12 +1605,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true;
     }
     // 上下键消费掉，防止穿透切台
-    if (k == LogicalKeyboardKey.arrowUp ||
-        k == LogicalKeyboardKey.arrowDown) {
+    if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
       return true;
     }
-    if (k == LogicalKeyboardKey.contextMenu ||
-        k == LogicalKeyboardKey.escape) {
+    if (k == LogicalKeyboardKey.contextMenu || k == LogicalKeyboardKey.escape) {
       if (isDown && _shutdownDialogOpen) _confirmShutdown(false);
       return true;
     }
@@ -1782,8 +1764,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     String? action;
     if (k == LogicalKeyboardKey.space) {
       action = 'playpause';
-    } else if (k == LogicalKeyboardKey.keyF ||
-        k == LogicalKeyboardKey.f11) {
+    } else if (k == LogicalKeyboardKey.keyF || k == LogicalKeyboardKey.f11) {
       action = 'fullscreen';
     } else if (k == LogicalKeyboardKey.keyM) {
       action = 'mute';
@@ -1994,8 +1975,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       _menuLongFired = true;
       final c = context.read<PlayerController>();
       if (c.remoteAdminUrl.isEmpty) {
-        _showOsd('Web 管理服务未开启，请在设置中打开',
-            icon: Icons.qr_code_2);
+        _showOsd('Web 管理服务未开启，请在设置中打开', icon: Icons.qr_code_2);
         return;
       }
       _showRemoteAdminQr(c);
@@ -2211,8 +2191,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           child: Center(
             child: Container(
               width: 288,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
               decoration: BoxDecoration(
                 color: Colors.black.withOpacity(0.68),
                 borderRadius: BorderRadius.circular(16),
@@ -2367,7 +2346,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       Text(
-                        number != null ? number.toString().padLeft(2, '0') : '--',
+                        number != null
+                            ? number.toString().padLeft(2, '0')
+                            : '--',
                         style: TextStyle(
                           color: Colors.blueAccent,
                           // 手机上 48 过大，缩到 30
@@ -2445,104 +2426,136 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        return Row(
-          children: [
-            // 左侧：上下滑动调亮度、左边缘右滑/单击开频道菜单
-            Expanded(
-              child: GestureDetector(
-                // 移动端左三分之一：单击开/关频道菜单（不必贴左边缘）
-                onTap: controller.isDesktop
-                    ? null
-                    : () => _toggleDrawer(left: true),
-                onVerticalDragStart: (details) {
-                  _isHorizontalDrag = false;
-                  _dragStartY = details.globalPosition.dy;
-                  _dragStartX = details.globalPosition.dx;
-                  _lastBrightness = controller.brightness;
-                  setState(() => _showBrightnessIndicator = true);
-                },
-                onVerticalDragUpdate: (details) {
-                  if (_isHorizontalDrag || _dragStartY == null) return;
-                  final dy = _dragStartY! - details.globalPosition.dy;
-                  controller.setBrightness(
-                      _lastBrightness + dy * _dragSensitivity);
-                },
-                onVerticalDragEnd: (_) => _onBrightnessDragEnd(),
-                onHorizontalDragStart: (details) {
-                  _isHorizontalDrag = true;
-                  _dragStartX = details.globalPosition.dx;
-                },
-                onHorizontalDragEnd: (details) {
-                  if (_dragStartX != null &&
-                      _dragStartX! <= _edgeWidth &&
-                      details.velocity.pixelsPerSecond.dx > 100) {
-                    _openDrawer(left: true);
-                  }
-                },
+        // 小窗（420×236，无标题栏）：整块画面都可以按着拖；普通窗口只让
+        // 中间 50% 拖，两侧留给上下滑调亮度/音量，避免一次拖动两种效果。
+        final miniDrag = controller.isDesktop && controller.miniWindow;
+        return Listener(
+          // 原始指针事件（不进手势竞技场）：屏幕坐标取 Win32 GetCursorPos，
+          // 见 window_drag_io.dart 注释。translucent：只在自己或子节点被
+          // 命中时回调，网页模式下中间区域仍完整穿透给网页
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (d) {
+            if (d.buttons != kPrimaryButton) return;
+            final x = d.localPosition.dx;
+            final inMiddle = x > width * 0.25 && x < width * 0.75;
+            beginWindowDrag(
+                enabled: controller.isDesktop &&
+                    !controller.isFullscreen &&
+                    !webMode &&
+                    (miniDrag || inMiddle));
+          },
+          onPointerMove: (_) => updateWindowDrag(),
+          onPointerUp: (_) => endWindowDrag(),
+          onPointerCancel: (_) => endWindowDrag(),
+          child: Row(
+            children: [
+              // 左侧：上下滑动调亮度、左边缘右滑/单击开频道菜单
+              Expanded(
+                child: GestureDetector(
+                  // 空 child 的 GestureDetector 尺寸为 0，永远收不到事件：
+                  // 必须给一个撑满的透明子节点 + opaque 命中策略
+                  behavior: HitTestBehavior.opaque,
+                  // 移动端左三分之一：单击开/关频道菜单（不必贴左边缘）
+                  onTap: controller.isDesktop
+                      ? null
+                      : () => _toggleDrawer(left: true),
+                  onVerticalDragStart: miniDrag
+                      ? null
+                      : (details) {
+                          _isHorizontalDrag = false;
+                          _dragStartY = details.globalPosition.dy;
+                          _dragStartX = details.globalPosition.dx;
+                          _lastBrightness = controller.brightness;
+                          setState(() => _showBrightnessIndicator = true);
+                        },
+                  onVerticalDragUpdate: miniDrag
+                      ? null
+                      : (details) {
+                          if (_isHorizontalDrag || _dragStartY == null) return;
+                          final dy = _dragStartY! - details.globalPosition.dy;
+                          controller.setBrightness(
+                              _lastBrightness + dy * _dragSensitivity);
+                        },
+                  onVerticalDragEnd:
+                      miniDrag ? null : (_) => _onBrightnessDragEnd(),
+                  onHorizontalDragStart: (details) {
+                    _isHorizontalDrag = true;
+                    _dragStartX = details.globalPosition.dx;
+                  },
+                  onHorizontalDragEnd: (details) {
+                    if (_dragStartX != null &&
+                        _dragStartX! <= _edgeWidth &&
+                        details.velocity.pixelsPerSecond.dx > 100) {
+                      _openDrawer(left: true);
+                    }
+                  },
+                  child: const SizedBox.expand(),
+                ),
               ),
-            ),
-            // 中间：点击切换面板，双击播放暂停（桌面端双击全屏，按住拖动窗口）。
-            // 网页模式：桌面端完全穿透（点击/滑动全交给网页，面板由边缘
-            // hover 与底部点击区触发，双击全屏由 _WebDoubleTapFullScreen 接管）；
-            // 移动端保留点击呼出信息面板
-            Expanded(
-              child: webMode
-                  ? (controller.isDesktop
-                      ? const SizedBox.expand()
-                      : GestureDetector(onTap: _toggleBottomPanel))
-                  : Listener(
-                      // 全屏状态下绝不能拖动窗口，否则窗口会掉到最底层、点击穿透。
-                      // Listener 原始指针事件（不进手势竞技场，抢不到也会回调）：
-                      // 屏幕坐标来自 Win32 GetCursorPos，见 window_drag_io 注释
-                      onPointerDown: (d) => beginWindowDrag(
-                          enabled:
-                              controller.isDesktop && !controller.isFullscreen),
-                      onPointerMove: (_) => updateWindowDrag(),
-                      onPointerUp: (_) => endWindowDrag(),
-                      onPointerCancel: (_) => endWindowDrag(),
-                      child: GestureDetector(
+              // 中间：点击切换面板，双击播放暂停（桌面端双击全屏，按住拖动窗口）。
+              // 网页模式：桌面端完全穿透（点击/滑动全交给网页，面板由边缘
+              // hover 与底部点击区触发，双击全屏由 _WebDoubleTapFullScreen 接管）；
+              // 移动端保留点击呼出信息面板
+              Expanded(
+                child: webMode
+                    ? (controller.isDesktop
+                        ? const SizedBox.expand()
+                        : GestureDetector(onTap: _toggleBottomPanel))
+                    : GestureDetector(
+                        // 撑满 + opaque：空 child 的 GestureDetector 是 0 尺寸，
+                        // 收不到任何指针事件（拖动/点按全都失效的根因）
+                        behavior: HitTestBehavior.opaque,
                         onTap: _toggleBottomPanel,
                         onDoubleTap: controller.isDesktop
                             ? (controller.miniWindow
                                 ? controller.toggleMiniWindow
                                 : controller.toggleFullscreen)
                             : controller.togglePlayPause,
+                        child: const SizedBox.expand(),
                       ),
-                    ),
-            ),
-            // 右侧：音量调节 + 右边缘滑出 EPG；移动端右三分之一
-            // 单击开/关 EPG 菜单（不必贴右边缘）
-            Expanded(
-              child: GestureDetector(
-                onTap: controller.isDesktop
-                    ? null
-                    : () => _toggleDrawer(left: false),
-                onVerticalDragStart: (details) {
-                  _isHorizontalDrag = false;
-                  _dragStartY = details.globalPosition.dy;
-                  _lastVolume = controller.volume;
-                  setState(() => _showVolumeIndicator = true);
-                },
-                onVerticalDragUpdate: (details) {
-                  if (_isHorizontalDrag || _dragStartY == null) return;
-                  final dy = _dragStartY! - details.globalPosition.dy;
-                  controller.setVolume(_lastVolume + dy * _dragSensitivity);
-                },
-                onVerticalDragEnd: (_) => _onVolumeDragEnd(),
-                onHorizontalDragStart: (details) {
-                  _isHorizontalDrag = true;
-                  _dragStartX = details.globalPosition.dx;
-                },
-                onHorizontalDragEnd: (details) {
-                  if (_dragStartX != null &&
-                      _dragStartX! >= width - _edgeWidth &&
-                      details.velocity.pixelsPerSecond.dx < -100) {
-                    _openDrawer(left: false);
-                  }
-                },
               ),
-            ),
-          ],
+              // 右侧：音量调节 + 右边缘滑出 EPG；移动端右三分之一
+              // 单击开/关 EPG 菜单（不必贴右边缘）
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: controller.isDesktop
+                      ? null
+                      : () => _toggleDrawer(left: false),
+                  onVerticalDragStart: miniDrag
+                      ? null
+                      : (details) {
+                          _isHorizontalDrag = false;
+                          _dragStartY = details.globalPosition.dy;
+                          _lastVolume = controller.volume;
+                          setState(() => _showVolumeIndicator = true);
+                        },
+                  onVerticalDragUpdate: miniDrag
+                      ? null
+                      : (details) {
+                          if (_isHorizontalDrag || _dragStartY == null) return;
+                          final dy = _dragStartY! - details.globalPosition.dy;
+                          controller
+                              .setVolume(_lastVolume + dy * _dragSensitivity);
+                        },
+                  onVerticalDragEnd:
+                      miniDrag ? null : (_) => _onVolumeDragEnd(),
+                  onHorizontalDragStart: (details) {
+                    _isHorizontalDrag = true;
+                    _dragStartX = details.globalPosition.dx;
+                  },
+                  onHorizontalDragEnd: (details) {
+                    if (_dragStartX != null &&
+                        _dragStartX! >= width - _edgeWidth &&
+                        details.velocity.pixelsPerSecond.dx < -100) {
+                      _openDrawer(left: false);
+                    }
+                  },
+                  child: const SizedBox.expand(),
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -2609,8 +2622,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   Future<void> _enterPip() async {
     final ok = await enterPip();
     if (!ok && mounted) {
-      _showOsd('当前系统不支持小窗播放',
-          icon: Icons.picture_in_picture_alt);
+      _showOsd('当前系统不支持小窗播放', icon: Icons.picture_in_picture_alt);
     }
   }
 
@@ -2821,14 +2833,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           // 一次性守卫：先摘标志再 pop，任何重复/残余事件都不会
           // 再弹一次（第二次 pop 会把播放器路由弹掉 → 黑屏）
           final opts = _exitOptions(context.read<PlayerController>());
-          final idx =
-              _exitDialogFocusIndex.clamp(0, opts.length - 1) as int;
+          final idx = _exitDialogFocusIndex.clamp(0, opts.length - 1) as int;
           _exitDialogOpen = false;
           Navigator.of(context).pop<String?>(
               opts[idx].action == 'back' ? null : opts[idx].action);
-        } else if (action == 'back' ||
-            action == 'esc' ||
-            action == 'menu') {
+        } else if (action == 'back' || action == 'esc' || action == 'menu') {
           _exitDialogOpen = false;
           Navigator.of(context).pop<String?>(null);
         }
@@ -2904,9 +2913,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       final path = await controller.stopRecording();
       if (mounted) {
         _showOsd(
-          path != null
-              ? '录制已停止，保存至: $path'
-              : '录制已停止（未捕获到视频数据）',
+          path != null ? '录制已停止，保存至: $path' : '录制已停止（未捕获到视频数据）',
           icon: Icons.stop,
           duration: const Duration(seconds: 3),
         );
@@ -2949,8 +2956,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   void _scheduleBottomHide() {
     setState(() => _bottomHovering = false);
     _bottomHideTimer?.cancel();
-    final delay =
-        context.read<PlayerController>().settings.autoHideDelay;
+    final delay = context.read<PlayerController>().settings.autoHideDelay;
     _bottomHideTimer = Timer(Duration(milliseconds: delay), () {
       if (mounted && !_bottomHovering) {
         setState(() => _bottomPanelVisible = false);
@@ -3022,7 +3028,6 @@ class _WebDoubleTapFullScreenState extends State<_WebDoubleTapFullScreen> {
   }
 }
 
-
 /// 内嵌网页频道控件：充满整个窗口，由网站自身播放器播放
 /// （如央视频网页版）。网页先在【后台】加载缓冲（被 PlayerScreen 的
 /// 黑屏占位盖住），JS 探测到视频有声起播后通过 [onForeground] 通知
@@ -3080,6 +3085,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
   bool _loaded = false;
   String? _error;
   bool _runtimeMissing = false;
+
   /// WebView 是否报告过任何加载进度（有进度即证明 WebView2 运行时正常）
   bool _sawProgress = false;
 
@@ -3128,16 +3134,20 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
 
   /// 轻嗅探只注入一次，避免反复注入
   bool _sniffRetried = false;
+
   /// 最近一次探测到的页面 video 元素数量（0 = 页面还没挂出播放器）。
   /// 8 秒兜底据此判断该不该注入嗅探：页面已有播放器时不做任何干预
   int _pageVideoCount = 0;
+
   /// 站点脚本（芒果/央视频）提前注入定时器。
   /// 日志实测根因：站点脚本只在 onLoadStop 注入，而芒果/央视频首屏很慢
   /// （8 秒时进度仍只有 66%），onLoadStop 迟迟不来 → 站点脚本永不注入、
   /// 永不点台 → 页面永远不挂 video（永久黑屏）。改为 2.5 秒提前注入一次
   Timer? _siteInjectTimer;
+
   /// 探针节拍计数（每 3 拍 = 3 秒触发一次点台重试）
   int _siteRetryTick = 0;
+
   /// 站点页无 video 时的点台重试次数，上限 8 次避免反复打扰页面
   int _siteRetryCount = 0;
 
@@ -3239,8 +3249,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       _lastVideoCt = -1;
       ctl.markAutoReload();
       _stallCooldownUntil = DateTime.now().add(const Duration(seconds: 40));
-      WebDiag.log('auto_reload',
-          'n=${ctl.autoReloadCount}|title=${widget.title}');
+      WebDiag.log(
+          'auto_reload', 'n=${ctl.autoReloadCount}|title=${widget.title}');
       await ctl.reloadCurrentChannel();
     } finally {
       _stallBusy = false;
@@ -3270,8 +3280,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
               ));
       c.count++;
       c.last = now;
-      WebDiag.log('sniff',
-          'k=$kind|cnt=${c.count}|new=${isNew ? 1 : 0}|u=$url');
+      WebDiag.log(
+          'sniff', 'k=$kind|cnt=${c.count}|new=${isNew ? 1 : 0}|u=$url');
       // 更高优先级类型可升级标注
       if (_sniffKindPri(kind) > _sniffKindPri(c.kind)) c.kind = kind;
       // 首个候选出现后 15 秒兜底：强制执行最后一轮选择，仍不可接管
@@ -3315,8 +3325,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 完成后又切回内置"的闪切。推迟 3 秒再审，等预检出结果自行收尾
     if (_sniffChecking) {
       WebDiag.log('finish_defer', 'via=$via');
-      _decisionTimer = Timer(const Duration(seconds: 3),
-          () => _finishWithWeb(via: 'defer3s'));
+      _decisionTimer = Timer(
+          const Duration(seconds: 3), () => _finishWithWeb(via: 'defer3s'));
       return;
     }
     WebDiag.log('finish_web',
@@ -3368,12 +3378,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
         url: c.url,
         kind: c.kind,
         referer: c.referer ?? widget.url,
-        userAgent: (c.ua != null && c.ua!.trim().isNotEmpty)
-            ? c.ua!.trim()
-            : '',
+        userAgent:
+            (c.ua != null && c.ua!.trim().isNotEmpty) ? c.ua!.trim() : '',
       );
-      WebDiag.log('precheck',
-          'ok=${ok ? 1 : 0}|cnt=${c.count}|k=${c.kind}|u=${c.url}');
+      WebDiag.log(
+          'precheck', 'ok=${ok ? 1 : 0}|cnt=${c.count}|k=${c.kind}|u=${c.url}');
       if (!mounted) return;
       if (ok) {
         // 不自动接管：网页一律以网页方式播放。把预检通过的直连流登记为
@@ -5804,13 +5813,13 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       _sniffRetried = true;
       _sniffEnabled = true;
       _decisionTimer?.cancel();
-      _decisionTimer = Timer(const Duration(seconds: 12),
-          () => _finishWithWeb(via: 'decision12'));
+      _decisionTimer = Timer(
+          const Duration(seconds: 12), () => _finishWithWeb(via: 'decision12'));
       await _inject();
     });
     // 最终决策窗口：15 秒仍无可直连主流 → 加密/无流，直接网页全屏
-    _decisionTimer = Timer(const Duration(seconds: 15),
-        () => _finishWithWeb(via: 'decision15'));
+    _decisionTimer = Timer(
+        const Duration(seconds: 15), () => _finishWithWeb(via: 'decision15'));
     // 运行时缺失判定（乐观策略）：注册表/版本查询在不同系统上都不可靠
     // （实测已装 WebView2 的家庭版也会误报）。只要 WebView 能报告任何
     // 加载进度，就证明运行时正常；25 秒内毫无进展才提示安装。
@@ -5838,8 +5847,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     _beginLoad();
     // 新地址重新判定"是否放弃自动接管"（同一站点内一般不变，但
     // 网页频道可能换站点，不重判会沿用旧站点的结论）
-    _sniffAbandoned =
-        context.read<PlayerController>().shouldSkipAutoSniff(url);
+    _sniffAbandoned = context.read<PlayerController>().shouldSkipAutoSniff(url);
     final c = _webController;
     if (c == null) return;
     try {
@@ -6385,8 +6393,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
 
   /// 调页面内 __omSiteGo(url, 频道名)：芒果TV/央视频同 URL 页内切台，
   /// 未注入站点脚本的页面 __omSiteGo 不存在，短路与直接跳过
-  String _siteGoCall() =>
-      'window.__omSiteGo && window.__omSiteGo('
+  String _siteGoCall() => 'window.__omSiteGo && window.__omSiteGo('
       '${jsonEncode(widget.url)}, ${jsonEncode(widget.title)})';
 
   Future<void> _inject() async {
@@ -6427,8 +6434,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     if (_sniffEnabled || _siteSniffAllowed(widget.url)) {
       await one('sniff', _sniffJs);
     }
-    WebDiag.log('inject_done',
-        'site=${siteJs != null ? 1 : 0}|sniff=$_sniffEnabled');
+    WebDiag.log(
+        'inject_done', 'site=${siteJs != null ? 1 : 0}|sniff=$_sniffEnabled');
   }
 
   Future<void> _probe() async {
@@ -6442,15 +6449,14 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       // _probeJs 返回 [起播0/1, 页面视频状态串]；兼容旧版裸 0/1 返回
       bool playing;
       if (r is List) {
-        playing =
-            r.isNotEmpty && (r[0] == 1 || r[0]?.toString() == '1');
+        playing = r.isNotEmpty && (r[0] == 1 || r[0]?.toString() == '1');
         if (r.length > 1) {
           // 状态串首字段即页面 video 元素数（_probeJs 自产，格式固定）
           final m = RegExp(r'n=(\d+)').firstMatch(r[1].toString());
           if (m != null) _pageVideoCount = int.parse(m.group(1)!);
         }
-        WebDiag.log('probe',
-            'p=${playing ? 1 : 0}${r.length > 1 ? '|${r[1]}' : ''}');
+        WebDiag.log(
+            'probe', 'p=${playing ? 1 : 0}${r.length > 1 ? '|${r[1]}' : ''}');
       } else {
         playing = r == 1 || r?.toString() == '1';
         WebDiag.log('probe', 'p=${playing ? 1 : 0}');
@@ -6508,8 +6514,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 偶发永久空白。页内点台失败由 _probe 的每 3 秒重试兜底。
     // 没有专用脚本的站点由 _genericJs 提供的 __omSiteGo 接管（按台名
     // 在页内列表里点），未命中的节点返回 null 即静默跳过，不会乱点
-    if (widget.title != oldWidget.title &&
-        widget.title.trim().isNotEmpty) {
+    if (widget.title != oldWidget.title && widget.title.trim().isNotEmpty) {
       WebDiag.log('sitego', 'via=title|title=${widget.title}');
       _siteRetryCount = 0;
       _webController
@@ -6614,9 +6619,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
               handlerName: 'omPlay',
               callback: (args) {
                 if (args.isNotEmpty) {
-                  widget.onPlayStateChanged(
-                      args.first.toString() == '1' ||
-                          args.first.toString() == '1.0');
+                  widget.onPlayStateChanged(args.first.toString() == '1' ||
+                      args.first.toString() == '1.0');
                 }
               },
             );
@@ -6719,8 +6723,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
               children: [
                 CircularProgressIndicator(),
                 SizedBox(height: 12),
-                Text('正在打开网页频道...',
-                    style: TextStyle(color: Colors.white70)),
+                Text('正在打开网页频道...', style: TextStyle(color: Colors.white70)),
               ],
             ),
           ),
@@ -6750,8 +6753,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.web_asset,
-                      color: Colors.amber, size: 40),
+                  const Icon(Icons.web_asset, color: Colors.amber, size: 40),
                   const SizedBox(height: 12),
                   Text(
                     webEnvOfficialVersion != null
@@ -6765,8 +6767,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
                     SelectableText(
                       webEnvLastError,
                       maxLines: 4,
-                      style: const TextStyle(
-                          color: Colors.white38, fontSize: 10),
+                      style:
+                          const TextStyle(color: Colors.white38, fontSize: 10),
                     ),
                   ],
                   const SizedBox(height: 14),
@@ -7016,8 +7018,8 @@ class SleepBadgeOverlay extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: Colors.black.withValues(alpha: 0.42),
                   borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.22)),
+                  border:
+                      Border.all(color: Colors.white.withValues(alpha: 0.22)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -7082,8 +7084,7 @@ class SleepFinalCard extends StatelessWidget {
           child: Align(
             alignment: const Alignment(0, -0.42),
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 26, vertical: 20),
+              padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 20),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.82),
                 borderRadius: BorderRadius.circular(14),
@@ -7123,8 +7124,7 @@ class SleepFinalCard extends StatelessWidget {
                   const SizedBox(height: 6),
                   const Text(
                     '按返回键取消，继续看',
-                    style:
-                        TextStyle(color: Colors.white70, fontSize: 12.5),
+                    style: TextStyle(color: Colors.white70, fontSize: 12.5),
                   ),
                   const SizedBox(height: 14),
                   OutlinedButton.icon(
@@ -7193,8 +7193,7 @@ class _WebLoadingCurtainState extends State<_WebLoadingCurtain> {
   void initState() {
     super.initState();
     widget.controller.addListener(_check);
-    _poll = Timer.periodic(
-        const Duration(milliseconds: 120), (_) => _check());
+    _poll = Timer.periodic(const Duration(milliseconds: 120), (_) => _check());
     _cap = Timer(const Duration(seconds: _capSeconds), _reveal);
   }
 
@@ -7241,11 +7240,8 @@ class _WebLoadingCurtainState extends State<_WebLoadingCurtain> {
                 const CircularProgressIndicator(color: Colors.blueAccent),
                 const SizedBox(height: 12),
                 Text(
-                  widget.foreground
-                      ? '网页已起播，正在等待画面…'
-                      : '正在进入网页播放，请稍候…',
-                  style:
-                      const TextStyle(color: Colors.white70, fontSize: 14),
+                  widget.foreground ? '网页已起播，正在等待画面…' : '正在进入网页播放，请稍候…',
+                  style: const TextStyle(color: Colors.white70, fontSize: 14),
                 ),
               ],
             ),
