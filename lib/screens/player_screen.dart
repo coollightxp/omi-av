@@ -1169,6 +1169,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (!mounted) return;
     switch (action) {
       case 'exit':
+        // 退出前先把播放停干净：安卓 finish Activity 会连带销毁 Dart
+        // isolate，mpv 的原生实例没人释放 → 声音继续响，再从桌面点图标
+        // 就是两路同时在放（用户实测「退不出去、再开一个两个声音」）
+        await c.shutdownForExit();
         // SystemNavigator.pop() 只在 Android/iOS 有效，桌面端需要用 windowManager
         if (!kIsWeb &&
             (defaultTargetPlatform == TargetPlatform.windows ||

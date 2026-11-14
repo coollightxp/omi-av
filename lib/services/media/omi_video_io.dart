@@ -398,6 +398,7 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     _headers = headers;
     _videoDisabled = true;
     await _applyFaultTolerance();
+    _setAudioDisplay(false);
     try {
       // 后台没有 Surface：先把视频轨摘掉，open 才不会停在等纹理上
       await _player.setVideoTrack(VideoTrack.no());
@@ -507,6 +508,7 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     // 先同步记下标记：可能还没 initialize（后台切台 = 新建实例后立刻
     // 调这个方法），交给 open 前统一生效
     _videoDisabled = disabled;
+    _setAudioDisplay(!disabled);
     if (!_playerOpened) return;
     try {
       await _player
@@ -514,6 +516,18 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     } catch (_) {
       // 轨道切换失败不影响音频播放
     }
+  }
+
+  /// mpv 的 `audio-display`：带内嵌封面的音频流（很多电台 MP3 的
+  /// ID3 APIC）默认会被 mpv 当成一路视频去建 vo。后台没有 Surface，
+  /// 这一路建不起来，open 就卡在那里——表现为「切了台不出声，回界面
+  /// 才接着放」。后台一律关掉，回前台再打开。
+  void _setAudioDisplay(bool on) {
+    final p = _player.platform;
+    if (p is! NativePlayer) return;
+    try {
+      unawaited(p.setProperty('audio-display', on ? 'auto' : 'no'));
+    } catch (_) {}
   }
 
   /// 视频输出是否被关闭（后台起播时 open 前要跳过视频轨）

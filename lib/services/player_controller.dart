@@ -1634,6 +1634,14 @@ class PlayerController extends ChangeNotifier {
 
   /// 播放指定频道（从第一个源开始，失败自动尝试下一个源）
   Future<void> playChannel(Channel channel) async {
+    // 卡片上刚按了 ❌：这一瞬间正在飞的「下一台」不能把它拉回来。
+    // 时序：后台换台本来就慢（openInPlace 要几秒），用户等不及点了退出，
+    // 迟到的换台随后完成 → 卡片重新出现、声音又响（实测「退不出去」）
+    final exitAt = _cardExitAt;
+    if (exitAt != null &&
+        DateTime.now().difference(exitAt) < const Duration(seconds: 3)) {
+      return;
+    }
     // 手动切台 = 放弃等待投屏
     _clearCastWait();
     // 电台不需要小窗（只有带画面的直播才值得置顶小窗）。从视频小窗切到
@@ -1646,9 +1654,11 @@ class PlayerController extends ChangeNotifier {
     if (_currentChannel?.id != channel.id) {
       _radioTracks.clear();
       _lastMediaTitle = '';
-      // 换了台：即使之前点过卡片上的 ❌，也应该重新出卡片
-      _audioCardClosed = false;
     }
+    // 主动播放（点台/换台/重播同一台）：即使之前按过卡片上的 ❌，
+    // 也应该重新出卡片。以前只在「换到另一台」时复位，从列表里点回
+    // 当前这一台就永远不出卡片了
+    _audioCardClosed = false;
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
@@ -2480,8 +2490,13 @@ class PlayerController extends ChangeNotifier {
     }
     final gen = ++_playGeneration;
     _instanceBornAt = DateTime.now();
-    _state = PlayerState.loading;
-    notifyListeners();
+    // 后台换台不要进 loading：卡片会跟着在「播放/暂停」之间闪一下，
+    // 而且加载失败时用户看到的是一张不知道在干嘛的卡片。后台保持
+    // 上一态直到真有结果（成功 → playing，失败 → 暂停等用户点）
+    if (!_isBackgroundNow) {
+      _state = PlayerState.loading;
+      notifyListeners();
+    }
 
     // 缓冲设置即时生效：每次起播前按当前设置重新注册 fvp 选项，
     // 不必重启程序（registerWith 的全局选项对之后创建的播放器生效）。
@@ -2828,8 +2843,11 @@ class PlayerController extends ChangeNotifier {
         _softErrPending = true;
         final startPos = v.position;
         _softErrTimer?.cancel();
+        // 后台（卡片在操作）把复检压到 1.2 秒：用户看不到界面，长时间
+        // 「没反应」比误判严重——快一点收敛到暂停，卡片按钮变「播放」
         _softErrTimer = Timer(
-          Duration(milliseconds: earlyStart ? 3500 : 2500),
+          Duration(
+              milliseconds: _isBackgroundNow ? 1200 : (earlyStart ? 3500 : 2500)),
           () {
             _softErrPending = false;
             final vc = _videoController;
@@ -2852,7 +2870,8 @@ class PlayerController extends ChangeNotifier {
               _softErrPending = true;
               final pos2 = cur.position;
               _softErrTimer?.cancel();
-              _softErrTimer = Timer(const Duration(milliseconds: 4000), () {
+              _softErrTimer = Timer(
+                  Duration(milliseconds: _isBackgroundNow ? 1500 : 4000), () {
                 _softErrPending = false;
                 final vc2 = _videoController;
                 if (vc2 == null || !identical(vc2, self)) return;
@@ -2936,6 +2955,9 @@ class PlayerController extends ChangeNotifier {
   /// → 又推一次 audioUpdate，表现就是「卡片闪一下又回来了」。
   bool _audioCardClosed = false;
 
+  /// 卡片上按 ❌ 的时刻：之后 3 秒内到期的换台一律作废（见 playChannel）
+  DateTime? _cardExitAt;
+
   /// 通知权限只申请一次（系统窗只弹一次，之后拒绝就只能去设置里开）
   bool _notifAsked = false;
 
@@ -2998,15 +3020,58 @@ class PlayerController extends ChangeNotifier {
       case 'next':
         if (radio) unawaited(playAdjacentChannel(1));
       case 'stop':
-        // 卡片上的 ❌ = 退出听电视：停播 + 收卡片，并且不再自动弹回
-        _audioCardClosed = true;
-        if (isPlaying) unawaited(togglePlayPause());
-        _lastAudioSig = '';
-        unawaited(audioStop());
+        _exitFromCard();
       case 'restore':
         // 原生侧负责把界面拉回前台，这里只需要刷新一次状态
         notifyListeners();
     }
+  }
+
+  /// 通知卡片 ❌ = 退出听电视。必须**无条件**把内核停下来。
+  ///
+  /// 以前这里是 `if (isPlaying) togglePlayPause()`。后台换台失败正在自动
+  /// 重试时 `isPlaying` 是 false，于是什么都没停：卡片收了、声音还在，
+  /// 用户只能杀进程——再从桌面点图标就是一个新内核 + 旧内核同时在响
+  /// （用户实测「退不出去，再开一个出现两个声音」）。
+  void _exitFromCard() {
+    _audioCardClosed = true;
+    _cardExitAt = DateTime.now();
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
+    _softErrPending = false;
+    _softErrSecondRound = false;
+    _autoReloadCount = 0;
+    final vc = _videoController;
+    if (vc != null) unawaited(vc.pause());
+    _state = PlayerState.paused;
+    _lastError = null;
+    _lastAudioSig = '';
+    unawaited(audioStop());
+    notifyListeners();
+  }
+
+  /// 真正退出应用前调用：把播放停干净 + 收掉前台服务。
+  ///
+  /// 安卓上点「退出」只是 finish Activity，FlutterEngine 与 Dart isolate
+  /// 一起被销毁时 mpv 的原生实例不保证释放——声音继续响，再从桌面点图标
+  /// 就成了两路同时在放。必须在销毁前主动 pause + stop 服务。
+  Future<void> shutdownForExit() async {
+    _audioCardClosed = true;
+    _cardExitAt = DateTime.now();
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
+    try {
+      await _videoController
+          ?.pause()
+          .timeout(const Duration(milliseconds: 400));
+    } catch (_) {}
+    try {
+      await audioStop().timeout(const Duration(milliseconds: 400));
+    } catch (_) {}
   }
 
   // ---------- 睡眠定时（方案 12.4 / 13.3：睡前听广播的高频场景） ----------
@@ -3574,6 +3639,18 @@ class PlayerController extends ChangeNotifier {
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     final total = _settings.retryTimes;
+    // 后台（通知卡片在操作）不重试。
+    //
+    // 后台没有界面可看，重试只会让卡片在「播放/暂停」之间反复闪、声音
+    // 断断续续，三五个来回之后用户只会觉得「它一直在重试、退不出去」
+    // （实测）。停到暂停态，卡片上的按钮会变成「播放」——用户想再试
+    // 自己点一下即可，比自动转圈可控。
+    if (_isBackgroundNow && !_isCasting) {
+      _state = PlayerState.paused;
+      _lastError = null;
+      notifyListeners();
+      return;
+    }
     if (_settings.autoReloadStall &&
         total > 0 &&
         _autoReloadCount < total &&
@@ -5232,6 +5309,9 @@ class PlayerController extends ChangeNotifier {
     // 回前台一律恢复视频轨：电台可能要用真波形纹理，
     // 视频台更要画面
     unawaited(_videoController?.setVideoOutputDisabled(false));
+    // 立刻刷一次：后台切台改的是 Dart 侧状态，回前台第一帧就该是新台
+    // （不刷的话个别机型会先贴一帧旧界面再跳）
+    notifyListeners();
   }
 
   void dispose() {

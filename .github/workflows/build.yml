@@ -335,6 +335,7 @@ jobs:
           import android.os.Build
           import android.os.IBinder
           import android.os.PowerManager
+          import android.os.SystemClock
           import android.support.v4.media.MediaMetadataCompat
           import android.support.v4.media.session.MediaSessionCompat
           import android.support.v4.media.session.PlaybackStateCompat
@@ -414,7 +415,18 @@ jobs:
                       s.stopCard()
                   }
 
+                  @Volatile private var lastCmd = ""
+                  @Volatile private var lastCmdAt = 0L
+
+                  /** 通知按钮 → Dart。
+                   *  去重 400ms：有的 ROM 点一次按钮会同时走「广播」和
+                   *  MediaSession 两条回调，同一条 next 派发两次 → Dart 侧
+                   *  并发换两次台，最快时能留下两个内核同时出声。 */
                   private fun send(cmd: String) {
+                      val now = SystemClock.elapsedRealtime()
+                      if (cmd == lastCmd && now - lastCmdAt < 400) return
+                      lastCmd = cmd
+                      lastCmdAt = now
                       try { dart?.invokeMethod("audio", cmd) } catch (e: Exception) {}
                   }
               }
