@@ -396,6 +396,8 @@ class _RadioStage extends StatelessWidget {
         channel: ch,
         size: size - 4,
         circular: true,
+        // 大圆里图必须顶满：留白会把白底台标画成「圆圈中间一张小卡片」
+        imageInset: 0,
         background: Colors.white.withValues(alpha: 0.06),
       ),
     );

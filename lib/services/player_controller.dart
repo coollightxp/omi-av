@@ -27,6 +27,7 @@ import 'dlna_service.dart';
 import 'win_hotkeys.dart';
 import 'cast_log.dart';
 import 'format_hint.dart';
+import 'net_warm.dart';
 import 'media/omi_video_backend.dart';
 import 'media/omi_video_engine.dart';
 import 'media_capture_service.dart';
@@ -1724,6 +1725,10 @@ class PlayerController extends ChangeNotifier {
   /// 供底部面板播放按钮显示正确图标）
   bool _webPlaying = false;
 
+  /// 网页是否已真正起播（黑幕「等到出画面才揭开」的判据，
+  /// 见 player_screen 里的 _WebLoadingCurtain）
+  bool get webPlaying => _webPlaying;
+
   /// ===== 网页频道控制桥（由内嵌 WebView 注册/注销）=====
   /// 执行 JS 并返回结果
   Future<dynamic> Function(String)? _webEval;
@@ -2295,14 +2300,22 @@ class PlayerController extends ChangeNotifier {
   /// 供换台防抖预览：OSD 立即显示目标频道，停顿后 playChannel 真正切流
   Channel? adjacentChannel(int delta) => _stepChannel(delta);
 
+  /// 从指定台起算的相邻频道（不触发播放）。
+  ///
+  /// 连按 ↑/↓ 时必须从「当前预览台」继续走，否则每一步都从正在播的
+  /// 台算 ±1，按五下还是同一个台（用户实测：连按不前进）
+  Channel? adjacentChannelFrom(Channel base, int delta) =>
+      _stepChannel(delta, base: base);
+
   /// 同域内按偏移取下一台，跳过黑名单。
   /// OSD 预览（adjacentChannel）与实际换台（playAdjacentChannel）共用这一份，
   /// 否则会出现"预览显示 A、切过去是 B"。
-  Channel? _stepChannel(int delta) {
+  Channel? _stepChannel(int delta, {Channel? base}) {
     final all = _switchDomainChannels;
     if (all.isEmpty) return null;
-    if (_currentChannel == null) return all.first;
-    final idx = all.indexWhere((c) => c.id == _currentChannel!.id);
+    final from = base ?? _currentChannel;
+    if (from == null) return all.first;
+    final idx = all.indexWhere((c) => c.id == from.id);
     if (idx < 0) return all.first;
     var i = idx;
     // 最多绕一圈：全部被屏蔽时停在原地，不能死循环
@@ -4895,14 +4908,16 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  @override
   // ==================== 换台预读（↑/↓ 停留期间提前握手） ====================
   // 用户语义：按 ↑/↓ 只是「把下一个台的地址读进来」，画面仍是当前台；
-  // 停顿超过换台停留时间才真正切流。这里对目标流地址做一次轻量
-  // HTTP 握手（DNS + TCP + TLS 预热，读几字节就断开），真正切台时
-  // mpv 建连能明显快一拍。同一频道只预读一次，避免长按连刷时打爆。
+  // 停顿超过换台停留时间才真正切流。
+  //
+  // 【重要】这里**只做 DNS + TCP 连接**，绝不向流地址发 HTTP 请求：
+  // 上一版用 GET 预读，很多直播服务器是单会话/带 token 的，同一地址
+  // 被第二次请求会踢掉当前这条连接 —— 用户实测「一按上下键当前台就
+  // 断流卡住」，看着像立刻换台。只连端口不请求 URL，既能预热 DNS/TCP，
+  // 又完全不影响正在播的流。同一地址只预读一次，长按连刷不重复建连。
 
-  http.Client? _preconnectClient;
   String? _preconnectUrl;
 
   Future<void> preconnectChannel(Channel channel) async {
@@ -4910,25 +4925,13 @@ class PlayerController extends ChangeNotifier {
     final url = channel.streamUrls.first;
     if (url == _preconnectUrl) return;
     _preconnectUrl = url;
-    _preconnectClient?.close();
-    final client = http.Client();
-    _preconnectClient = client;
-    unawaited(() async {
-      try {
-        // 只要响应头（DNS/TCP/TLS 握手完成即达到预热目的），立刻断开
-        final res = await client
-            .get(Uri.parse(url),
-                headers: {'User-Agent': 'Mozilla/5.0 (OmiAV preconnect)'})
-            .timeout(const Duration(milliseconds: 2500));
-        // 主动废弃响应体，尽快释放连接
-        res.bodyBytes.length;
-      } catch (_) {
-        // 预读失败不影响正式切台
-      } finally {
-        client.close();
-        if (identical(_preconnectClient, client)) _preconnectClient = null;
-      }
-    }());
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) return;
+    final secure = uri.scheme == 'https' || uri.scheme == 'wss';
+    final port = uri.hasPort
+        ? uri.port
+        : (secure ? 443 : (uri.scheme == 'rtsp' ? 554 : 80));
+    unawaited(warmHost(uri.host, port));
   }
 
   /// App 是否在后台（安卓通知栏切台时关视频输出的判定，

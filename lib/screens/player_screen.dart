@@ -621,29 +621,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                             // 不必带着视频纹理整屏重绘（老显卡上会闪黑一帧）
                             ? const RepaintBoundary(
                                 child: VideoPlayerWidget())
-                            : (!controller.webPageForeground
-                                ? Container(
-                                    color: Colors.black,
-                                    child: Center(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const CircularProgressIndicator(
-                                              color: Colors.blueAccent),
-                                          const SizedBox(height: 12),
-                                          const Text(
-                                              '正在打开网页频道，请稍候...',
-                                              style: TextStyle(
-                                                  color: Colors.white70,
-                                                  fontSize: 14)),
-                                        ],
-                                      ),
-                                    ),
-                                  )
-                                    // 网页推到前台后不立刻揭开：video 元素的 play 事件先于画面
-                                    // 渲染，立刻露网页会闪出站点页面（央视网）或站点白底（央视频）。
-                                    // 黑幕多盖 800ms 再淡出，音频不受影响
-                                    : const _WebForegroundVeil()),
+                        : _WebLoadingCurtain(
+                            // 换台要重新盖幕：同一频道内不重建，换台时换 key
+                            key: ValueKey(
+                                'curtain_${controller.currentChannel?.id}'),
+                            controller: controller,
+                            foreground: controller.webPageForeground,
+                          ),
                   ),
 
                   // Windows 桌面亮度遮罩：原生 gamma ramp 在台式机/外接
@@ -1876,6 +1860,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     _okLongTimer?.cancel();
+    // 换台预览待提交：OK 就是「别等了，现在切」，不进长按呼面板逻辑
+    if (_tunePending) return;
     _okLongTimer = Timer(const Duration(milliseconds: 500), () {
       _okLongFired = true;
       // 长按 OK = 呼出/收起控制面板（内部有播放状态守卫）
@@ -1898,6 +1884,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       } else if (_bottomPanelActive) {
         _bottomPanelRemoteKey('ok', false);
       }
+      _okLongFired = false;
+      return;
+    }
+    // 换台预览待提交：OK 抬起即刻切到预览台（不必再等停留计时）
+    if (_tunePending) {
+      _commitTune();
       _okLongFired = false;
       return;
     }
@@ -2408,6 +2400,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                 ),
                               ),
                             ),
+                          // 预览状态说明：让用户清楚「还没切，停顿够才切」
+                          if (_osdPreview != null)
+                            Padding(
+                              padding: EdgeInsets.only(top: isPhone ? 3 : 5),
+                              child: Text(
+                                '停留 ${(controller.settings.tuneDwellMs.clamp(1200, 5000) / 1000).toStringAsFixed(1)} 秒后切换 · 按 OK 立即切换',
+                                style: TextStyle(
+                                  color: Colors.blueAccent,
+                                  fontSize: isPhone ? 11 : 13,
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ],
@@ -2650,13 +2654,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 方向键：←/→ 切换播放源，↑/↓ 切换频道
   void _onArrow(String action) {
     if (_settingsOpen || _leftDrawerOpen || _rightEpgOpen) return;
-    if (_throttled()) return;
     final controller = context.read<PlayerController>();
     switch (action) {
       case 'prevSource':
+        if (_throttled()) return;
         controller.prevSource();
       case 'nextSource':
+        if (_throttled()) return;
         controller.nextSource();
+      // 上下键不走 900ms 加载锁：切台是「预览 + 停留提交」，连按必须
+      // 每一步都能前进（锁会把 900ms 内的第二次按键吞掉，表现为
+      // 「按了没反应、到点却提前切台」）
       case 'prevChannel':
         _requestTune(controller, -1);
       case 'nextChannel':
@@ -2685,11 +2693,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     return true;
   }
 
-  /// 换台防抖：OSD 立即显示目标频道，停顿 450ms 后才真正切流。
-  /// 长按连换时计时被不断重置，松手后播放最后一个目标；
-  /// 换流失败时清除预览，避免 OSD 停留在没播出来的频道上
+  /// 换台预览 + 停留提交（↑/↓ 连按的核心语义）。
+  ///
+  /// 用户要的行为：按 ↑/↓ 时**只有左上角卡片变**（并把目标台地址读进来
+  /// 预热），正在播的台画面/声音完全不动；连续按不切台，停顿够
+  /// （换台停留，默认 2.5 秒）才真正切到卡片上那个台。
+  ///
+  /// 三条硬约束：
+  /// 1. 预览必须从「当前预览台」继续走，否则连按五下还是同一个台；
+  /// 2. 停留期间不许对目标流地址发任何 HTTP 请求——会踢掉正在播的连接；
+  /// 3. 计时从最后一次按键开始，且下限 1.2 秒，避免设置被写成 0 时秒切。
   void _requestTune(PlayerController controller, int delta) {
-    final target = controller.adjacentChannel(delta);
+    final base = _osdPreview ?? controller.currentChannel;
+    if (base == null) return;
+    final target = controller.adjacentChannelFrom(base, delta);
     if (target == null) return;
     _osdTimer?.cancel();
     _tuneDebounce?.cancel();
@@ -2700,18 +2717,32 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _osdTimer = Timer(const Duration(seconds: 8), () {
       if (mounted) setState(() => _osdVisible = false);
     });
-    // 停留期间把目标台的流地址「读进来」（DNS/TCP/TLS 预热），画面不动；
-    // 停顿超过换台停留时间才真正切流
+    // 停留期间只做 DNS/TCP 预连接（不请求流地址），把目标台的连接
+    // 路径「读进内存」，真正切流时少一次解析/握手；画面半点不动
     unawaited(controller.preconnectChannel(target));
-    // 停留时间用户可调（设置 → 播放器 → 换台停留，默认 2.5 秒）：
-    // 连续按 ↑/↓ 时只刷新左上角预览、继续播当前台，停顿够才真正切流
-    _tuneDebounce = Timer(Duration(milliseconds: controller.settings.tuneDwellMs), () {
-      _tuneDebounce = null;
-      controller.playChannel(target).whenComplete(() {
-        if (mounted) setState(() => _osdPreview = null);
-      });
+    final dwell = controller.settings.tuneDwellMs.clamp(1200, 5000);
+    _tuneDebounce = Timer(Duration(milliseconds: dwell), _commitTune);
+  }
+
+  /// 停顿够（或按 OK 确认）→ 真正切到预览台
+  void _commitTune() {
+    final target = _osdPreview;
+    _tuneDebounce?.cancel();
+    _tuneDebounce = null;
+    if (target == null || !mounted) return;
+    final controller = context.read<PlayerController>();
+    // 预览绕一圈又回到正在播的台：不用重连，卡片留着自然消失即可
+    if (target.id == controller.currentChannel?.id) {
+      setState(() => _osdPreview = null);
+      return;
+    }
+    controller.playChannel(target).whenComplete(() {
+      if (mounted) setState(() => _osdPreview = null);
     });
   }
+
+  /// 有未提交的换台预览（OK 键据此改成「立即切过去」）
+  bool get _tunePending => _osdPreview != null;
 
   /// 钩子按住期间系统会重复发 WM_KEYDOWN：记录已按下动作去重，
   /// 保证一次物理按下只派发一次按下边沿
@@ -7126,31 +7157,72 @@ String _sleepRemainText(Duration d) {
   return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
 }
 
-/// 网页频道推前台后的黑幕：挂载即不透明盖住网页，800ms 后淡出。
-/// 只在 webPageForeground 刚翻真时挂上；期间音频已在放，观感是
-/// 「黑一下直接出画面」而不是闪一下站点页面/白屏
-class _WebForegroundVeil extends StatefulWidget {
-  const _WebForegroundVeil();
+/// 网页频道的等待幕：从「打开网页」到「真的出画面」全程盖住网页。
+///
+/// 之前是固定 800ms 黑幕，机器慢 / 站点加载慢时 800ms 根本不够——幕一
+/// 揭开视频还在缓冲，露出来的就是站点页面（央视网首页）或站点白底，
+/// 用户看到的就是「一闪进入网页」。现在改成按真实播放态收幕：
+///
+/// 判据：`controller.webPlaying` 连续稳定 [_stableMs] 毫秒（中途 pause /
+/// 缓冲会重新计时），另外硬上限 [_capSeconds] 秒兜底，防止页面压根没有
+/// video（或探针看不见）时永久黑屏。期间音频已在放，观感是「黑一下直接
+/// 出画面」。
+class _WebLoadingCurtain extends StatefulWidget {
+  const _WebLoadingCurtain(
+      {super.key, required this.controller, required this.foreground});
+
+  final PlayerController controller;
+
+  /// 网页是否已推到前台（决定提示文案）
+  final bool foreground;
 
   @override
-  State<_WebForegroundVeil> createState() => _WebForegroundVeilState();
+  State<_WebLoadingCurtain> createState() => _WebLoadingCurtainState();
 }
 
-class _WebForegroundVeilState extends State<_WebForegroundVeil> {
-  bool _shown = true;
-  Timer? _t;
+class _WebLoadingCurtainState extends State<_WebLoadingCurtain> {
+  static const int _stableMs = 700;
+  static const int _capSeconds = 12;
+
+  bool _revealed = false;
+  DateTime? _playSince;
+  Timer? _poll;
+  Timer? _cap;
 
   @override
   void initState() {
     super.initState();
-    _t = Timer(const Duration(milliseconds: 800), () {
-      if (mounted) setState(() => _shown = false);
-    });
+    widget.controller.addListener(_check);
+    _poll = Timer.periodic(
+        const Duration(milliseconds: 120), (_) => _check());
+    _cap = Timer(const Duration(seconds: _capSeconds), _reveal);
+  }
+
+  void _check() {
+    if (_revealed || !mounted) return;
+    if (!widget.controller.webPlaying) {
+      // 暂停/卡缓冲：重新计时，别在半成品画面上揭幕
+      _playSince = null;
+      return;
+    }
+    _playSince ??= DateTime.now();
+    if (DateTime.now().difference(_playSince!).inMilliseconds >= _stableMs) {
+      _reveal();
+    }
+  }
+
+  void _reveal() {
+    if (_revealed || !mounted) return;
+    _poll?.cancel();
+    _cap?.cancel();
+    setState(() => _revealed = true);
   }
 
   @override
   void dispose() {
-    _t?.cancel();
+    widget.controller.removeListener(_check);
+    _poll?.cancel();
+    _cap?.cancel();
     super.dispose();
   }
 
@@ -7158,9 +7230,27 @@ class _WebForegroundVeilState extends State<_WebForegroundVeil> {
   Widget build(BuildContext context) {
     return IgnorePointer(
       child: AnimatedOpacity(
-        opacity: _shown ? 1.0 : 0.0,
-        duration: const Duration(milliseconds: 300),
-        child: Container(color: Colors.black),
+        opacity: _revealed ? 0.0 : 1.0,
+        duration: const Duration(milliseconds: 320),
+        child: Container(
+          color: Colors.black,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(color: Colors.blueAccent),
+                const SizedBox(height: 12),
+                Text(
+                  widget.foreground
+                      ? '网页已起播，正在等待画面…'
+                      : '正在进入网页播放，请稍候…',
+                  style:
+                      const TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

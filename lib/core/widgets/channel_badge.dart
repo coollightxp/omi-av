@@ -23,6 +23,7 @@ class ChannelBadge extends StatelessWidget {
     this.circular,
     this.background = const Color(0x14FFFFFF),
     this.extraLogoUrls = const [],
+    this.imageInset = 0.10,
   });
 
   final Channel channel;
@@ -44,6 +45,12 @@ class ChannelBadge extends StatelessWidget {
   /// 额外的在线候选（如 EPG 匹配到的台标），按顺序排在
   /// `channel.logoUrl` 之后尝试；用于保留旧面板「EPG icon 优先」的行为
   final List<String> extraLogoUrls;
+
+  /// 图片台标四周留白比例（0 = 图顶满占位）。
+  ///
+  /// 小面板/列表里 10% 留白看着舒服；但「正在收听」那种 176px 大圆里
+  /// 一缩就变成「圆圈中间飘一张白底小卡片」，很难看——那里传 0 充满
+  final double imageInset;
 
   bool get _isRound => circular ?? channel.isRadio;
 
@@ -75,13 +82,14 @@ class ChannelBadge extends StatelessWidget {
 
   /// 台标图在容器内的留白：官方 logo 普遍顶满画布，视觉上比旁边的
   /// 文字大一圈。占位尺寸不动（保持与相邻元素的对齐/间距），图先
-  /// 四周各缩 10% 再 contain，看上去比例舒服（用户反馈「显示有点大」）。
+  /// 四周各缩 [imageInset] 再 contain，看上去比例舒服（用户反馈「显示有点大」）。
   /// 字母台标不走这里——它自带 14% 内边距，再缩就太小了。
   Widget _inset(Widget child) {
+    if (imageInset <= 0) return child;
     return Padding(
       padding: EdgeInsets.symmetric(
-        horizontal: (width ?? size) * 0.10,
-        vertical: size * 0.10,
+        horizontal: (width ?? size) * imageInset,
+        vertical: size * imageInset,
       ),
       child: child,
     );
