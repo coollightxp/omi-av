@@ -191,6 +191,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   int _tpBtn = 0; // 0=确定 1=取消
 
 
+  // ---- 返回键「一次按下只关一层」的单一闸门 --------------------------
+  /// 同一个物理按键可能从多条通道送到本页：Flutter 的 HardwareKeyboard、
+  /// Windows 低级钩子经 win_hotkeys 转发、安卓系统返回（PopScope）。
+  /// 卡片又是「路由 + 标志位」两套状态，任何一条重复投递都会多关一层，
+  /// 表现就是「按一次返回，两层一起没了」。
+  /// 与其在每张卡片里各打补丁，不如在关层动作的入口做一次去重：
+  /// 一个物理按下边沿在 260ms 内只允许关一层。
+  DateTime _lastLayerCloseAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastLayerCloseSrc = '';
+
   // 两个侧边面板的状态句柄：遥控器/键盘导航由本页统一分发
   // （HardwareKeyboard 与 Windows 低级钩子走同一入口）
   final GlobalKey<LeftChannelDrawerState> _leftDrawerKey = GlobalKey();
@@ -577,7 +587,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       child: PopScope(
         canPop: false,
         onPopInvoked: (didPop) {
-          if (!didPop) _handleBackPressed();
+          if (!didPop) _handleBackPressed('pop');
         },
         child: Scaffold(
           backgroundColor: Colors.black,
@@ -1052,7 +1062,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     return false;
   }
 
-  Future<void> _handleBackPressed() async {
+  Future<void> _handleBackPressed([String src = 'page']) async {
+    // 一次物理按下只关一层（系统返回 + 硬件按键可能同时到达）。
+    // src 只用于诊断日志：pop=系统返回、key=HardwareKeyboard、
+    // native=Windows 钩子转发、page=页面内按钮/其它调用
+    if (!_allowLayerClose(src)) return;
     // 数字选台输入中：返回键 = 取消输入（清缓存并隐藏 OSD），
     // 不落入退出确认等后续分支
     if (_numBuffer.isNotEmpty) {
@@ -1158,7 +1172,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         // 遥控器友好：AlertDialog 用 StatefulBuilder 包裹，按钮高亮
         // 随 _exitDialogFocusIndex 变化；遥控器 ←/→ 在 _handleExitDialogKey
         // 里改字段后调用 _exitDialogRefresh 刷新本对话框
-        return StatefulBuilder(
+        //
+        // canPop:false：安卓系统返回不再由路由自己弹掉，先交回卡片状态机。
+        // 以前系统把路由弹掉、_exitDialogOpen 还开着，页面以为卡片还在：
+        // 返回键像「没反应」、焦点跳回按钮，要再等一次才关得掉（实测）。
+        return PopScope(
+          canPop: false,
+          onPopInvoked: (didPop) {
+            if (didPop) return;
+            if (_exitDialogOpen) {
+              _handleExitDialogKey(LogicalKeyboardKey.escape, true, false);
+            }
+          },
+          child: StatefulBuilder(
           builder: (ctx, setDialogState) {
             _exitDialogRefresh = setDialogState;
             // 自绘退出面板：不显示程序图标，内容全部居中，
@@ -1229,6 +1255,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
               ),
             );
           },
+          ),
         );
       },
     );
@@ -1475,6 +1502,27 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       k == LogicalKeyboardKey.goBack ||
       k == LogicalKeyboardKey.browserBack;
 
+  /// 这一下返回是否允许关掉一层。true=允许并记账；false=同一次物理
+  /// 按下的重复投递（另一条通道/系统返回/自动重复），必须原样吞掉。
+  ///
+  /// 只按时间窗口去重，不做按键 ID 配对：遥控器给的事件里没有可靠的
+  /// 按下序号，而「两次真实按下」在遥控器上不可能落在 260ms 内。
+  bool _allowLayerClose(String src) {
+    final now = DateTime.now();
+    final dt = now.difference(_lastLayerCloseAt).inMilliseconds;
+    if (dt < 260) {
+      WebDiag.log('back_dup src=$src prev=$_lastLayerCloseSrc dt=${dt}ms '
+          'time=$_timePickOpen sleep=$_sleepCardOpen exit=$_exitDialogOpen '
+          'modal=$_modalRouteOpen');
+      return false;
+    }
+    _lastLayerCloseAt = now;
+    _lastLayerCloseSrc = src;
+    WebDiag.log('back_close src=$src time=$_timePickOpen sleep=$_sleepCardOpen '
+        'exit=$_exitDialogOpen modal=$_modalRouteOpen');
+    return true;
+  }
+
   /// 对话框打开期间的遥控器/键盘按键收口。
   /// 返回 true=已消费；不认识的键放行给弹层内控件（如输入框）。
   bool _handleKeyWhileModal(LogicalKeyboardKey k, bool isDown, bool isUp) {
@@ -1504,10 +1552,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     if (isOk) {
       if (isDown) {
-        // 复位配对状态并关闭弹层（等同「关闭」按钮）
+        // 复位配对状态并关闭弹层（等同「关闭」按钮）。
+        // 去重：同一次按下的第二份投递会把下面那层播放页也 pop 掉（黑屏）
         _okHeld = true;
         _okLongTimer?.cancel();
-        Navigator.of(context).maybePop();
+        if (_allowLayerClose('modal_ok')) Navigator.of(context).maybePop();
       } else if (isUp) {
         _okHeld = false;
         _okLongTimer?.cancel();
@@ -1528,7 +1577,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true; // 弹层内无列表导航需求，吞掉防穿透切台
     }
     if (k == LogicalKeyboardKey.contextMenu) {
-      if (isDown) Navigator.of(context).maybePop();
+      if (isDown && _allowLayerClose('modal_menu')) {
+        Navigator.of(context).maybePop();
+      }
       if (isUp) {
         _menuHeld = false;
         _menuLongTimer?.cancel();
@@ -1537,7 +1588,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true;
     }
     if (_isBackKey(k)) {
-      if (isDown) Navigator.of(context).maybePop();
+      if (isDown && _allowLayerClose('modal')) {
+        Navigator.of(context).maybePop();
+      }
       return true;
     }
     return false;
@@ -1579,14 +1632,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true; // 两按钮水平排列，上下无意义
     }
     if (k == LogicalKeyboardKey.contextMenu) {
-      if (isDown && _exitDialogOpen) {
+      if (isDown && _exitDialogOpen && _allowLayerClose('exit')) {
         _exitDialogOpen = false;
         Navigator.of(context).pop<String?>(null);
       }
       return true;
     }
     if (_isBackKey(k)) {
-      if (isDown && _exitDialogOpen) {
+      if (isDown && _exitDialogOpen && _allowLayerClose('exit')) {
         _exitDialogOpen = false;
         Navigator.of(context).pop<String?>(null);
       }
@@ -1862,6 +1915,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 确认或取消关机：关卡片并记下结果，调用方据此执行关机
   void _confirmShutdown(bool confirm) {
     if (!_shutdownDialogOpen) return;
+    // 同一次按下的第二份投递会把路由再 pop 一次（连带播放页黑屏）
+    if (!_allowLayerClose('shutdown')) return;
     _shutdownDialogOpen = false;
     _shutdownTimer?.cancel();
     _shutdownTimer = null;
@@ -1944,12 +1999,25 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       picked = await showDialog<SleepPick>(
         context: context,
         barrierColor: AppColors.scrim,
-        builder: (_) => StatefulBuilder(
-          builder: (ctx, setD) {
-            _sleepRefresh = setD;
-            _sleepDialogCtx = ctx;
-            return _buildSleepCard();
+        builder: (_) => PopScope(
+          // 安卓系统返回先回到卡片状态机：子页只关子页、主页面才关整张。
+          // 路由被系统弹掉而标志位还开着，就会出现「返回后卡片没消失」
+          canPop: false,
+          onPopInvoked: (didPop) {
+            if (didPop) return;
+            if (_timePickOpen) {
+              _handleTimePickAction('back', true);
+            } else if (_sleepCardOpen) {
+              _handleSleepCardAction('back', true);
+            }
           },
+          child: StatefulBuilder(
+            builder: (ctx, setD) {
+              _sleepRefresh = setD;
+              _sleepDialogCtx = ctx;
+              return _buildSleepCard();
+            },
+          ),
         ),
       );
     } finally {
@@ -2128,6 +2196,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'back':
       case 'esc':
       case 'menu':
+        if (!_allowLayerClose('sleep')) return true;
         _popSleepCard(null);
         return true;
       default:
@@ -2249,6 +2318,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'back':
       case 'esc':
       case 'menu':
+        if (!_allowLayerClose('timepick')) return true;
         _popTimePicker(null); // 只切回定时卡片，不再连底层一起关
         return true;
       default:
@@ -2324,8 +2394,29 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final isDown = event is KeyDownEvent;
     final isUp = event is KeyUpEvent;
 
+    // 自动重复帧一律丢弃（只处理真实按下/抬起两个边沿）。
+    // 以前各卡片只挡了「抬起」，按住返回/OK 时系统发的重复帧会继续往下
+    // 走：第一次按下关掉时间选择子页，重复帧落到主卡片把整张也关了
+    // ——「按返回两层一起消失」；退出卡片同理，关掉后重复帧又走一遍
+    // 「无面板 → 弹退出确认」，看起来像卡片关不掉、焦点跳回「返回」。
+    // 长按语义（OK 长按收藏、方向长按连滚）都由各自的 Timer 实现，
+    // 不依赖重复帧，所以这里丢弃是安全的。
+    if (event is KeyRepeatEvent) return true;
+
     // 键盘/遥控器一有动作就隐藏鼠标指针（鼠标一移动原生侧自动恢复）
     if (isDown) _hidePointerForRemote();
+
+    // 非文本焦点时每个按下边沿都压一次 IME：切台（上下键）、抽屉、
+    // EPG、退出卡片、定时卡片全都覆盖。之前只压「面板开着」的分支，
+    // 换台和卡片上的按键照样把输入法/剪贴板框拉起来（安卓实测）。
+    // 焦点在输入框（设置 URL、电台搜索、编辑弹窗）时跳过，不影响打字
+    if (isDown) {
+      final pf = FocusManager.instance.primaryFocus;
+      final editing = pf?.context
+              ?.findAncestorWidgetOfExactType<EditableText>() !=
+          null;
+      if (!editing) _hideIme();
+    }
 
     // 锁定状态：除「返回键 / 菜单键」解锁外，所有按键一律屏蔽，
     // 防止遥控器/键盘误触切台、改设置或退出（屏幕上有锁定角标提示）
@@ -2428,7 +2519,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         return true;
       }
       if (_isBackKey(k)) {
-        if (isDown) _handleBackPressed();
+        if (isDown) _handleBackPressed('key');
         return true;
       }
       // 其余键一律吞掉：面板开着时不给焦点系统任何穿透机会
@@ -2440,7 +2531,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       if (isDown &&
           (k == LogicalKeyboardKey.escape ||
               k == LogicalKeyboardKey.contextMenu)) {
-        _handleBackPressed();
+        _handleBackPressed('key');
         return true;
       }
       return false;
@@ -2481,7 +2572,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 遥控器返回是 goBack/browserBack 不是 escape——以前不认，落到
     // 「其余按键」放行，靠引擎默认返回 + PopScope 兜底才能进层级处理
     if (_isBackKey(k)) {
-      if (isDown) _handleBackPressed();
+      if (isDown) _handleBackPressed('key');
       return true;
     }
 
@@ -3062,14 +3153,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
   Widget _buildChannelOsd(PlayerController controller) {
-    // 换台防抖期间显示预览频道（尚未真正切流）：
-    // 序号取预览频道；节目名仅真实播放中显示（预览时拿不到且会误导）
+    // 换台防抖期间显示预览频道（尚未真正切流）：序号、节目名都取
+    // 预览台的——用户要求切台预览时就能看到目标台此刻在播什么，
+    // 决定留还是不留（2026-11-14）。currentProgramTitleFor 是按频道
+    // 查询的现成接口（左侧列表「正在播」小字同源），预览态直接可用
     final ch = _osdPreview ?? controller.currentChannel;
     final number = _osdPreview != null
         ? controller.channelNumberOf(_osdPreview)
         : controller.currentChannelNumber;
-    final program =
-        _osdPreview == null ? controller.currentProgram?.title : null;
+    final program = ch == null ? '' : controller.currentProgramTitleFor(ch);
     final showOsd = (_osdVisible && ch != null) || _numBuffer.isNotEmpty;
     final isPhone = defaultTargetPlatform == TargetPlatform.android &&
         MediaQuery.of(context).size.shortestSide < 600;
@@ -3134,22 +3226,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                 ),
                               ),
                             ),
-                          // 预览状态说明：让用户清楚「还没切，停顿够才切」
-                          if (_osdPreview != null)
-                            Padding(
-                              padding: EdgeInsets.only(top: isPhone ? 3 : 5),
-                              child: Text(
-                                '停留 ${(controller.settings.tuneDwellMs.clamp(1200, 5000) / 1000).toStringAsFixed(1)} 秒后切换 · 按 OK 立即切换',
-                                style: TextStyle(
-                                  color: Colors.blueAccent,
-                                  fontSize: isPhone ? 11 : 13,
-                                ),
-                              ),
-                            ),
-                        ],
+                          ],
+                        ),
+                      ],
+                    ),
+                  // 预览状态说明：独占一行、与频道号左侧对齐（比 ID/台名
+                  // 整体低一行，2026-11-14 用户定稿），让用户清楚
+                  // 「还没切，停顿够才切」
+                  if (_osdPreview != null)
+                    Padding(
+                      padding: EdgeInsets.only(top: isPhone ? 3 : 5),
+                      child: Text(
+                        '停留 ${(controller.settings.tuneDwellMs.clamp(1200, 5000) / 1000).toStringAsFixed(1)} 秒后切换 · 按 OK 立即切换',
+                        style: TextStyle(
+                          color: Colors.blueAccent,
+                          fontSize: isPhone ? 11 : 13,
+                        ),
                       ),
-                    ],
-                  ),
+                    ),
                   // 数字选台输入提示：已输入数字 + 部分匹配的频道名（灰字）
                   if (_numBuffer.isNotEmpty)
                     Padding(
@@ -3562,7 +3656,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 此时钩子捕获本就由 setCapture(false) 关闭，这里是双保险
     if (_settingsOpen) {
       if (isDown && (action == 'esc' || action == 'back')) {
-        _handleBackPressed();
+        _handleBackPressed('native');
       }
       return;
     }
@@ -3654,7 +3748,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _verticalKey(false);
       case 'esc':
       case 'back':
-        _handleBackPressed();
+        _handleBackPressed('native');
       case 'space':
         controller.togglePlayPause();
       case 'm':
