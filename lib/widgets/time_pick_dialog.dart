@@ -63,6 +63,10 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
 
   final FocusNode _focus = FocusNode(debugLabel: 'remoteTimePicker');
 
+  /// 同键去重：两条通道都挂，只让第一个到达的执行一次
+  int _lastKeyId = 0;
+  int _lastKeyAt = 0;
+
   @override
   void initState() {
     super.initState();
@@ -97,9 +101,13 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
   /// 必须自己是栈顶弹窗才动手（上层不会再有弹窗，防御性保留）。
   bool _onHardwareKey(KeyEvent event) {
     if (!mounted) return false;
-    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return false;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final k = event.logicalKey;
+    // 与定时关闭弹窗同一套：硬件通道与焦点链双保险，同键 60ms 去重
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (k.keyId == _lastKeyId && now - _lastKeyAt < 60) return true;
+    _lastKeyId = k.keyId;
+    _lastKeyAt = now;
     // 上 = 加，下 = 减（与滚轮/数字选择器的直觉一致）。
     // 焦点在按钮行时，上下都退回分钟框——数字区里上下只循环调数值，
     // 要出到按钮只能走左右
@@ -140,10 +148,12 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
         k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.gameButtonA ||
         k == LogicalKeyboardKey.space) {
-      if (_col == 2 && _btn == 1) {
-        Navigator.pop(context);
-      } else if (event is KeyDownEvent) {
-        _confirm();
+      if (event is KeyDownEvent) {
+        if (_col == 2 && _btn == 1) {
+          Navigator.pop(context);
+        } else {
+          _confirm();
+        }
       }
       return true;
     }
@@ -218,9 +228,14 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
 
   @override
   Widget build(BuildContext context) {
-    // 注意：按键在 _onHardwareKey（HardwareKeyboard 通道）处理，这里
-    // 不再包 Focus——两层会对同一个按键各执行一次，表现为跳两格
-    return AlertDialog(
+    // 双通道保险：硬件通道 + 焦点链各挂一份，_onHardwareKey 里按
+    // 「同键 60ms」去重，所以不会出现同一键执行两次（跳两格）
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (_, e) => _onHardwareKey(e)
+          ? KeyEventResult.handled
+          : KeyEventResult.ignored,
+      child: AlertDialog(
       backgroundColor: AppColors.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
@@ -292,6 +307,7 @@ class _RemoteTimePickerDialogState extends State<_RemoteTimePickerDialog> {
             ],
           ),
         ],
+      ),
       ),
     );
   }

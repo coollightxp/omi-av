@@ -84,6 +84,11 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
   int _col = 0;
   bool _focusedOnce = false;
 
+  /// 按键去重：HardwareKeyboard 与焦点树两条通道都挂（见 _consume），
+  /// 同一颗键 60ms 内的第二次派发直接吞掉，避免"按一下走两格"
+  int _lastKeyId = 0;
+  int _lastKeyAt = 0;
+
   FocusNode _node(String id) => _nodes.putIfAbsent(id, () {
         final n = FocusNode(debugLabel: 'sleep:$id');
         // 只注册一次：焦点落到哪就把行/列记下来（鼠标点击也会同步，
@@ -102,12 +107,12 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
     // 之前挂在 Focus.onKeyEvent 上，用户实测弹窗里遥控器完全没反应——
     // 通道问题不在本弹窗的逻辑，而在按键根本没被派发进这条弹窗的
     // 焦点链。硬件键盘通道已被设置页/电台弹窗证明在这台机器上可靠。
-    HardwareKeyboard.instance.addHandler(_onHardwareKey);
+    HardwareKeyboard.instance.addHandler(_consume);
   }
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+    HardwareKeyboard.instance.removeHandler(_consume);
     for (final n in _nodes.values) {
       n.dispose();
     }
@@ -184,14 +189,22 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
     _tap[n]?.call();
   }
 
-  /// 遥控器/键盘按键（HardwareKeyboard 通道）。
-  /// 返回 true 表示本弹窗消费；必须自己是栈顶弹窗才动手——
-  /// 从这里再打开时间选择器时，按键归它，不能两层一起动。
-  bool _onHardwareKey(KeyEvent event) {
+  /// 遥控器/键盘按键：HardwareKeyboard 与焦点树两条通道都进这里。
+  ///
+  /// 用户这台机器上遥控器键有时进硬件通道、有时只走焦点链，单挂一条就
+  /// 会出现"整个卡片按不动"。两条都挂 + 60ms 同键去重，哪条先到都只
+  /// 执行一次。必须自己是栈顶弹窗才动手——从这里再打开时间选择器时，
+  /// 按键归它，不能两层一起动。
+  bool _consume(KeyEvent event) {
     if (!mounted) return false;
-    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return false;
+    // 从这里打开的时间选择器在上层：按键归它，本层不跟着动
+    if (remoteTimePickerOpen) return false;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final k = event.logicalKey;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (k.keyId == _lastKeyId && now - _lastKeyAt < 60) return true;
+    _lastKeyId = k.keyId;
+    _lastKeyAt = now;
     if (k == LogicalKeyboardKey.arrowUp) {
       _move(-1, 0);
       return true;
@@ -280,7 +293,13 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
       });
     }
 
-    return AlertDialog(
+    return Focus(
+      // 双保险：硬件通道收不到时，按键沿焦点链冒泡到这里
+      autofocus: true,
+      onKeyEvent: (_, e) => _consume(e)
+          ? KeyEventResult.handled
+          : KeyEventResult.ignored,
+      child: AlertDialog(
       backgroundColor: AppColors.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
@@ -304,13 +323,17 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
                 ),
               // 「到点自动执行下方动作」「到点做什么」都是废话（2026-11-14
               // 用户实测点名去掉）；各段之间行距也一并收紧
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
               Wrap(spacing: 6, runSpacing: 5, children: actionChips),
-              const SizedBox(height: 8),
+              // 三趟之间留出明显段落：以前标签贴着上一排 chip，看着像
+              // 同一组；用户要求「倒计时 / 23:30 那行 / 底部说明」都拉开
+              const SizedBox(height: 16),
               const _SectionLabel('倒计时'),
+              const SizedBox(height: 7),
               Wrap(spacing: 6, runSpacing: 5, children: timerChips),
-              const SizedBox(height: 8),
+              const SizedBox(height: 16),
               const _SectionLabel('固定时刻（点「设置」选几点，今天已过算明天）'),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   Text(setAt != null ? _hhmm(setAt) : '23:30',
@@ -323,17 +346,18 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
                 ],
               ),
               if (remain != null || setAt != null) ...[
-                const SizedBox(height: 6),
+                const SizedBox(height: 10),
                 _chip(3, 'cancel', '取消定时', false,
                     () => Navigator.pop(context, _SleepPick(null, _action))),
               ],
-              const SizedBox(height: 4),
+              const SizedBox(height: 14),
               const Text('上下换一行 · 左右换一项 · OK 确定 · 返回退出',
                   style:
                       TextStyle(color: AppColors.textTertiary, fontSize: 11)),
             ],
           ),
         ),
+      ),
       ),
     );
   }

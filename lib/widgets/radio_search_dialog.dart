@@ -151,10 +151,22 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   bool _onHardwareKey(KeyEvent event) =>
       _handleKey(event) == KeyEventResult.handled;
 
+  /// 一次按键的去抖窗口：部分遥控器/接收器会把一次按下连发两个
+  /// KeyDown（用户实测「按一下跳两格」）。同一颗键 60ms 内的第二个
+  /// 按下直接吞掉；人手连按最快也在 80ms 以上，不会误伤。
+  int _lastKeyId = 0;
+  int _lastKeyAt = 0;
+
   KeyEventResult _handleKey(KeyEvent event) {
     if (!mounted) return KeyEventResult.ignored;
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final k = event.logicalKey;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (k.keyId == _lastKeyId && now - _lastKeyAt < 60) {
+      return KeyEventResult.handled;
+    }
+    _lastKeyId = k.keyId;
+    _lastKeyAt = now;
 
     if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
       // 输入法正在组词时上下键归输入法（中文候选词选择）
@@ -204,8 +216,11 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
       // 方向导航，焦点横向窜到别的控件上，遥控器感觉像"乱跳"
       return KeyEventResult.handled;
     }
-    // OK：筛选行/回顶行/页签这几类"自绘焦点"自己处理；其它控件放行给
-    // 焦点树（输入框回车、列表行 OK、按钮等各管各的）
+    // OK：**所有停靠点都在这里自己执行**，不再放行给控件。
+    // 以前搜索按钮/「仅中国」/页签放给焦点树，控件激活的同时焦点还会
+    // 被 Flutter 的默认遍历带走一格（用户实测：搜索按钮按 OK 跳到地区
+    // 行、「仅中国」按 OK 跳到音乐分类），看起来就是"按哪都乱跳"。
+    // 自己处理并返回 handled，焦点停在原地，动作只发生一次。
     if (k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
@@ -222,11 +237,51 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
         _backToTop();
         return KeyEventResult.handled;
       }
-      // 我的电台页签上按 OK：进卡片里（焦点落到第一台）
-      if (_tab == 1 && _tabMineFocus.hasFocus) {
-        _focusMineList();
+      // 搜索条：输入框 / 搜索按钮 / 仅中国。焦点一律不动——
+      // 搜索是异步的，重建列表时焦点漂走就会出现"跳到筛选行"
+      if (_queryFocus.hasFocus) {
+        _search();
         return KeyEventResult.handled;
       }
+      if (_searchBtnFocus.hasFocus) {
+        if (!_loading) _search();
+        return KeyEventResult.handled;
+      }
+      if (_cnFocus.hasFocus) {
+        setState(() => _cnOnly = !_cnOnly);
+        _search();
+        return KeyEventResult.handled;
+      }
+      // 页签
+      if (_tabSearchFocus.hasFocus) {
+        _switchTab(0);
+        return KeyEventResult.handled;
+      }
+      if (_tabMineFocus.hasFocus) {
+        if (_tab == 1) {
+          _focusMineList();
+        } else {
+          _switchTab(1);
+        }
+        return KeyEventResult.handled;
+      }
+      // 结果行 / 我的电台行：按 OK 等价于点行（加入 / 试听）
+      if (_tab == 0) {
+        for (final s in _results) {
+          if (_rowNodeFor('search:${s.id}').hasFocus) {
+            _toggle(s);
+            return KeyEventResult.handled;
+          }
+        }
+      } else {
+        for (final s in RadioLibrary.items) {
+          if (_rowNodeFor('mine:${s.id}').hasFocus) {
+            _play(s);
+            return KeyEventResult.handled;
+          }
+        }
+      }
+      return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
   }
@@ -266,34 +321,29 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     _ensureVisible();
   }
 
-  /// 上下导航的停靠点（树顺序，与界面自上而下一致）。
+  /// 上下导航的停靠点（**按界面自上而下的显式顺序**，不再从焦点树里
+  /// 猜）。
   ///
-  /// 搜索框也算停靠点：遥控器/键盘要能「页签 → 搜索框 → 搜索按钮 →
-  /// 城市筛选 → 结果列表」一路走下来。输入法组词期间上下键会放行给
-  /// 候选词（见 _imeComposing），所以不会被困在框里出不来。
-  ///
-  /// 只保留最外层：行/按钮内部还会再建焦点节点，不去重会出现同一行
-  /// 停两次、顺序看起来乱蹦。
+  /// 以前用 traversalDescendants 再剔除嵌套节点：列表行内部的 InkWell /
+  /// 按钮会额外建焦点节点，剔除规则一漏就会出现「一行停两次、按一下跳
+  /// 两格」，顺序也跟眼睛看到的对不上。这里直接列出每一行，一行一个
+  /// 停靠点，上下必定只走一格；到底后 % 回到页签，绝不会被困住。
   List<FocusNode> _navStops() {
-    final all = <FocusNode>[];
-    for (final n in _rootFocus.traversalDescendants) {
-      if (!n.canRequestFocus || n.context == null) continue;
-      all.add(n);
-    }
-    final keep = <FocusNode>[];
-    for (final n in all) {
-      var p = n.parent;
-      var nested = false;
-      while (p != null) {
-        if (keep.contains(p)) {
-          nested = true;
-          break;
-        }
-        p = p.parent;
+    final stops = <FocusNode>[_tabSearchFocus, _tabMineFocus];
+    if (_tab == 0) {
+      stops.addAll([_queryFocus, _searchBtnFocus, _cnFocus, _regionRow, _tagRow]);
+      for (final s in _results) {
+        stops.add(_rowNodeFor('search:${s.id}'));
       }
-      if (!nested) keep.add(n);
+      // 长列表末尾的出口：「回到顶部 · 回搜索电台」
+      if (_results.isNotEmpty) stops.add(_topRow);
+    } else {
+      for (final s in RadioLibrary.items) {
+        stops.add(_rowNodeFor('mine:${s.id}'));
+      }
     }
-    return keep;
+    // 还没挂到树上的节点（结果刚换、列表正在重建）跳过
+    return [for (final n in stops) if (n.context != null) n];
   }
 
   /// 当前焦点在停靠点里的位置：焦点常落在子节点上（输入框内的

@@ -1191,6 +1191,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else if (!kIsWeb) {
           final radio = c.currentChannel?.isRadio ?? false;
           if (radio) {
+            // 后台播放全靠通知栏/锁屏那张卡片操作。安卓 13+ 没给
+            // POST_NOTIFICATIONS、或用户把「电台播放」渠道关掉时，
+            // 前台服务照跑但系统把通知吞了——退到后台就是「看不见、
+            // 也控不了」。先申请一次，还不行就说清楚并给去设置的入口。
+            var granted = await notifGranted();
+            if (!granted) granted = await requestNotif();
+            if (!granted && mounted) {
+              final go = await _showNotifGuide();
+              if (go == true) {
+                await openNotifSettings();
+                return;
+              }
+            }
+            if (!mounted) return;
             final ok = await moveToBackground();
             if (mounted) {
               _showOsd(ok ? '已退到后台继续播放' : '当前系统不支持后台播放',
@@ -1482,6 +1496,76 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 倒计时到 0 自动执行关机；按返回/Esc/菜单键取消。
   /// Windows 端不再用系统 shutdown 倒计时（系统会弹「几分钟后关机」提示框），
   /// 改为应用内倒计时后直接 `shutdown /s /t 0 /f`（对标 OMTV）
+  /// 通知权限没开时的引导卡片。
+  ///
+  /// 安卓 13+ 不给 POST_NOTIFICATIONS（或用户把「电台播放」渠道关掉），
+  /// 系统会把前台服务的卡片整条吞掉：服务在跑、声音也在，但通知栏与
+  /// 锁屏什么都没有。用户看到的就是「后台播着，却没法切台」。
+  /// 返回 true = 去系统设置开权限；false/null = 仍然直接退后台。
+  Future<bool?> _showNotifGuide() {
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        final double s = (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.72, 1.0);
+        return Dialog(
+          backgroundColor: const Color(0xFF12151A),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: Colors.white24),
+          ),
+          child: SizedBox(
+            width: 400 * s,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.notifications_off_outlined,
+                          color: Colors.orangeAccent, size: 22),
+                      SizedBox(width: 8),
+                      Text('通知权限没开',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700)),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    '电台退到后台后，靠通知栏/锁屏上的那张卡片来暂停、上一台、下一台。\n'
+                    '现在系统没允许本应用发通知，退到后台看不到这张卡片，也就没法切台。',
+                    style: TextStyle(
+                        color: Colors.white70, fontSize: 13, height: 1.6),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('仍然播放',
+                            style: TextStyle(color: Colors.white54)),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('去开启'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _showShutdownDialog() async {
     _shutdownFocusIndex = 0;
     _shutdownCountdown = 60;
@@ -1743,6 +1827,28 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return true;
     }
+
+    // 静音快捷键：卡片/弹层打开时也要生效。
+    // 以前 M 只在「无弹层」分支里处理，定时关闭、退出卡片、在线电台
+    // 一出来就按不动（用户实测）；这里提前处理，只避开文本输入焦点
+    // （在搜索框里打 m 不能把声音关掉）。
+    if (isDown &&
+        (k == LogicalKeyboardKey.keyM ||
+            k == LogicalKeyboardKey.audioVolumeMute)) {
+      final f = FocusManager.instance.primaryFocus;
+      final editing =
+          f?.context?.findAncestorWidgetOfExactType<EditableText>() != null;
+      if (!editing) {
+        context.read<PlayerController>().toggleMute();
+        return true;
+      }
+    }
+
+    // 定时关闭弹窗 / 自绘时间选择器：自带遥控器行导航，所有按键无条件
+    // 交给它们。以前只在 _modalRouteOpen 分支里放行，但退出卡片是页面内
+    // overlay，弹窗打开时 ModalRoute 未必判成 current → 方向键落到播放页
+    // 被当作切台/切源吞掉，用户实测「定时卡片遥控器按了没反应」
+    if (sleepTimerDialogOpen || remoteTimePickerOpen) return false;
 
     // 在线电台弹窗（可能从设置面板里打开）自带完整的焦点与按键逻辑：
     // 所有按键一律交给它，否则按返回会把底下的设置面板关掉
