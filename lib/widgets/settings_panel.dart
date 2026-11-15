@@ -3441,8 +3441,17 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 40),
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 360),
-        padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
+        // 手机上嫌大（2K 屏：150dp 在 1440px 上仍占三分之一屏宽）。
+        // 短边 <600 用 110 的码 + 240 的卡片，桌面/平板维持 216/360。
+        constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.shortestSide < 600
+                ? 210
+                : 360),
+        padding: EdgeInsets.fromLTRB(
+            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
+            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
+            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
+            18),
         decoration: BoxDecoration(
           color: const Color(0xFFF7F8FA),
           borderRadius: BorderRadius.circular(22),
@@ -3461,7 +3470,9 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
             const SizedBox(height: 18),
             // 二维码：白底圆角卡片内嵌圆角方块码，四周留白保证可识别
             Container(
-              padding: const EdgeInsets.all(14),
+              // 手机上白底留白同步收窄，整块更紧凑（2K 屏手机实测仍偏大）
+              padding: EdgeInsets.all(
+                  MediaQuery.of(context).size.shortestSide < 600 ? 10 : 14),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(16),
@@ -3476,7 +3487,8 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
               child: QrImageView(
                 data: url,
                 version: QrVersions.auto,
-                size: 216,
+                size:
+                    MediaQuery.of(context).size.shortestSide < 600 ? 96 : 216,
                 backgroundColor: Colors.white,
                 padding: EdgeInsets.zero,
                 eyeStyle: const QrEyeStyle(

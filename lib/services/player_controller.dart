@@ -262,6 +262,14 @@ class PlayerController extends ChangeNotifier {
   /// 等待期间要先记住"该回到哪个台"，超时/双击返回时用它
   Channel? _pendingRestoreChannel;
 
+  /// 最近一次真实播放的频道（不含 __dlna_cast__ 虚拟频道）。
+  ///
+  /// 连续投屏时 `_preCastChannel` 会拿不到值：第二段开始时 `_currentChannel`
+  /// 已经是上一段的 `__dlna_cast__`，按原逻辑只能记 null，于是这段播完
+  /// 「等待投屏」倒计时一结束就掉回「请选择频道」空态（用户 2.1.47 实测，
+  /// 偶发）。用它兜底，保证总有台可回。
+  Channel? _lastRealChannel;
+
   bool _awaitingChannelPick = false;
 
   /// 启动时未自动播放（设置里关了「恢复上次频道」），
@@ -1316,6 +1324,9 @@ class PlayerController extends ChangeNotifier {
         (_currentChannel?.id.startsWith('__dlna_cast__') ?? false)
             ? null
             : _currentChannel;
+    // 连播第二段起：当前频道是上一段的虚拟投屏频道，上面只能得到 null，
+    // 退回最近一次真实频道（电台/直播台），否则这段播完会掉进「请选择频道」
+    _preCastChannel ??= _lastRealChannel;
     _isCasting = true;
     // 重置卡顿看门狗
     _watchPosMs = -1;
@@ -1368,7 +1379,7 @@ class PlayerController extends ChangeNotifier {
     // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
     // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
     dlnaService.kickCastClients();
-    final restore = _preCastChannel;
+    final restore = _preCastChannel ?? _lastRealChannel;
     _preCastChannel = null;
     // 方案 3.7：投屏结束后按设置进「正在等待投屏」，给发送端连播
     // （电视剧下一集）留窗口；0=马上返回，-1=一直等
@@ -1424,7 +1435,7 @@ class PlayerController extends ChangeNotifier {
     if (!_castWaiting) return;
     _castWaiting = false;
     _castWaitRemain = 0;
-    final restore = _pendingRestoreChannel;
+    final restore = _pendingRestoreChannel ?? _lastRealChannel;
     _pendingRestoreChannel = null;
     if (restore != null) {
       await playChannel(restore);
@@ -1738,8 +1749,15 @@ class PlayerController extends ChangeNotifier {
       }
     }
     _webPageActive = false;
+    // 关键：原生侧的低级钩子一旦进入「网页前台转发」模式，所有动作键都
+    // 被它截走转给 WebView，Flutter 就再也收不到 OK/方向键（返回键例外，
+    // 钩子仍交给 App）。这里只改字段不会把转发关掉——网页崩过一次再切回
+    // 直播时，表现就是「只有返回键/右键有反应，OK 打不开频道列表」
+    // （2.1.47 实测）。必须显式把 W0 发回去。
     _webPageForeground = false;
+    WinHotkeys().setWebForward(false);
     _currentChannel = channel;
+    if (!channel.id.startsWith('__dlna_cast__')) _lastRealChannel = channel;
     _sourceIndex = 0;
     // 立刻通知界面把网页控件摘掉。这里下面要等 2.5 秒让 WebView2 销毁
     // 完成（否则和 mpv 初始化抢 COM 会崩），如果这中间不刷新界面，
@@ -2085,8 +2103,10 @@ class PlayerController extends ChangeNotifier {
         if (_currentChannel?.id != channel.id) return;
       }
       // 上一个频道（电台/直播流）刚拆完解码器就创建 WebView2，
-      // 部分机器会撞出 0xc0000005，先让系统喘口气
-      await Future<void>.delayed(const Duration(milliseconds: 600));
+      // 部分机器会撞出 0xc0000005，先让系统喘口气。
+      // 1607 + 老显卡驱动上 600ms 实测仍会崩（D3D 设备释放慢），放宽到
+      // 1000ms；这段时间界面本来就是「正在进入网页播放」的黑屏，用户无感
+      await Future<void>.delayed(const Duration(milliseconds: 1000));
       if (_currentChannel?.id != channel.id) return;
       // 网页先在后台全屏缓冲（视频位保持黑屏），起播后再推到前台
       _webPageActive = true;
@@ -3120,7 +3140,8 @@ class PlayerController extends ChangeNotifier {
           .timeout(const Duration(milliseconds: 400));
     } catch (_) {}
     try {
-      await _disposeVideoController().timeout(const Duration(seconds: 2));
+      await _disposeVideoController(detachUi: false)
+          .timeout(const Duration(seconds: 2));
     } catch (_) {}
     try {
       await audioStop().timeout(const Duration(milliseconds: 400));
@@ -3281,12 +3302,13 @@ class PlayerController extends ChangeNotifier {
 
     switch (_sleepAction) {
       case SleepAction.shutdown:
-        OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
+        OsdBus.show('定时关闭：正在关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 先发系统命令再退程序：进程先死也不影响系统照常关闭，
-        // 15 秒内还能在命令行 `shutdown /a` 撤销
+        // 应用内倒计时已经走完，到这里就直接关机。以前发 /t 15，
+        // Windows 会弹「即将注销你的登录」蓝色通知——用户明确不要
+        // 任何系统提示。先发命令再退程序：进程先死不影响关机。
         if (isDesktop) {
-          await shutdownSystem(delaySeconds: 15);
+          await shutdownSystem();
         }
         if (isDesktop) {
           await ExitGuard.quit();
@@ -5266,7 +5288,11 @@ class PlayerController extends ChangeNotifier {
   // CI 构建时由 .github/workflows/build.yml 向 windows/runner/main.cpp
   // 注入「启动保存状态 + 15 秒定时器恢复」代码，见 Patch Windows runner 步骤。
 
-  Future<void> _disposeVideoController() async {
+  /// [detachUi] 为 true 时先通知界面摘掉视频层、等合成器交完最后一帧，
+  /// 再释放原生资源（切台/切网页必需，见下方注释）。
+  /// 退出路径（dispose / shutdownForExit）传 false：界面马上要消失，
+  /// 不必再等帧，省掉这 200ms 让 mpv 尽快释放。
+  Future<void> _disposeVideoController({bool detachUi = true}) async {
     // 先尝试释放上一轮 dispose 挂起的孤儿实例
     _retryOrphanDispose();
     final c = _videoController;
@@ -5278,6 +5304,24 @@ class PlayerController extends ChangeNotifier {
         try {
           c.removeListener(closure);
         } catch (_) {}
+      }
+      // ---- 顺序是关键（0xc0000005 闪退的根因）---------------------------
+      // 以前这里直接 release，界面到 600ms 后（_webPageActive=true）才
+      // 重建、把视频层换掉。这 600ms 里 VideoPlayerWidget 手里还攥着
+      // 旧控制器，每帧继续贴**已释放的纹理**——Windows/MPV 上就是
+      // 「Exception Processing Message 0xc0000005」系统错误框，点确定
+      // 进程直接死（用户 2.1.47 实测：普通直播切网页直播）。
+      // 正确顺序：置空 → 通知界面摘掉视频层 → 等合成器交完最后一帧
+      // → 再释放原生渲染资源（mpv 的 D3D 设备）。
+      if (detachUi) {
+        notifyListeners();
+        // 等两帧左右：endOfFrame 在没有帧调度时（最小化/锁屏）可能不返回，
+        // 加超时兜底，绝不能把切台流程卡死
+        try {
+          await WidgetsBinding.instance.endOfFrame
+              .timeout(const Duration(milliseconds: 120));
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(milliseconds: 90));
       }
       // 先摘监听再释放：media_kit 的 release 串行 cancel 订阅并 dispose
       // player，自身幂等；超时仅意味着底层仍在释放，绝不重复调用
@@ -5393,7 +5437,7 @@ class PlayerController extends ChangeNotifier {
     if (_isRecording && _videoController != null) {
       unawaited(_videoController!.stopRecord());
     }
-    _disposeVideoController();
+    _disposeVideoController(detachUi: false);
     WakelockPlus.disable();
     dlnaService.stop();
     remoteAdminService.stop();
