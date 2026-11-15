@@ -1526,6 +1526,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 退出确认对话框的遥控器按键处理：
   /// ←/→ 在「取消」「退出」间移动高亮，OK 确认当前选中项，返回/Esc 直接取消
+  /// 「返回/退出」类按键统一识别：Esc（键盘）、遥控器返回（安卓
+  /// KEYCODE_BACK 上报为 goBack）、浏览器返回键 browserBack。
+  /// 以前各弹层只认 Esc：安卓遥控器按返回落不到任何分支，被焦点系统
+  /// 拿去遍历按钮——表现为「返回没反应、焦点跳到第一个按钮上」
+  /// （2.1.40 实测修复，2.3.4 漏带）
+  bool _isBackKey(LogicalKeyboardKey k) =>
+      k == LogicalKeyboardKey.escape ||
+      k == LogicalKeyboardKey.goBack ||
+      k == LogicalKeyboardKey.browserBack;
+
   bool _handleExitDialogKey(LogicalKeyboardKey k, bool isDown, bool isUp) {
     final isOk = k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
@@ -1566,7 +1576,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return true;
     }
-    if (k == LogicalKeyboardKey.escape) {
+    if (_isBackKey(k)) {
       if (isDown && _exitDialogOpen) {
         _exitDialogOpen = false;
         Navigator.of(context).pop<String?>(null);
@@ -1833,7 +1843,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
       return true;
     }
-    if (k == LogicalKeyboardKey.contextMenu || k == LogicalKeyboardKey.escape) {
+    if (k == LogicalKeyboardKey.contextMenu || _isBackKey(k)) {
       if (isDown && _shutdownDialogOpen) _confirmShutdown(false);
       return true;
     }
@@ -2354,8 +2364,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       // 下一级卡片，返回同样只关它那一层
       if (settingsEditDialogOpen || settingsChildOpen.value) return false;
       if (isDown &&
-          (k == LogicalKeyboardKey.escape ||
-              k == LogicalKeyboardKey.contextMenu)) {
+          (k == LogicalKeyboardKey.contextMenu || _isBackKey(k))) {
         _handleBackPressed();
         return true;
       }
@@ -2400,7 +2409,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true;
     }
     // Esc / 遥控器返回：层级关闭（与 Android Back 同一入口）
-    if (k == LogicalKeyboardKey.escape) {
+    if (_isBackKey(k)) {
       if (isDown) _handleBackPressed();
       return true;
     }
@@ -2980,14 +2989,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
   Widget _buildChannelOsd(PlayerController controller) {
-    // 换台防抖期间显示预览频道（尚未真正切流）：
-    // 序号取预览频道；节目名仅真实播放中显示（预览时拿不到且会误导）
+    // 换台防抖期间显示预览频道（尚未真正切流）：序号、节目名都取
+    // 预览台的——用户要求切台预览时就能看到目标台此刻在播什么，
+    // 决定留还是不留。currentProgramTitleFor 是按频道查询的现成接口
+    // （左侧列表「正在播」小字同源），预览态直接可用
     final ch = _osdPreview ?? controller.currentChannel;
     final number = _osdPreview != null
         ? controller.channelNumberOf(_osdPreview)
         : controller.currentChannelNumber;
-    final program =
-        _osdPreview == null ? controller.currentProgram?.title : null;
+    final program = ch == null ? '' : controller.currentProgramTitleFor(ch);
     final showOsd = (_osdVisible && ch != null) || _numBuffer.isNotEmpty;
     final isPhone = defaultTargetPlatform == TargetPlatform.android &&
         MediaQuery.of(context).size.shortestSide < 600;
@@ -3041,7 +3051,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                               fontWeight: FontWeight.bold,
                             ),
                           ),
-                          if (program != null && program.isNotEmpty)
+                          if (program.isNotEmpty)
                             Padding(
                               padding: EdgeInsets.only(top: isPhone ? 3 : 5),
                               child: Text(
@@ -3052,22 +3062,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                 ),
                               ),
                             ),
-                          // 预览状态说明：让用户清楚「还没切，停顿够才切」
-                          if (_osdPreview != null)
-                            Padding(
-                              padding: EdgeInsets.only(top: isPhone ? 3 : 5),
-                              child: Text(
-                                '停留 ${(controller.settings.tuneDwellMs.clamp(1200, 5000) / 1000).toStringAsFixed(1)} 秒后切换 · 按 OK 立即切换',
-                                style: TextStyle(
-                                  color: Colors.blueAccent,
-                                  fontSize: isPhone ? 11 : 13,
-                                ),
-                              ),
-                            ),
                         ],
                       ),
                     ],
                   ),
+                  // 预览状态说明：独占一行、与频道号左侧对齐（比 ID/台名
+                  // 整体低一行，2026-11-14 用户定稿），让用户清楚
+                  // 「还没切，停顿够才切」
+                  if (_osdPreview != null)
+                    Padding(
+                      padding: EdgeInsets.only(top: isPhone ? 3 : 5),
+                      child: Text(
+                        '停留 ${(controller.settings.tuneDwellMs.clamp(1200, 5000) / 1000).toStringAsFixed(1)} 秒后切换 · 按 OK 立即切换',
+                        style: TextStyle(
+                          color: Colors.blueAccent,
+                          fontSize: isPhone ? 11 : 13,
+                        ),
+                      ),
+                    ),
                   // 数字选台输入提示：已输入数字 + 部分匹配的频道名（灰字）
                   if (_numBuffer.isNotEmpty)
                     Padding(

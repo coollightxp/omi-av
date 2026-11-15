@@ -3283,8 +3283,8 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.shutdown:
         OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 先发系统命令再退程序：进程先死也不影响系统照常关闭，
-        // 15 秒内还能在命令行 `shutdown /a` 撤销
+        // 先发系统命令再退程序：进程先死也不影响系统照常关闭。
+        // shutdown /p 立即关机、无系统倒计时通知（2.1.46 定稿）
         if (isDesktop) {
           await shutdownSystem(delaySeconds: 15);
         }
