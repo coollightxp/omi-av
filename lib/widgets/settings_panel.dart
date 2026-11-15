@@ -3476,8 +3476,13 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
               child: QrImageView(
                 data: url,
                 version: QrVersions.auto,
-                // 手机（短边<600）二维码缩到 150，桌面维持 216（2.1.46 定稿）
-                size: MediaQuery.of(context).size.shortestSide < 600 ? 150 : 216,
+                // 二维码分档：手机（短边<600）150、电视盒等中屏
+                // （<760，实测 216 在电视上仍显过大）170、桌面 216
+                size: MediaQuery.of(context).size.shortestSide < 600
+                    ? 150
+                    : MediaQuery.of(context).size.shortestSide < 760
+                        ? 170
+                        : 216,
                 backgroundColor: Colors.white,
                 padding: EdgeInsets.zero,
                 eyeStyle: const QrEyeStyle(

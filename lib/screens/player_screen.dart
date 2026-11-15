@@ -1032,6 +1032,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
   Future<void> _handleBackPressed() async {
+    // 单一闸门：同一次按下的第二份投递直接丢弃（否则上一份刚把卡片
+    // 关掉、这一份又把退出卡重新弹出来，表现=「返回键像没反应」）
+    if (!_allowLayerClose('back')) return;
     // 数字选台输入中：返回键 = 取消输入（清缓存并隐藏 OSD），
     // 不落入退出确认等后续分支
     if (_numBuffer.isNotEmpty) {
@@ -1526,6 +1529,30 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 退出确认对话框的遥控器按键处理：
   /// ←/→ 在「取消」「退出」间移动高亮，OK 确认当前选中项，返回/Esc 直接取消
+  /// 一次物理按下的多份投递去重闸门（2.1.42 #3）：按键到本页有三条
+  /// 独立通道（Flutter 键盘事件、安卓系统返回 PopScope、Windows 钩子
+  /// 转发），卡片状态又是「路由 + 标志位」两套并存——第一份投递关掉
+  /// 卡片、第二份落到下一层，表现就是「返回关不掉/卡片开了又开、
+  /// 焦点跳回第一个按钮」。260ms 内只允许关一层，其余丢弃并记日志。
+  DateTime _lastLayerCloseAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastLayerCloseSrc = '';
+
+  bool _allowLayerClose(String src) {
+    final now = DateTime.now();
+    final dt = now.difference(_lastLayerCloseAt).inMilliseconds;
+    if (dt < 260) {
+      WebDiag.log('back_dup src=$src prev=$_lastLayerCloseSrc dt=${dt}ms '
+          'time=$_timePickOpen sleep=$_sleepCardOpen exit=$_exitDialogOpen '
+          'modal=$_modalRouteOpen');
+      return false;
+    }
+    _lastLayerCloseAt = now;
+    _lastLayerCloseSrc = src;
+    WebDiag.log('back_close src=$src time=$_timePickOpen sleep=$_sleepCardOpen '
+        'exit=$_exitDialogOpen modal=$_modalRouteOpen');
+    return true;
+  }
+
   /// 「返回/退出」类按键统一识别：Esc（键盘）、遥控器返回（安卓
   /// KEYCODE_BACK 上报为 goBack）、浏览器返回键 browserBack。
   /// 以前各弹层只认 Esc：安卓遥控器按返回落不到任何分支，被焦点系统
@@ -1570,14 +1597,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true; // 两按钮水平排列，上下无意义
     }
     if (k == LogicalKeyboardKey.contextMenu) {
-      if (isDown && _exitDialogOpen) {
+      if (isDown && _exitDialogOpen && _allowLayerClose('exit')) {
         _exitDialogOpen = false;
         Navigator.of(context).pop<String?>(null);
       }
       return true;
     }
     if (_isBackKey(k)) {
-      if (isDown && _exitDialogOpen) {
+      if (isDown && _exitDialogOpen && _allowLayerClose('exit')) {
         _exitDialogOpen = false;
         Navigator.of(context).pop<String?>(null);
       }
@@ -1853,6 +1880,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 确认或取消关机：关卡片并记下结果，调用方据此执行关机
   void _confirmShutdown(bool confirm) {
     if (!_shutdownDialogOpen) return;
+    // 同一次按下的第二份投递会把路由再 pop 一次（连带播放页黑屏）
+    if (!_allowLayerClose('shutdown')) return;
     _shutdownDialogOpen = false;
     _shutdownTimer?.cancel();
     _shutdownTimer = null;
@@ -2118,6 +2147,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'back':
       case 'esc':
       case 'menu':
+        if (!_allowLayerClose('sleep')) return true;
         _popSleepCard(null);
         return true;
       default:
@@ -2203,21 +2233,28 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _sleepRefresh?.call(() {});
         return true;
       case 'left':
+        // 左键：确定 -> 取消 -> 回到分钟列（用户定稿：一条道往回走）
         if (_tpCol == 2) {
-          _tpBtn = 0;
+          if (_tpBtn == 0) {
+            _tpBtn = 1;
+          } else {
+            _tpCol = 1;
+          }
         } else if (_tpCol == 1) {
           _tpCol = 0;
         }
         _sleepRefresh?.call(() {});
         return true;
       case 'right':
+        // 右键：时 -> 分 -> 取消 -> 确定（用户定稿：分钟往右先到
+        // 「取消」、再往右才到「确定」，避免一憋右直接误触确定）
         if (_tpCol == 0) {
           _tpCol = 1;
         } else if (_tpCol == 1) {
-          _tpCol = 2; // 分钟再往右 = 跳出数字区，落到「确定」
-          _tpBtn = 0;
+          _tpCol = 2;
+          _tpBtn = 1; // 先到「取消」
         } else {
-          _tpBtn = 1;
+          _tpBtn = 0; // 再往右到「确定」
         }
         _sleepRefresh?.call(() {});
         return true;
@@ -2231,6 +2268,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'back':
       case 'esc':
       case 'menu':
+        if (!_allowLayerClose('timepick')) return true;
         _popTimePicker(null); // 只切回定时卡片，不再连底层一起关
         return true;
       default:

@@ -162,7 +162,7 @@ Widget buildRemoteTimePickerCard({
         ),
         const SizedBox(height: 10),
         const Text(
-          '上下调数值 · 左右切时/分 · 分钟上再按右到「确定」',
+          '上下调数值 · 左右切时/分 · 分钟上再按右先「取消」再「确定」',
           style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
         ),
         const SizedBox(height: 14),
