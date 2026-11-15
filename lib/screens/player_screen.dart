@@ -853,14 +853,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           left: 0,
                           top: 0,
                           bottom: 0,
-                          width: 20,
+                          width: 32,
                           child: MouseRegion(
                             onEnter: (_) {
+                              WebDiag.log('edge_hover', 'left enter');
                               if (_leftDrawerOpen) {
                                 _cancelDrawerHide();
                               } else {
                                 _openDrawer(left: true);
                               }
+                            },
+                            // 指针贴着左缘移动时持续保活：自动隐藏计时
+                            // 只要指针还在热区内就不启动，避免抽屉刚弹出
+                            // 就被收走（体感=左边缘"没反应"）
+                            onHover: (_) {
+                              if (_leftDrawerOpen) _cancelDrawerHide();
                             },
                             // 必须给 child：无 child 的 MouseRegion 命中测试
                             // 结果依平台视图存在与否而变，网页频道下
@@ -874,14 +881,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           right: 0,
                           top: 0,
                           bottom: 0,
-                          width: 20,
+                          width: 32,
                           child: MouseRegion(
                             onEnter: (_) {
+                              WebDiag.log('edge_hover', 'right enter');
                               if (_rightEpgOpen) {
                                 _cancelDrawerHide();
                               } else {
                                 _openDrawer(left: false);
                               }
+                            },
+                            onHover: (_) {
+                              if (_rightEpgOpen) _cancelDrawerHide();
                             },
                             child: const SizedBox.expand(),
                           ),
@@ -3799,6 +3810,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 超过 1.5 秒的残留视为抬起丢失，直接接管。
   final Map<String, DateTime> _nativeHeldAt = <String, DateTime>{};
 
+  /// 原始 VK 兜底：网页态下钩子把映射表认不出的键以 vk:XX 上报，
+  /// 这里按候选表合成 ok/back（down/up 成对，保持按下-抬起配对）
+  final Map<int, String> _vkSynth = <int, String>{};
+
   /// 原生钩子转发的动作键（网页持有焦点时 HardwareKeyboard 收不到，
   /// 由 WH_KEYBOARD_LL 经 omi/win_hotkeys 通道送达）。
   /// isDown=true 按下边沿、false 抬起边沿，与 Flutter 路径共用
@@ -3809,6 +3824,33 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // F9 老板键：缩托盘 + 静音，再按一次恢复。
     // 排在锁定/卡片判断之前——老板来了没时间先解锁或退出面板，
     // 这个键必须任何时候都好使（设置里可关）。
+    // 钩子上报的未识别键值（网页态）：先记日志（诊断遥控器真实键值），
+    // 再按候选表合成动作。遥控器 OK 常见 VK_SELECT/媒体播放键/手柄A，
+    // 返回常见退格/浏览器前进误映射——各厂 HID 不统一，映射表永远
+    // 追不全，这里兜底。
+    if (action.startsWith('vk:')) {
+      final code = int.tryParse(action.substring(3), radix: 16) ?? 0;
+      if (isDown) {
+        WebDiag.log(
+            'vk_raw', '0x${code.toRadixString(16).padLeft(2, '0')}');
+        const okCodes = {0x29, 0xB3, 0xFA, 0xC3};
+        const backCodes = {0x08, 0xA6, 0xA7};
+        String? synth;
+        if (okCodes.contains(code)) {
+          synth = 'ok';
+        } else if (backCodes.contains(code)) {
+          synth = 'back';
+        }
+        if (synth != null) {
+          _vkSynth[code] = synth;
+          _onNativeAction(synth, true);
+        }
+      } else {
+        final synth = _vkSynth.remove(code);
+        if (synth != null) _onNativeAction(synth, false);
+      }
+      return;
+    }
     if (action == 'fish') {
       if (isDown) {
         final ctl = context.read<PlayerController>();
