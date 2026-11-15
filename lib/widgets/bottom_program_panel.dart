@@ -148,8 +148,16 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       left: hPad,
       right: hPad,
       bottom: widget.isVisible ? (screenW > 900 ? 16 : 8) : -320,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
+      child: IgnorePointer(
+        ignoring: !widget.isVisible,
+        // 永久退出焦点树：底部面板交互全由 PlayerScreen 按 _kbId 分发，
+        // 从不依赖键盘焦点。留在焦点树里的后果是方向键被 FocusManager
+        // 先吃掉、把焦点挪到「线路 n/m」标签上，一按 OK 就弹线路/分辨率
+        // 菜单（安卓实测：切台时突然冒出「线路 1/3 1080P」）
+        child: ExcludeFocus(
+          excluding: true,
+          child: MouseRegion(
+          onEnter: (_) => widget.onHoverEnter?.call(),
         onExit: (_) => widget.onHoverExit?.call(),
         onHover: (_) => widget.onHoverMove?.call(),
         child: AnimatedOpacity(
@@ -207,6 +215,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                     ),
                   ),
                 ),
+              ),
+            ),
               ),
             ),
           ),

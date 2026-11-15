@@ -67,6 +67,9 @@ class SourceStepper extends StatelessWidget {
         // 中央标签：可点击弹出线路菜单
         InkWell(
             borderRadius: BorderRadius.circular(8),
+            // 不参与焦点遍历：遥控器焦点一旦落在「线路 n/m」上，
+            // 按 OK 就会弹出线路/分辨率菜单（切台时误弹的来源之一）
+            canRequestFocus: false,
             onTap: (count > 1 && onSelect != null)
                 ? () => _showMenu(context, d, t)
                 : null,

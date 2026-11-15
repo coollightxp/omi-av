@@ -412,11 +412,12 @@ class _SettingsPanelState extends State<SettingsPanel>
     // ② OK 被设置里「立即更新节目单」吃掉，弹「节目单已是最新」。
     // 光判 isOpen 不接按键不够——焦点留在里面时，激活走的是焦点树，
     // 不经过按键分发。
-    return ExcludeFocus(
-      excluding: !widget.isOpen,
-      child: IgnorePointer(
-        ignoring: !widget.isOpen,
-        child: AnimatedPositioned(
+    //
+    // 注意包装顺序：AnimatedPositioned 必须是 Stack 的**直接子级**
+    // （定位靠 Stack 的 parent data），ExcludeFocus/IgnorePointer 只能
+    // 套在它里面——v2.1.43 把它们包在了外面，定位失效，滑下去的面板
+    // 露在屏幕上成了一层灰罩（2.1.43 实测）。
+    return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
       bottom: widget.isOpen ? 0 : -MediaQuery.of(context).size.height,
@@ -427,7 +428,12 @@ class _SettingsPanelState extends State<SettingsPanel>
         // 上面压了下一级卡片（编辑/确认/诊断/扫码…）就先淡出，
         // 屏幕上只亮一张卡片；关掉下一级自动淡回来
         opacity: widget.isOpen && !settingsChildOpen.value ? 1.0 : 0.0,
-        child: ScaledPanel(
+        // 关闭时整棵子树退出焦点树 + 不响应指针（详见 build 开头注释）
+        child: IgnorePointer(
+          ignoring: !widget.isOpen,
+          child: ExcludeFocus(
+            excluding: !widget.isOpen,
+            child: ScaledPanel(
           alignment: Alignment.bottomCenter,
           scale: panelScaleOf(context) * windowFitScaleOf(context),
           // 限宽居中：设置面板不再通栏铺满，宽屏下保持 760 逻辑像素以内
@@ -572,7 +578,7 @@ class _SettingsPanelState extends State<SettingsPanel>
             ),
           ),
         ),
-      ),
+          ),
         ),
       ),
     );

@@ -244,8 +244,15 @@ class RightEpgPanelState extends State<RightEpgPanel> {
       top: 0,
       bottom: 0,
       width: drawerW,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
+        // 面板常驻挂载、关闭只是滑出屏幕：留在焦点树里的话，方向键会先
+        // 被 FocusManager 用来移动焦点（这一步在 _onGlobalKeyEvent 之前），
+        // 焦点落到看不见的按钮上，OK 一按就误触发
+        child: ExcludeFocus(
+          excluding: !widget.isOpen,
+          child: MouseRegion(
+            onEnter: (_) => widget.onHoverEnter?.call(),
         onExit: (_) => widget.onHoverExit?.call(),
         onHover: (_) => widget.onHoverMove?.call(),
         child: AnimatedOpacity(
@@ -278,6 +285,8 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                     ],
                   ),
                 ),
+              ),
+            ),
               ),
             ),
           ),

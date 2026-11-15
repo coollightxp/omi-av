@@ -413,6 +413,10 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             _okLongFired = false;
             _okLongTimer?.cancel();
             _okLongTimer = Timer(const Duration(milliseconds: 800), () {
+              // 蓝牙遥控器的抬起事件可能迟到甚至丢失：计时器到点时抽屉
+              // 可能已经因别的原因关掉，绝不能在抽屉不可见时还偷偷收藏
+              // （用户实测：点一下 OK 也收藏了）
+              if (!widget.isOpen || !mounted) return;
               _okLongFired = true;
               final idx = _kbChannelIndex.clamp(0, channels.length - 1);
               _toggleFavorite(channels[idx]);
@@ -566,8 +570,15 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       top: 0,
       bottom: 0,
       width: drawerW,
-      child: MouseRegion(
-        onEnter: (_) => widget.onHoverEnter?.call(),
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
+        // 面板常驻挂载、关闭只是滑出屏幕：留在焦点树里的话，方向键会先
+        // 被 FocusManager 用来移动焦点（这一步在 _onGlobalKeyEvent 之前），
+        // 焦点落到看不见的按钮上，OK 一按就误触发
+        child: ExcludeFocus(
+          excluding: !widget.isOpen,
+          child: MouseRegion(
+            onEnter: (_) => widget.onHoverEnter?.call(),
         onExit: (_) => widget.onHoverExit?.call(),
         onHover: (_) => widget.onHoverMove?.call(),
         child: AnimatedOpacity(
@@ -598,6 +609,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                     ],
                   ),
                 ),
+              ),
+            ),
               ),
             ),
           ),
