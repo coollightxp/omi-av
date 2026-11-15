@@ -115,6 +115,8 @@ class PlayerController extends ChangeNotifier {
   PlayerState _state = PlayerState.idle;
   Channel? _currentChannel;
   double _volume = 0.8;
+  /// App 内上次调过的音量（启动恢复用，见 [_kLastVolume]）
+  double? _lastVolume;
   double _brightness = 0.8;
   List<ChannelCategory> _categories = [];
 
@@ -1538,7 +1540,10 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 初始化系统音量和亮度
+  /// 初始化系统音量和亮度。
+  /// 播放器音量优先级：**App 内上次调过的音量**（记住用户调整，侧滑/
+  /// 面板/遥控调的都算）> 系统当前音量 > 默认音量。以前只读系统音量，
+  /// 用户调大的增益没有落点，重启就回旧值（安卓电台实测反馈）。
   Future<void> _initSystemValues() async {
     try {
       _brightness = await ScreenBrightness.instance.application;
@@ -1549,17 +1554,28 @@ class PlayerController extends ChangeNotifier {
       final vol = await VolumeController.instance.getVolume();
       if (vol <= 0.01) {
         // 系统音量停在 0：多半是上次静音/摸鱼异常退出没还原。
-        // 不写回去用户会以为"播放器坏了"，这里一次性修好并提示
-        _volume = _settings.defaultVolume;
+        // 不写回去用户会以为"播放器坏了"，这里一次性修好并提示。
+        // 系统音量是总闸（安卓上实际响度 = 系统音量 × 播放器增益），
+        // 为 0 时增益调多大都没声，必须还原
+        final target = (_lastVolume ?? _settings.defaultVolume)
+            .clamp(0.05, 1.0);
         try {
-          await VolumeController.instance.setVolume(_volume);
+          await VolumeController.instance.setVolume(target);
         } catch (_) {}
         OsdBus.show('检测到系统音量被静音，已恢复', icon: Icons.volume_up);
-      } else {
-        _volume = vol;
       }
-    } catch (_) {
-      _volume = _settings.defaultVolume;
+    } catch (_) {}
+    final last = _lastVolume;
+    if (last != null) {
+      _volume = last.clamp(0.0, 1.0);
+    } else {
+      // 第一次用（还没调过）：跟随系统当前音量，读不到退默认值
+      try {
+        final vol = await VolumeController.instance.getVolume();
+        _volume = vol > 0.01 ? vol : _settings.defaultVolume;
+      } catch (_) {
+        _volume = _settings.defaultVolume;
+      }
     }
     notifyListeners();
   }
@@ -3459,6 +3475,9 @@ class PlayerController extends ChangeNotifier {
         await _videoController?.setVolume(_volume);
       } catch (_) {}
     }
+    // 记住用户调的音量（走既有写盘去抖，连滑只落一次盘）；
+    // 静音值不记——落盘处有 >0.01 门槛，这里避免无谓的调度
+    if (_volume > 0.01) _scheduleSaveSettings();
     notifyListeners();
   }
 
@@ -3850,6 +3869,10 @@ class PlayerController extends ChangeNotifier {
   static const _kAlwaysOnTop = 'settings_always_on_top';
   static const _kDlnaEnabled = 'settings_dlna_enabled';
   static const _kDefaultVolume = 'settings_default_volume';
+  /// App 内最近一次调过的播放器音量（非静音值才写）。
+  /// 以前启动只读系统音量，用户侧滑调大的增益没有落点，重启就回旧值
+  /// （安卓电台实测反馈：调大→退出→重进又变小）。
+  static const _kLastVolume = 'settings_last_volume';
   static const _kDefaultBrightness = 'settings_default_brightness';
   static const _kSourceTimeout = 'settings_source_timeout_seconds';
   static const _kBufferSeconds = 'settings_buffer_seconds';
@@ -3935,6 +3958,8 @@ class PlayerController extends ChangeNotifier {
       }
       // 定时关闭跨启动续上（过期则直接清掉）
       _restoreSleepTimer();
+      // App 内上次音量（启动恢复用）
+      _lastVolume = p.getDouble(_kLastVolume);
     } catch (_) {}
   }
 
@@ -4020,6 +4045,8 @@ class PlayerController extends ChangeNotifier {
       await putBool(_kAlwaysOnTop, _settings.alwaysOnTop);
       await putBool(_kDlnaEnabled, _settings.dlnaEnabled);
       await putDouble(_kDefaultVolume, _settings.defaultVolume);
+      // 播放器音量：只在非静音值时记（静音是临时态，不该被当成"上次音量"）
+      if (_volume > 0.01) await putDouble(_kLastVolume, _volume);
       await putDouble(_kDefaultBrightness, _settings.defaultBrightness);
       await putInt(_kSourceTimeout, _settings.sourceTimeoutSeconds);
       await putInt(_kBufferSeconds, _settings.bufferSeconds);
