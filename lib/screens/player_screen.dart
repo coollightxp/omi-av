@@ -444,7 +444,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 收不到键盘消息）：d0-d9 数字选台，fullscreen 切换全屏，
   /// back = 网页内鼠标右键（右键菜单已屏蔽，改为与返回键同效）
   void _onWebKey(String key) {
-    if (_settingsOpen) return;
+    WebDiag.log('web_key', key);
+    // 设置开着时数字键仍然丢弃（避免打字/误切台），但返回类键必须放行：
+    // 网页态下 WebView2 抓着键盘焦点，JS 桥是返回键唯一能到达 Dart 的
+    // 路径之一；以前这里一刀切 return，设置里返回键彻底失灵
+    // （2026-11-15 实测：网页播放状态进设置后，遥控器退不出去）。
+    if (_settingsOpen) {
+      if (key == 'back' || key == 'exitfullscreen') {
+        _handleBackPressed();
+      }
+      return;
+    }
     if (key.startsWith('d')) {
       final n = int.tryParse(key.substring(1));
       if (n != null) _onNumberKey(n);
@@ -453,7 +463,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     } else if (key == 'fullscreen') {
       context.read<PlayerController>().toggleFullscreen();
     } else if (key == 'exitfullscreen') {
-      context.read<PlayerController>().exitFullscreenIfNeeded();
+      // 非全屏时退全屏是空操作——把它当返回键用，否则网页态下
+      // Esc（页面转发为 exitfullscreen）按了没任何反应
+      final c = context.read<PlayerController>();
+      if (c.isFullscreen) {
+        c.exitFullscreenIfNeeded();
+      } else {
+        _handleBackPressed();
+      }
     }
   }
 
@@ -845,6 +862,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                 _openDrawer(left: true);
                               }
                             },
+                            // 必须给 child：无 child 的 MouseRegion 命中测试
+                            // 结果依平台视图存在与否而变，网页频道下
+                            // WebView 平台视图会把鼠标事件整块吃掉，
+                            // 左边缘热区失效（2026-11-15 实测）
+                            child: const SizedBox.expand(),
                           ),
                         ),
                         // 右边缘
@@ -861,6 +883,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                 _openDrawer(left: false);
                               }
                             },
+                            child: const SizedBox.expand(),
                           ),
                         ),
                         // 底部边缘
@@ -872,6 +895,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           child: MouseRegion(
                             onEnter: (_) => _showBottomPanel(),
                             onExit: (_) => _scheduleBottomHide(),
+                            child: const SizedBox.expand(),
                           ),
                         ),
                       ],
@@ -4694,7 +4718,14 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       fire('omKey', 'fullscreen');
       e.preventDefault();
     } else if (k === 'Escape') {
-      fire('omKey', 'exitfullscreen');
+      // 非全屏时 Esc 转发为返回键：网页态下 WebView2 抓着键盘焦点，
+      // 这是遥控器返回键唯一能进 Dart 的路径（原来只发 exitfullscreen，
+      // 非全屏时 Dart 侧是空操作，按了没反应）
+      var fs = false;
+      try {
+        fs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      } catch (e) {}
+      fire('omKey', fs ? 'exitfullscreen' : 'back');
     }
   }
   function hookDoc(d){
