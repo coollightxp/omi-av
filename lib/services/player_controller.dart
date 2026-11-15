@@ -1025,7 +1025,8 @@ class PlayerController extends ChangeNotifier {
         // 播放器页
         'preferredQuality': s.preferredQuality.name,
         'playEngine': s.playEngine,
-        'audioPreset': s.audioPreset,
+        // audioPreset 已随「声音实验室」下架：选音效走播放页底部弹窗，
+        // 网页端没有引擎可用性上下文，不再暴露
         'spectrumTexture': s.spectrumTexture,
         'radioMeter': s.radioMeter,
         'gestureSensitivity': s.gestureSensitivity,
@@ -1141,13 +1142,7 @@ class PlayerController extends ChangeNotifier {
           engine != cur.playEngine) {
         await setPlayEngine(engine);
       }
-      // 声音实验室：只认内置预设，'custom' 的自定义增益留在设备上调
-      final preset = rs('audioPreset');
-      if (preset != null &&
-          preset != cur.audioPreset &&
-          (preset.isEmpty || kAudioPresets.containsKey(preset))) {
-        await setAudioPreset(preset);
-      }
+      // （audioPreset 已下架：旧版网页缓存保存回的该键在此被忽略）
       final spectrum = rb('spectrumTexture');
       if (spectrum != null && spectrum != cur.spectrumTexture) {
         await setSpectrumTexture(spectrum);

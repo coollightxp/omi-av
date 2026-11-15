@@ -897,8 +897,8 @@ function renderPlayer(){
     s.preferredQuality||'auto');
   html+=choiceCard('playEngine','播放内核','换台生效。MDK 画面最稳、叠面板不闪黑；MPV 滤镜/录制/电平最全',
     [['mpv','MPV'],['mdk','MDK']], s.playEngine||'mdk');
-  html+=choiceCard('audioPreset','声音实验室','仅内置播放器生效，网页频道不支持',
-    [['','标准'],['voice','人声'],['bass','低音'],['night','夜间']], s.audioPreset||'');
+  // 声音实验室（audioPreset）已从设置面板移除：选音效统一走播放页底部
+  // 弹窗、且按引擎可用性置灰，网页端没有引擎上下文，不再提供该入口
   html+=switchCard('autoPlayNext','自动播放下一频道','当前节目结束后自动切台');
   html+=switchCard('resumeLastChannel','启动时恢复上次频道','关闭后启动停在「请选择频道」，不发任何网络请求');
   html+=switchCard('spectrumTexture','电台真波形纹理（实验）','让 mpv 直接输出波形画面，个别流可能黑屏；换台生效');
@@ -921,7 +921,7 @@ function renderPlayer(){
     html+=rangeCard('uiScale','界面缩放比例','电视上字太小看不全就调大',0.8,2.5,0.05,
       (typeof s.uiScale==='number'?s.uiScale:1),2,'x');
   }
-  html+='<div class="set-hint">修改即时生效并自动保存。换台跳过关键词、声音均衡器细调等请在设备上打开设置面板。</div>';
+  html+='<div class="set-hint">修改即时生效并自动保存；设备上改的设置这里几秒内自动刷新。换台跳过关键词、声音均衡器细调等请在设备上打开设置面板。</div>';
   el('list').innerHTML=html;
 }
 
@@ -952,7 +952,7 @@ function renderSystem(){
     [[0,'立即'],[60,'1 分'],[300,'5 分'],[600,'10 分'],[-1,'一直等']], s.castEndWaitSeconds||0);
   html+='<div class="group-title">手机管理</div>';
   html+=switchCard('remoteAdminEnabled','扫码管理开关','关掉后这个网页会立即断开；一般保持开启');
-  html+='<div class="set-hint">导出网页诊断日志、换台跳过关键词等只能在设备上操作。</div>';
+  html+='<div class="set-hint">与设备上的设置面板双向同步（几秒内自动刷新）。导出网页诊断日志、换台跳过关键词等只能在设备上操作。</div>';
   el('list').innerHTML=html;
 }
 
@@ -1052,6 +1052,19 @@ function copyItem(id){
 var toastTimer;
 function toast(msg){var t=el('toast');t.textContent=msg;t.style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.style.display='none'},1800)}
 load();
+// 设置双向同步：设备上改了设置，网页端 8 秒内自动跟上。
+// 只在「播放/系统」页签轮询；正在操作输入/滑杆时不打扰；
+// 对比 settings 段，有变化才重画，避免滚动位置被打断
+setInterval(function(){
+  if(tab!=='play'&&tab!=='set')return;
+  var a=document.activeElement;
+  if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'))return;
+  fetch('/api/snapshot').then(function(r){return r.json()}).then(function(d){
+    if(!state||JSON.stringify(state.settings)!==JSON.stringify(d.settings)){
+      state=d;render();
+    }
+  }).catch(function(){});
+},8000);
 </script>
 </body>
 </html>
