@@ -4148,6 +4148,9 @@ class PlayerController extends ChangeNotifier {
     if (!kIsWindowsDesktop || _fishActive) return;
     await TrayService.ensure();
     _fishActive = true;
+    // 让原生钩子在我们隐身期间也对 F9 放行（否则前台不是本进程，
+    // F9 直接被系统送给别的窗口，按第二次回不来）
+    unawaited(WinHotkeys().setHidden(true));
     _mutedBeforeFish = _isMuted;
     if (!_isMuted) await setMuted(true);
     try {
@@ -4160,6 +4163,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> exitFishMode() async {
     if (!kIsWindowsDesktop || !_fishActive) return;
     _fishActive = false;
+    unawaited(WinHotkeys().setHidden(false));
     if (_mutedBeforeFish == false) await setMuted(false);
     _mutedBeforeFish = null;
     try {

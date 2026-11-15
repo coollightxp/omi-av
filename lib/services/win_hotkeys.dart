@@ -101,6 +101,18 @@ class WinHotkeys {
     } catch (_) {}
   }
 
+  /// 告诉原生层「窗口已被我们藏起来」（摸鱼模式）。
+  ///
+  /// 隐藏后前台窗口不再属于本进程，钩子里的 `OMForegroundIsOurs()`
+  /// 会变 false，F9 就被放行给别的程序——于是「按 F9 缩进去、再按 F9
+  /// 出不来」，只能去托盘点。置位后原生只对 F9 这一个键放宽前台检查，
+  /// 其它键照旧，不会变成全局热键。
+  Future<void> setHidden(bool hidden) async {
+    try {
+      await _channel.send(hidden ? 'X1' : 'X0');
+    } catch (_) {}
+  }
+
   /// 请求 runner 恢复光标/卸载钩子后直接结束进程。
   /// 用于 Windows 10 1607 等老系统：引擎/插件析构阶段会在
   /// flutter_windows.dll 内抛 0xc0000005（退出时"已停止工作"）。

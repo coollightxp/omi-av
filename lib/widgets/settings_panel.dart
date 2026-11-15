@@ -2815,20 +2815,6 @@ class _SystemSettingsTab extends StatelessWidget {
                 ),
               if (defaultTargetPlatform == TargetPlatform.windows)
                 SwitchListTile(
-                  secondary: const Icon(Icons.volume_off, color: Colors.white70),
-                  title: const Text('缩到托盘时静音',
-                      style: TextStyle(color: Colors.white, fontSize: 15)),
-                  subtitle: const Text(
-                      '进后台播放/摸鱼时自动静音，回到窗口再还原原音量；'
-                      '关着则缩下去仍继续出声',
-                      style: TextStyle(color: Colors.white54, fontSize: 12)),
-                  value: s.trayMute,
-                  onChanged: (v) =>
-                      controller.updateSettings(s.copyWith(trayMute: v)),
-                  activeColor: Colors.blueAccent,
-                ),
-              if (defaultTargetPlatform == TargetPlatform.windows)
-                SwitchListTile(
                   secondary: const Icon(Icons.visibility_off,
                       color: Colors.white70),
                   title: const Text('F9 一键摸鱼',
