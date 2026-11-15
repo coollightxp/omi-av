@@ -1357,6 +1357,9 @@ class _StationRow extends StatelessWidget {
       focusNode: focusNode,
       // 内置台已在内置精选里，没有「加入」动作：焦点可停，按 OK 无操作
       onActivate: builtin ? null : onToggle,
+      // 鼠标/手机触摸：点行一下 = 加入，再点一下 = 取消（与右侧 +/✓
+      // 按钮同一个动作）。遥控器按 OK 走的是上面 onActivate。
+      onTap: builtin ? null : onToggle,
       radius: 8,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
       child: Padding(
@@ -1562,12 +1565,17 @@ class _FocusCard extends StatelessWidget {
     required this.focusNode,
     required this.onActivate,
     required this.child,
+    this.onTap,
     this.radius = 10,
     this.padding = EdgeInsets.zero,
   });
 
   final FocusNode focusNode;
   final VoidCallback? onActivate;
+
+  /// 鼠标/触摸点击：与 [onActivate] 分开传。遥控器按 OK 走 activate，
+  /// 手机触摸和鼠标单击走这里 —— 行为可以一致，但入口是两条。
+  final VoidCallback? onTap;
   final Widget child;
   final double radius;
   final EdgeInsets padding;
@@ -1596,19 +1604,22 @@ class _FocusCard extends StatelessWidget {
         padding: padding,
         child: Builder(builder: (ctx) {
           final focused = Focus.of(ctx).hasFocus;
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 110),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(radius),
-              border: Border.all(
-                color: focused ? AppColors.accent : Colors.transparent,
-                width: 1.5,
+          return GestureDetector(
+            onTap: onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 110),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(radius),
+                border: Border.all(
+                  color: focused ? AppColors.accent : Colors.transparent,
+                  width: 1.5,
+                ),
+                color: focused
+                    ? AppColors.accent.withValues(alpha: 0.10)
+                    : Colors.transparent,
               ),
-              color: focused
-                  ? AppColors.accent.withValues(alpha: 0.10)
-                  : Colors.transparent,
+              child: child,
             ),
-            child: child,
           );
         }),
       ),
