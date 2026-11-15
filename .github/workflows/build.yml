@@ -1017,8 +1017,7 @@ jobs:
             '        case 0x43: action = "c"; break;',
             '        case 0x45: action = "e"; break;',
             '        case 0x53: action = "s"; break;',
-            '        // F9：老板键（缩托盘 + 静音，再按恢复）。无修饰键，
-            '// 正好走 g_om_capture 的吞键-转发通道，网页前台也好使。',
+            '        // F9: boss key - hide to tray + mute, press again to restore',
             '        case VK_F9: action = "fish"; break;',
             '        default: break;',
             '      }',
