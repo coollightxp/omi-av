@@ -94,6 +94,11 @@ class PlayerSettings {
   /// 「后台播放」随时可用：底部面板「后台」按钮把窗口缩到托盘只听声。
   final bool closeToTray;
 
+  /// F9 摸鱼快捷键开关（默认开）：开着按 F9 进入/退出摸鱼
+  /// （静音并隐藏窗口）；关着 F9 不响应，只能用托盘菜单进出摸鱼。
+  /// 注意开关本身只控制快捷键，不会立刻隐藏窗口——进出动作由 F9/托盘触发。
+  final bool fishHotkey;
+
   /// 声音实验室预设（方案 12.3 第二档）：'' = 标准；key 见 kAudioPresets。
   /// 走 mpv lavfi 音频滤镜，仅内置播放器生效（网页播放器不支持）。
   /// 'custom' = 自定义 10 段均衡器，增益见 [audioEqGains]
@@ -156,6 +161,7 @@ class PlayerSettings {
     this.sleepAtMs = 0,
     this.resumeLastChannel = true,
     this.closeToTray = false,
+    this.fishHotkey = true,
     this.audioPreset = '',
     this.audioEqGains = const <double>[],
     this.spectrumTexture = false,
@@ -189,6 +195,7 @@ class PlayerSettings {
     int? sleepAtMs,
     bool? resumeLastChannel,
     bool? closeToTray,
+    bool? fishHotkey,
     String? audioPreset,
     List<double>? audioEqGains,
     bool? spectrumTexture,
@@ -222,6 +229,7 @@ class PlayerSettings {
       sleepAtMs: sleepAtMs ?? this.sleepAtMs,
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
       closeToTray: closeToTray ?? this.closeToTray,
+      fishHotkey: fishHotkey ?? this.fishHotkey,
       audioPreset: audioPreset ?? this.audioPreset,
       audioEqGains: audioEqGains ?? this.audioEqGains,
       spectrumTexture: spectrumTexture ?? this.spectrumTexture,

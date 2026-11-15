@@ -1020,6 +1020,7 @@ class PlayerController extends ChangeNotifier {
         'bufferSeconds': s.bufferSeconds,
         'resumeLastChannel': s.resumeLastChannel,
         'closeToTray': s.closeToTray,
+        'fishHotkey': s.fishHotkey,
         // 定时关闭（手机端可远程设定；到点动作 shutdown 仅桌面生效）
         'sleepActionKey': s.sleepActionKey,
         'sleepAtMs': s.sleepAtMs,
@@ -1155,6 +1156,9 @@ class PlayerController extends ChangeNotifier {
       final closeToTray = kIsWindowsDesktop
           ? (rb('closeToTray') ?? cur.closeToTray)
           : cur.closeToTray;
+      final fishHotkey = kIsWindowsDesktop
+          ? (rb('fishHotkey') ?? cur.fishHotkey)
+          : cur.fishHotkey;
       double uiScale = cur.uiScale;
       final uiRaw = rd('uiScale');
       if (uiRaw != null) uiScale = uiRaw.clamp(0.8, 3.0);
@@ -1231,6 +1235,7 @@ class PlayerController extends ChangeNotifier {
           launchAtStartup != _settings.launchAtStartup ||
           resumeLast != _settings.resumeLastChannel ||
           closeToTray != _settings.closeToTray ||
+          fishHotkey != _settings.fishHotkey ||
           gesture != _settings.gestureSensitivity ||
           autoHide != _settings.autoHideDelay ||
           sourceTimeout != _settings.sourceTimeoutSeconds ||
@@ -1252,6 +1257,7 @@ class PlayerController extends ChangeNotifier {
           launchAtStartup: launchAtStartup,
           resumeLastChannel: resumeLast,
           closeToTray: closeToTray,
+          fishHotkey: fishHotkey,
           gestureSensitivity: gesture,
           autoHideDelay: autoHide,
           tuneDwellMs: tuneDwell,
@@ -3822,6 +3828,8 @@ class PlayerController extends ChangeNotifier {
   static const _kSleepAction = 'settings_sleep_action';
   static const _kSleepAt = 'settings_sleep_at_ms';
   static const _kResumeLastChannel = 'settings_resume_last_channel';
+  static const _kCloseToTray = 'settings_close_to_tray';
+  static const _kFishHotkey = 'settings_fish_hotkey';
   static const _kAudioPreset = 'settings_audio_preset';
   static const _kAudioEqGains = 'settings_audio_eq_gains';
   static const _kSpectrumTexture = 'settings_spectrum_texture';
@@ -3868,6 +3876,8 @@ class PlayerController extends ChangeNotifier {
         sleepActionKey: p.getString(_kSleepAction) ?? 'pause',
         sleepAtMs: p.getInt(_kSleepAt) ?? 0,
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
+        closeToTray: p.getBool(_kCloseToTray) ?? false,
+        fishHotkey: p.getBool(_kFishHotkey) ?? true,
         audioPreset: p.getString(_kAudioPreset) ?? '',
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
         spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
@@ -3986,6 +3996,10 @@ class PlayerController extends ChangeNotifier {
       await putString(_kSleepAction, _settings.sleepActionKey);
       await putInt(_kSleepAt, _settings.sleepAtMs);
       await putBool(_kResumeLastChannel, _settings.resumeLastChannel);
+      // ✕ 最小化到托盘 / F9 摸鱼：此前从未落盘，重启读回默认值，
+      // 用户实测「开关打开点 ✕ 退出后，开关自己变回去」
+      await putBool(_kCloseToTray, _settings.closeToTray);
+      await putBool(_kFishHotkey, _settings.fishHotkey);
     } catch (_) {}
   }
 
@@ -4037,6 +4051,9 @@ class PlayerController extends ChangeNotifier {
       // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播
       TrayService.closeToTray = settings.closeToTray;
       unawaited(windowManager.setPreventClose(settings.closeToTray));
+      // 这一项决定 ✕ 的去向：开着后立刻点 ✕，去抖写盘来不及落盘，
+      // 下次启动读回旧值，看起来像「开关自己变回去」。立即写一次
+      unawaited(flushSettings());
     }
     if (dlnaChanged) {
       if (settings.dlnaEnabled) {

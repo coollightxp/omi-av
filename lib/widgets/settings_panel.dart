@@ -2796,16 +2796,15 @@ class _SystemSettingsTab extends StatelessWidget {
                 SwitchListTile(
                   secondary: const Icon(Icons.visibility_off_outlined,
                       color: Colors.white70),
-                  title: const Text('摸鱼模式（F9）',
+                  title: const Text('摸鱼快捷键（F9）',
                       style: TextStyle(color: Colors.white, fontSize: 15)),
                   subtitle: const Text(
-                      '静音并隐藏窗口；再按 F9（或左键托盘图标）回来，'
-                      '退出时还原进入前的静音状态',
+                      '拨这个开关不会隐藏窗口；启用后按 F9 静音并隐藏，'
+                      '再按 F9（或左键托盘图标）回来，退出时还原静音状态',
                       style: TextStyle(color: Colors.white54, fontSize: 12)),
-                  value: controller.fishMode,
-                  onChanged: (v) => v
-                      ? controller.enterFishMode()
-                      : controller.exitFishMode(),
+                  value: s.fishHotkey,
+                  onChanged: (v) =>
+                      controller.updateSettings(s.copyWith(fishHotkey: v)),
                   activeColor: Colors.blueAccent,
                 ),
               // 安卓 13+：POST_NOTIFICATIONS 不给，电台前台服务的通知卡片

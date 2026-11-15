@@ -376,7 +376,7 @@ button{font-family:inherit;cursor:pointer;-webkit-appearance:none;appearance:non
 }
 .meta{margin-top:8px;font-size:11.5px;color:#62708e;line-height:1.5}
 .meta .tag{display:inline-block;color:#8ea0cc;margin-right:6px}
-.acts{display:-webkit-flex;display:flex;margin-top:12px}
+.acts{display:-webkit-flex;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;-webkit-align-items:center;align-items:center;margin-top:12px}
 .acts+.acts{margin-top:8px}
 .btn{
   height:40px;border-radius:9px;border:1px solid #2b3242;background:#1d2330;
@@ -386,10 +386,8 @@ button{font-family:inherit;cursor:pointer;-webkit-appearance:none;appearance:non
   -webkit-transition:background .12s;transition:background .12s;
 }
 .btn:active{background:#283144}
-.acts .b3{-webkit-flex:0 0 calc((100% - 16px)/3);flex:0 0 calc((100% - 16px)/3);min-width:0;margin-right:8px}
-.acts .b3:last-child{-webkit-flex:1 1 0;flex:1 1 0;margin-right:0}
-.acts .b2{-webkit-flex:0 0 calc((100% - 8px)/2);flex:0 0 calc((100% - 8px)/2);min-width:0;margin-right:8px}
-.acts .b2:last-child{margin-right:0}
+.acts .b3,.acts .b2{-webkit-flex:0 0 auto;flex:0 0 auto;min-width:0;margin:0 8px 6px 0;padding:0 16px}
+.acts .b3:last-child,.acts .b2:last-child{margin-right:0}
 .btn.ok{background:#153d28;border-color:#1f5d3c;color:#62e39b}
 .btn.ok:active{background:#1b4d32}
 .btn.danger{background:#351c23;border-color:#5b2733;color:#ff8a95}
@@ -935,6 +933,7 @@ function renderSystem(){
     html+='<div class="group-title">桌面端</div>';
     html+=switchCard('alwaysOnTop','窗口置顶','窗口始终在最前，快捷键不被别的窗口抢走');
     if(s.isWindows)html+=switchCard('closeToTray','✕ 最小化到托盘','点关闭按钮缩到托盘继续播放，托盘图标左键恢复');
+    if(s.isWindows)html+=switchCard('fishHotkey','摸鱼快捷键（F9）','开关只控制 F9 是否启用，不会隐藏窗口；按 F9 静音并隐藏，再按 F9（或左键托盘）恢复');
     html+=switchCard('launchAtStartup','开机启动','登录系统后自动启动');
     html+=switchCard('startFullscreen','启动全屏','只在程序启动时生效一次');
   }

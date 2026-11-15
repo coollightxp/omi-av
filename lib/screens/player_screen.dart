@@ -2747,27 +2747,36 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// OK 按下边沿（首次按下；系统自动重复由 _okHeld 去重）。
   /// 面板打开：转发面板；否则启动 500ms 长按计时。
   void _okDown() {
-    if (_okHeld) return;
+    if (_okHeld) {
+      WebDiag.log('ok_eaten reason=held');
+      return;
+    }
     _okHeld = true;
     _okLongFired = false;
     // 待选台：OK 打开频道列表，不再触发长按面板
     if (_standbyListIntercept()) {
+      WebDiag.log('ok_eaten reason=standby');
       _okDownInPanel = true;
       return;
     }
     if (_navPanelOpen) {
+      WebDiag.log('ok_eaten reason=navpanel');
       _okDownInPanel = true;
       _panelKey('ok', true);
       return;
     }
     if (_bottomPanelActive) {
+      WebDiag.log('ok_eaten reason=panel');
       _okDownInPanel = true;
       _bottomPanelRemoteKey('ok', true);
       return;
     }
     _okLongTimer?.cancel();
     // 换台预览待提交：OK 就是「别等了，现在切」，不进长按呼面板逻辑
-    if (_tunePending) return;
+    if (_tunePending) {
+      WebDiag.log('ok_eaten reason=tune_pending');
+      return;
+    }
     _okLongTimer = Timer(const Duration(milliseconds: 500), () {
       _okLongFired = true;
       // 长按 OK = 呼出/收起控制面板（内部有播放状态守卫）
@@ -2811,8 +2820,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       final c = context.read<PlayerController>();
       // 点播短按 OK = 暂停/播放；直播/网页频道 = 呼出或收起节目列表
       if (c.isSeekable && !c.webPageActive) {
+        WebDiag.log('ok_short action=playpause');
         c.togglePlayPause();
       } else {
+        WebDiag.log('ok_short action=drawer seekable=${c.isSeekable} web=${c.webPageActive}');
         _toggleDrawer(left: true);
       }
     }
@@ -3207,6 +3218,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       OsdBus.show('投屏等待中，双击返回可退出', icon: Icons.cast);
       return;
     }
+    WebDiag.log('drawer_toggle left=$left was_open=${left ? _leftDrawerOpen : _rightEpgOpen}');
     setState(() {
       _topBarVisible = false;
       if (left) {
@@ -3569,9 +3581,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// F9：进入/退出摸鱼模式（静音 + 隐藏窗口，仅 Windows）。
   /// 摸鱼中窗口已隐藏，这一下由原生钩子全局拦截转发过来；
   /// 再按一次回到窗口并还原静音前的状态。
+  /// 设置里的「摸鱼快捷键（F9）」只控制这条快捷键是否启用，
+  /// 拨开关本身不会隐藏窗口；托盘菜单不受它限制。
   Future<void> _toggleFishMode() async {
     final c = context.read<PlayerController>();
     if (!c.kIsWindowsDesktop) return;
+    if (!c.fishMode && !c.settings.fishHotkey) {
+      OsdBus.show('F9 摸鱼已停用：设置 → 系统可开启',
+          icon: Icons.keyboard);
+      return;
+    }
     if (c.fishMode) {
       await c.exitFishMode();
     } else {
