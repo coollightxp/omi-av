@@ -75,6 +75,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   PlayerState _prevState = PlayerState.idle;
   String? _prevChannelId;
   bool _prevWebActive = false;
+  /// 启动动画是否已经退场（上一帧值）：退场那一刻把焦点收回根节点
+  bool _prevBootReady = false;
 
   /// 小窗状态上一次值：切入小窗时关掉全部面板（小窗口 420×236 里
   /// 这些按大屏排版的卡片会把画面整个盖住）
@@ -308,6 +310,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final becamePlaying =
         c.state == PlayerState.playing && _prevState != PlayerState.playing;
     _prevState = c.state;
+
+    // 启动动画退场立刻把键盘焦点收回根节点。安卓冷启动时焦点可能还挂在
+    // 系统视图/启动层上，遥控器/键盘前几下没有去处（实测「进程序后马上
+    // 按返回没反应，按几下 OK 之后又一切正常」——典型焦点没落位）
+    if (c.bootReady && !_prevBootReady) {
+      _prevBootReady = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _ensureShortcutFocus();
+      });
+    }
 
     // 小窗（420×236）：面板都是按大屏排版的悬浮卡片，在这里会把画面
     // 整个盖住。切入小窗瞬间把已打开/待打开的面板全部收起，之后
@@ -1038,6 +1050,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 数字选台输入中：返回键 = 取消输入（清缓存并隐藏 OSD），
     // 不落入退出确认等后续分支
     if (_numBuffer.isNotEmpty) {
+      _logBackEaten('num');
       _numTimer?.cancel();
       setState(() {
         _numBuffer = '';
@@ -1047,15 +1060,26 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     // 关机确认卡片：返回键 = 取消关机
     if (_shutdownDialogOpen) {
+      _logBackEaten('shutdown');
       _confirmShutdown(false);
       return;
     }
     // 重入守卫：退出确认框已在显示时直接忽略，
     // 防止连按返回弹出两个路由、关闭时连带弹掉播放器（黑屏）
-    if (_exitDialogOpen) return;
+    if (_exitDialogOpen) {
+      // 僵尸标志自愈：卡片路由其实已经不在（被系统弹掉/外部销毁），
+      // 标志位还true 的话返回键会被永久吞掉——表现就是「进程序后
+      // 怎么按返回都不出卡片」。没有弹层时复位，继续往下走
+      if (_modalRouteOpen) {
+        _logBackEaten('exit_open');
+        return;
+      }
+      _exitDialogOpen = false;
+    }
     final c = context.read<PlayerController>();
     // 锁定状态：返回键只用于解锁（安卓系统返回键也走这里）
     if (c.locked) {
+      _logBackEaten('locked');
       c.unlock();
       return;
     }
@@ -1063,10 +1087,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       // 设置卡片上压着下一级卡片（编辑/确认/诊断/扫码…）：这一下返回
       // 只关那一层，设置卡片留着。以前直接落到下面的分支，一下把
       // 两层一起关掉（用户实测：退到上一级却连设置也没了）
+      _logBackEaten('settings_child');
       Navigator.of(context).maybePop();
       return;
     }
     if (_settingsOpen) {
+      _logBackEaten('settings');
       setState(() => _settingsOpen = false);
       // 兜底：万一某个下一级卡片的 Future 没能回来（路由被外部销毁），
       // 这里复位，免得设置卡片一直停在透明状态
@@ -1082,11 +1108,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 不往下走退出确认——睡着前想接着看，按一下返回就好
     final sleepRemain = c.sleepRemain;
     if (sleepRemain != null && sleepRemain.inSeconds <= 60) {
+      _logBackEaten('sleep60');
       await c.setSleepAt(null);
       return;
     }
     if (c.castWaiting) {
       // 等待投屏画面：两次返回（≤2 秒）直接回直播，单击只提示
+      _logBackEaten('cast_waiting');
       final now = DateTime.now();
       if (_castExitArmAt != null &&
           now.difference(_castExitArmAt!) < const Duration(seconds: 2)) {
@@ -1100,6 +1128,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     if (c.isCasting) {
       // 投屏中按返回/右键：第一次只提示，2 秒内再按才真正断开，防误触
+      _logBackEaten('casting');
       final now = DateTime.now();
       if (_castExitArmAt != null &&
           now.difference(_castExitArmAt!) < const Duration(seconds: 2)) {
@@ -1112,14 +1141,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     if (_leftDrawerOpen) {
+      _logBackEaten('drawer');
       setState(() => _leftDrawerOpen = false);
       return;
     }
     if (_rightEpgOpen) {
+      _logBackEaten('epg');
       setState(() => _rightEpgOpen = false);
       return;
     }
     if (_bottomPanelVisible) {
+      _logBackEaten('bottom_panel');
       _bottomHideTimer?.cancel();
       setState(() => _bottomPanelVisible = false);
       return;
@@ -1520,7 +1552,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return true;
     }
-    if (k == LogicalKeyboardKey.escape) {
+    // 返回键统一识别：安卓遥控器/键盘上报的是 goBack（不是 escape），
+    // 只认 escape 时弹层里的返回会漏给焦点系统，表现为「关不掉、
+    // 焦点跳到第一个按钮」（2.1.40 #4 原修，2.3.x 基线重建漏带）
+    if (_isBackKey(k)) {
       if (isDown) Navigator.of(context).maybePop();
       return true;
     }
@@ -1562,6 +1597,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       k == LogicalKeyboardKey.escape ||
       k == LogicalKeyboardKey.goBack ||
       k == LogicalKeyboardKey.browserBack;
+
+  /// 返回键被某一层的状态吃掉时留痕。
+  ///
+  /// 实测「进程序后马上按返回，退出卡片怎么都不出来；按几下 OK 把
+  /// 左侧频道调出来再关掉，返回就正常了」——这种「按了没反应」只能
+  /// 靠日志判断是哪一层的标志位/焦点把键吞了（导出诊断即见）。
+  void _logBackEaten(String branch) {
+    WebDiag.log('back_eaten branch=$branch drawer=$_leftDrawerOpen '
+        'epg=$_rightEpgOpen bottom=$_bottomPanelVisible '
+        'settings=$_settingsOpen exit=$_exitDialogOpen '
+        'modal=$_modalRouteOpen boot=${_controllerRef?.bootReady}');
+  }
 
   bool _handleExitDialogKey(LogicalKeyboardKey k, bool isDown, bool isUp) {
     final isOk = k == LogicalKeyboardKey.select ||

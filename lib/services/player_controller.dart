@@ -1560,8 +1560,40 @@ class PlayerController extends ChangeNotifier {
       _isLoadingPlaylist = false;
       // 电视源换了：电台目录里的「电视伴音」要按新频道重匹配
       if (_radioCatalogLoaded) _refreshRadioCatalog();
+      _rebindResumedChannel();
       notifyListeners();
     }
+  }
+
+  /// 播放列表加载完成后，把恢复播放用的临时频道对象重绑到列表真身。
+  ///
+  /// 开机恢复时列表多半还没加载完，`_resolveLastChannel` 会用记录的
+  /// 地址构造一个临时 Channel 开播。这个对象不在任何分类里：
+  /// 序号显示 "--"、上下键相邻频道也对不上。列表就绪后按 ID（再按
+  /// 名字）找回同一频道替换之；找不到就保持原样不动。
+  /// （2.2.2 已修过，基线重建时漏带 → 2.3.7 补回）
+  void _rebindResumedChannel() {
+    final cur = _currentChannel;
+    if (cur == null || _categories.isEmpty) return;
+    final all = [for (final cat in _categories) ...cat.channels];
+    Channel? found;
+    for (final c in all) {
+      if (c.id == cur.id) {
+        found = c;
+        break;
+      }
+    }
+    if (found == null && cur.name.isNotEmpty) {
+      for (final c in all) {
+        if (c.name == cur.name) {
+          found = c;
+          break;
+        }
+      }
+    }
+    if (found == null || identical(found, cur)) return;
+    _currentChannel = found;
+    if (_sourceIndex >= found.streamUrls.length) _sourceIndex = 0;
   }
 
   /// 跨天检查：缓存是昨天抓的（或更早）就重抓内置节目单。
@@ -2452,18 +2484,32 @@ class PlayerController extends ChangeNotifier {
   List<Channel> get flatChannels =>
       [for (final cat in _categories) ...cat.channels];
 
-  /// 频道序号（1 起），不在列表中返回 null
+  /// 频道序号（1 起），不在列表中返回 null。
+  ///
+  /// ID 精确匹配失败时按名字兜底：开机恢复播放时若播放列表还没加载完
+  /// （或临时频道对象不在列表里），卡片序号会一直是 "--"（实测：
+  /// 退出重进后切台卡片没有 ID，网页源/电台反而正常）。同名频道在
+  /// 当前列表里几乎总是同一个台，显示序号按它算。
   int? channelNumberOf(Channel? ch) {
     if (ch == null) return null;
-    final idx = flatChannels.indexWhere((c) => c.id == ch.id);
+    final all = flatChannels;
+    var idx = all.indexWhere((c) => c.id == ch.id);
+    if (idx < 0 && ch.name.isNotEmpty) {
+      idx = all.indexWhere((c) => c.name == ch.name);
+    }
     return idx < 0 ? null : idx + 1;
   }
 
-  /// 当前频道序号（1 起，同域口径）
+  /// 当前频道序号（1 起，同域口径）。ID 匹配不到时按名字兜底，
+  /// 否则恢复播放的临时频道对象会让切台卡片永远显示 "--"
   int? get currentChannelNumber {
     final ch = _currentChannel;
     if (ch == null) return null;
-    final idx = _switchDomainChannels.indexWhere((c) => c.id == ch.id);
+    final all = _switchDomainChannels;
+    var idx = all.indexWhere((c) => c.id == ch.id);
+    if (idx < 0 && ch.name.isNotEmpty) {
+      idx = all.indexWhere((c) => c.name == ch.name);
+    }
     return idx < 0 ? null : idx + 1;
   }
 

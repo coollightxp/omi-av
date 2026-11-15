@@ -3437,34 +3437,46 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
   return showChildDialog<void>(
     context: context,
     barrierColor: Colors.black.withOpacity(0.72),
-    builder: (ctx) => Dialog(
+    builder: (ctx) {
+      // 手机（短边 < 600）整卡再收一档：150 的码在 411dp 宽的屏上占到
+      // 36%，比标题还抢眼，用户连续两版反馈「还是太大」。112 只占约
+      // 29%，码内容只是 http://ip:port 短地址、模块数少，20~30cm 内
+      // 照样扫得动。中屏（电视盒）150、桌面 200
+      final short = MediaQuery.of(ctx).size.shortestSide;
+      final isPhone = short < 600;
+      final double qrSize = isPhone ? 112 : (short < 760 ? 150 : 200);
+      final double cardPad = isPhone ? 16 : 22;
+      final double qrPad = isPhone ? 10 : 14;
+      final double gap = isPhone ? 12 : 18;
+      return Dialog(
       backgroundColor: Colors.transparent,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 40),
+      insetPadding: EdgeInsets.symmetric(horizontal: isPhone ? 28 : 40),
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 360),
-        padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
+        constraints: BoxConstraints(maxWidth: isPhone ? 300 : 360),
+        padding: EdgeInsets.fromLTRB(cardPad, cardPad, cardPad, isPhone ? 14 : 18),
         decoration: BoxDecoration(
           color: const Color(0xFFF7F8FA),
-          borderRadius: BorderRadius.circular(22),
+          borderRadius: BorderRadius.circular(isPhone ? 18 : 22),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('手机扫码管理',
+            Text('手机扫码管理',
                 style: TextStyle(
-                    color: Color(0xFF11141B),
-                    fontSize: 18,
+                    color: const Color(0xFF11141B),
+                    fontSize: isPhone ? 16 : 18,
                     fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
-            const Text('手机与电脑连接同一 Wi‑Fi',
-                style: TextStyle(color: Colors.black45, fontSize: 13)),
-            const SizedBox(height: 18),
+            Text('手机与电脑连接同一 Wi‑Fi',
+                style: TextStyle(
+                    color: Colors.black45, fontSize: isPhone ? 11.5 : 13)),
+            SizedBox(height: gap),
             // 二维码：白底圆角卡片内嵌圆角方块码，四周留白保证可识别
             Container(
-              padding: const EdgeInsets.all(14),
+              padding: EdgeInsets.all(qrPad),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(isPhone ? 13 : 16),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withOpacity(0.07),
@@ -3476,13 +3488,7 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
               child: QrImageView(
                 data: url,
                 version: QrVersions.auto,
-                // 二维码分档：手机（短边<600）150、电视盒等中屏
-                // （<760，实测 216 在电视上仍显过大）170、桌面 216
-                size: MediaQuery.of(context).size.shortestSide < 600
-                    ? 150
-                    : MediaQuery.of(context).size.shortestSide < 760
-                        ? 170
-                        : 216,
+                size: qrSize,
                 backgroundColor: Colors.white,
                 padding: EdgeInsets.zero,
                 eyeStyle: const QrEyeStyle(
@@ -3495,10 +3501,11 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
                 ),
               ),
             ),
-            const SizedBox(height: 14),
+            SizedBox(height: isPhone ? 10 : 14),
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: EdgeInsets.symmetric(
+                  horizontal: 12, vertical: isPhone ? 6 : 8),
               decoration: BoxDecoration(
                 color: const Color(0xFFECEEF2),
                 borderRadius: BorderRadius.circular(9),
@@ -3506,13 +3513,13 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
               child: SelectableText(
                 url,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: Color(0xFF333A47),
-                    fontSize: 14,
+                style: TextStyle(
+                    color: const Color(0xFF333A47),
+                    fontSize: isPhone ? 12.5 : 14,
                     fontWeight: FontWeight.w600),
               ),
             ),
-            const SizedBox(height: 18),
+            SizedBox(height: isPhone ? 12 : 18),
             Row(
               children: [
                 Expanded(
@@ -3523,12 +3530,12 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
                       Navigator.pop(ctx);
                       OsdBus.show('地址已复制', icon: Icons.copy);
                     },
-                    icon: const Icon(Icons.copy, size: 18),
+                    icon: Icon(Icons.copy, size: isPhone ? 16 : 18),
                     label: const Text('复制地址'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: const Color(0xFF333A47),
                       side: const BorderSide(color: Color(0xFFD2D7E0)),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      padding: EdgeInsets.symmetric(vertical: isPhone ? 10 : 13),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(11)),
                     ),
@@ -3542,7 +3549,7 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
                       backgroundColor: const Color(0xFF2563EB),
                       foregroundColor: Colors.white,
                       elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      padding: EdgeInsets.symmetric(vertical: isPhone ? 10 : 13),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(11)),
                     ),
@@ -3554,7 +3561,8 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
           ],
         ),
       ),
-    ),
+    );
+    },
   );
 }
 
