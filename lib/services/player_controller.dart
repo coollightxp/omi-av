@@ -3898,9 +3898,11 @@ class PlayerController extends ChangeNotifier {
       // ✕ 最小化到托盘：读回设置并同步给关闭拦截（Windows）
       if (isDesktop && kIsWindowsDesktop) {
         TrayService.closeToTray = _settings.closeToTray;
-        if (_settings.closeToTray) {
-          unawaited(windowManager.setPreventClose(true));
-        }
+        // 拦截**无条件**开着：关窗事件必须由 onWindowClose 统一分流
+        // （隐藏 or 有序退出）。跟着开关一起关掉的话，开关为 false 时
+        // 点 ✕ 直接 destroy 窗口，绕过 ExitGuard 的析构顺序 →
+        // 网页控件/mpv 线程还在跑就被拆，退出崩溃（0xc0000005）又回来
+        unawaited(windowManager.setPreventClose(true));
       }
       // 定时关闭跨启动续上（过期则直接清掉）
       _restoreSleepTimer();
@@ -4054,9 +4056,12 @@ class PlayerController extends ChangeNotifier {
       _applyAlwaysOnTop();
     }
     if (closeToTrayChanged && kIsWindowsDesktop) {
-      // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播
+      // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播。
+      // 拦截本身**不跟着开关关**——一直 true，关窗事件始终由
+      // onWindowClose 分流（hide 或 ExitGuard）。跟着关掉的话，
+      // 关掉开关后点 ✕ 是直接 destroy，绕过有序退出 → 退出崩溃
       TrayService.closeToTray = settings.closeToTray;
-      unawaited(windowManager.setPreventClose(settings.closeToTray));
+      unawaited(windowManager.setPreventClose(true));
       // 这一项决定 ✕ 的去向：开着后立刻点 ✕，去抖写盘来不及落盘，
       // 下次启动读回旧值，看起来像「开关自己变回去」。立即写一次
       unawaited(flushSettings());

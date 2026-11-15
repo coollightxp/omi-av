@@ -81,6 +81,9 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   /// 结果列表滚动控制器：回到顶部要能把列表也拉回去
   final ScrollController _resultScroll = ScrollController();
 
+  /// 「我的电台」列表自己的滚动控制器（两个列表不能共用同一个）
+  final ScrollController _mineScroll = ScrollController();
+
   /// 列表行焦点按台 id 复用：列表重建不丢焦点，遥控器不会跳回顶部
   final Map<String, FocusNode> _rowFocus = {};
 
@@ -137,6 +140,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     _tagRow.dispose();
     _topRow.dispose();
     _resultScroll.dispose();
+    _mineScroll.dispose();
     for (final n in _rowFocus.values) {
       n.dispose();
     }
@@ -152,8 +156,13 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
       _handleKey(event) == KeyEventResult.handled;
 
   /// 一次按键的去抖窗口：部分遥控器/接收器会把一次按下连发两个
-  /// KeyDown（用户实测「按一下跳两格」）。同一颗键 60ms 内的第二个
-  /// 按下直接吞掉；人手连按最快也在 80ms 以上，不会误伤。
+  /// KeyDown（用户实测「按一下跳两格 / 两行两行地跳」）。同一颗键
+  /// 窗口内的第二个按下直接吞掉。
+  ///
+  /// 方向键给 220ms：实测这种接收器的两个 KeyDown 间隔能到 100~180ms，
+  /// 以前统一 60ms 根本挡不住，表现就是按一下走两行。人手在遥控器上
+  /// 连按方向键的间隔通常 >250ms，不会误伤；OK/返回这类"按了就有动作"
+  /// 的键仍用 60ms，避免连按被吞。
   int _lastKeyId = 0;
   int _lastKeyAt = 0;
 
@@ -162,7 +171,12 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final k = event.logicalKey;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (k.keyId == _lastKeyId && now - _lastKeyAt < 60) {
+    final isArrow = k == LogicalKeyboardKey.arrowUp ||
+        k == LogicalKeyboardKey.arrowDown ||
+        k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight;
+    final dedupMs = isArrow ? 220 : 60;
+    if (k.keyId == _lastKeyId && now - _lastKeyAt < dedupMs) {
       return KeyEventResult.handled;
     }
     _lastKeyId = k.keyId;
@@ -468,9 +482,10 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
       _rowNodeFor('mine:${items.first.id}').requestFocus();
     }
     _ensureVisible();
+    final scroller = _tab == 0 ? _resultScroll : _mineScroll;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (_resultScroll.hasClients) _resultScroll.jumpTo(0);
+      if (scroller.hasClients) scroller.jumpTo(0);
     });
   }
 
@@ -771,7 +786,10 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
         ),
         Expanded(
           child: ListView.separated(
+            controller: _mineScroll,
             padding: const EdgeInsets.only(bottom: 8),
+            // 同搜索结果列表：缓存给足，紧邻行一定已构建，上下只走一格
+            cacheExtent: 800,
             itemCount: items.length,
             separatorBuilder: (_, __) =>
                 const Divider(color: AppColors.divider, height: 1),
@@ -1145,6 +1163,11 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     return ListView.separated(
       controller: _resultScroll,
       padding: const EdgeInsets.symmetric(vertical: 4),
+      // 预构建视口外上下各一大段（约 10 行）。惰性列表只构建视口附近的
+      // 行，[_navStops] 会把「还没挂到树上」的行当成不存在而跳过——紧挨着
+      // 的下一行刚好在缓存边界外时，按一下 ↓ 就落到下下行，遥控器上就是
+      // 用户说的「两行两行地跳」。缓存给足，紧邻行必定已构建。
+      cacheExtent: 800,
       // 多一行「回到顶部」：长列表按到底后，遥控器没有别的出口回得去
       // （用户实测：按到底再往回返，返不回最顶上）
       itemCount: _results.length + 1,

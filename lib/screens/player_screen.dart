@@ -1447,7 +1447,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             (defaultTargetPlatform == TargetPlatform.windows ||
                 defaultTargetPlatform == TargetPlatform.linux ||
                 defaultTargetPlatform == TargetPlatform.macOS)) {
-          await windowManager.close();
+          // 退出卡片是**明确的退出意图**，必须无条件退出，不能被
+          // 「✕ 最小化到托盘」拦下。以前这里调 windowManager.close()，
+          // 关窗事件会落到 onWindowClose 的托盘判断里——开关一开，点
+          // 「退出」只是把窗口藏进托盘，进程和声音都还留着（用户实测：
+          // 退出卡片按退出，程序没退、还以为没声了）。
+          // 与托盘菜单「退出」、定时关闭的「退出应用」走同一条流程。
+          await ExitGuard.quit();
         } else {
           await SystemNavigator.pop();
           // 移动端把进程杀干净：pop 之后 Activity finish 了，但进程可能
