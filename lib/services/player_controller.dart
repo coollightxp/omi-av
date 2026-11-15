@@ -76,6 +76,12 @@ class PlayerController extends ChangeNotifier {
 
   /// MDK 起播失败后的临时降级（不写设置，下次启动仍尊重用户选择）
   bool _forceMpv = false;
+
+  /// 最近一次给内核挂音频滤镜（场景音效）的时间。
+  /// 自愈判据：挂上后短时间内就进 play_err → 认定这台设备/内核吃不下
+  /// 这条 lavfi 链（安卓电台实测：直通正常，任选音效立刻 3/3 重试失败，
+  /// 带档重启也起不来），自动摘掉回「标准」。
+  DateTime? _afAppliedAt;
   PlayerSettings _settings = const PlayerSettings();
 
   /// 时钟显隐的独立通知器：切换它只重建时钟本身，不触发整棵播放
@@ -2717,8 +2723,11 @@ class PlayerController extends ChangeNotifier {
       unawaited(c.setVideoOutputDisabled(true));
     }
     // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
-    // （'custom' 走自定义均衡器增益构建）
+    // （'custom' 走自定义均衡器增益构建）；自愈窗口从这里起算——
+    // 挂档起播短时间内报错会被 _enterErrorOrRetry 判定为滤镜不兼容
     unawaited(c.applyAudioFilter(filterForPreset(_settings.audioPreset)));
+    _afAppliedAt =
+        _settings.audioPreset.isEmpty ? null : DateTime.now();
     // 新内核的音量对齐应用音量：mpv 默认 100，不设的话静音/调音量
     // 在换台后会失效（新实例满音量）
     unawaited(c.setVolume(_volume));
@@ -3769,6 +3778,22 @@ class PlayerController extends ChangeNotifier {
     // 留痕：跟「选音效后马上报错」这类时序问题对时间线用
     WebDiag.log('play_err',
         'preset=${_settings.audioPreset}|ch=${_currentChannel?.name ?? '-'}');
+    // 音效自愈：挂上滤镜后 20 秒内就报错 → 十有八九是这台设备/内核
+    // 吃不下这条 lavfi 链（安卓电台实测：直通正常，任选音效立刻
+    // 3/3 重试失败，带档重启也起不来）。自动摘掉并回「标准」，本次
+    // 重试就能不带滤镜跑通；用户想再试随时可重新选（会再次尝试）。
+    // 只信「挂链后紧跟着的报错」，普通网络坏错不冤枉音效设置。
+    final afPreset = _settings.audioPreset;
+    if (afPreset.isNotEmpty &&
+        !_isCasting &&
+        _afAppliedAt != null &&
+        DateTime.now().difference(_afAppliedAt!).inSeconds <= 20) {
+      _afAppliedAt = null;
+      WebDiag.log('af_selfheal', 'preset=$afPreset → 标准');
+      updateSettings(_settings.copyWith(audioPreset: ''));
+      unawaited(_videoController?.applyAudioFilter(null));
+      OsdBus.show('当前设备不支持该音效，已切回标准', icon: Icons.equalizer);
+    }
     // 后台（通知卡片在操作）不重试。
     //
     // 后台没有界面可看，重试只会让卡片在「播放/暂停」之间反复闪、声音
@@ -4306,6 +4331,8 @@ class PlayerController extends ChangeNotifier {
     updateSettings(_settings.copyWith(audioPreset: preset));
     final c = _videoController;
     if (c != null) await c.applyAudioFilter(filterForPreset(preset));
+    // 自愈窗口起点：非直通档挂链成功即计时（直通清链不算）
+    _afAppliedAt = preset.isEmpty ? null : DateTime.now();
     final label = preset.isEmpty ? '标准' : _audioPresetLabel(preset);
     OsdBus.show('声音：$label', icon: Icons.equalizer);
   }
