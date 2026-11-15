@@ -25,6 +25,40 @@ class TrayService {
   /// 摸鱼模式开关（PlayerController 读取/同步）
   bool get fishMode => _fishMode;
 
+  /// 托盘是否真的建起来了。图标建失败（资源路径/系统策略）时为 false：
+  /// 调用方据此不要隐藏窗口，否则用户没有任何入口能把窗口找回来
+  static bool get ready => instance._inited;
+
+  /// 托盘图标绝对路径。
+  ///
+  /// system_tray 在 Windows 上走 Shell_NotifyIcon，图标要给**磁盘上真实
+  /// 存在的文件**；Flutter 把 assets 打进 `data/flutter_assets/`，用
+  /// 相对路径 `assets/tray/xxx.ico` 在装机目录下根本不存在，
+  /// initSystemTray 抛异常被静默吞掉 —— 表现就是「托盘图标不出现」，
+  /// 关闭到托盘/摸鱼模式一点就找不回窗口。这里按打包布局找绝对路径
+  static String _resolveIcon() {
+    final sep = Platform.pathSeparator;
+    String exeDir;
+    try {
+      exeDir = File(Platform.resolvedExecutable).parent.path;
+    } catch (_) {
+      exeDir = '';
+    }
+    final candidates = <String>[
+      if (exeDir.isNotEmpty)
+        '$exeDir${sep}data${sep}flutter_assets${sep}assets${sep}tray${sep}omi_tray.ico',
+      if (exeDir.isNotEmpty)
+        '$exeDir${sep}assets${sep}tray${sep}omi_tray.ico',
+      'assets/tray/omi_tray.ico',
+    ];
+    for (final c in candidates) {
+      try {
+        if (File(c).existsSync()) return c;
+      } catch (_) {}
+    }
+    return 'assets/tray/omi_tray.ico';
+  }
+
   /// ✕ 关闭按钮是否最小化到托盘（controller 同步；WindowListener 读取）
   static bool closeToTray = false;
 
@@ -48,7 +82,7 @@ class TrayService {
     try {
       await _tray.initSystemTray(
         title: _kAppTitle,
-        iconPath: 'assets/tray/omi_tray.ico',
+        iconPath: _resolveIcon(),
         toolTip: '$_kAppTitle · 左键恢复窗口',
       );
       await _buildMenu();

@@ -17,6 +17,7 @@ import 'radio_search_dialog.dart';
 import '../models/player_settings.dart';
 import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
+import '../services/pip.dart' show notifGranted, requestNotif, openNotifSettings;
 import '../services/builtin_epg.dart';
 import '../services/player_controller.dart';
 
@@ -2791,6 +2792,11 @@ class _SystemSettingsTab extends StatelessWidget {
                       controller.updateSettings(s.copyWith(closeToTray: v)),
                   activeColor: Colors.blueAccent,
                 ),
+              // 安卓 13+：POST_NOTIFICATIONS 不给，电台前台服务的通知卡片
+              // 会被系统整条吞掉（服务在跑、声音也在，但通知栏/锁屏什么都
+              // 没有）。给一个明确入口：看状态、一键申请、被拒后去设置
+              if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+                const _NotifPermissionTile(),
               SwitchListTile(
                 secondary:
                     const Icon(Icons.power_settings_new, color: Colors.white70),
@@ -4407,6 +4413,82 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// 安卓 13+ 通知权限状态行（设置 → 系统）。
+///
+/// 电台的后台控制全靠通知栏/锁屏那张卡片；POST_NOTIFICATIONS 没给，
+/// 前台服务照跑但系统把通知吞掉，用户看到「后台播着、却没法切台」。
+/// 这里把状态摆明，点一下先走系统申请框，被拒过就跳本应用通知设置。
+class _NotifPermissionTile extends StatefulWidget {
+  const _NotifPermissionTile();
+
+  @override
+  State<_NotifPermissionTile> createState() => _NotifPermissionTileState();
+}
+
+class _NotifPermissionTileState extends State<_NotifPermissionTile> {
+  bool? _granted; // null = 查询中
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final v = await notifGranted();
+    if (mounted) setState(() => _granted = v);
+  }
+
+  Future<void> _ask() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      var ok = await notifGranted();
+      if (!ok) ok = await requestNotif();
+      // 系统框只弹一次；用户拒绝过之后只能去系统设置里手动开
+      if (!ok) await openNotifSettings();
+      await _refresh();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final granted = _granted;
+    return ListTile(
+      leading: Icon(
+        granted == true
+            ? Icons.notifications_active
+            : Icons.notifications_off_outlined,
+        color: granted == true ? Colors.greenAccent : Colors.orangeAccent,
+      ),
+      title: const Text('通知栏卡片权限',
+          style: TextStyle(color: Colors.white, fontSize: 15)),
+      subtitle: Text(
+        granted == null
+            ? '正在查询…'
+            : granted
+                ? '已开启：电台在后台时，通知栏与锁屏可以切台/暂停'
+                : '未开启：安卓 13+ 必须授权，否则后台听电台看不到控制卡片',
+        style: const TextStyle(color: Colors.white54, fontSize: 12),
+      ),
+      trailing: _busy
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : TextButton(
+              onPressed: granted == true ? null : _ask,
+              child: Text(granted == true ? '已开启' : '去开启'),
+            ),
+      onTap: granted == true ? null : _ask,
     );
   }
 }

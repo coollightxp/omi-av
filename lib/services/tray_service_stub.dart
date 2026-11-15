@@ -15,6 +15,9 @@ class TrayService {
   /// 摸鱼模式开关（Windows 实装；占位恒 false）
   bool get fishMode => false;
 
+  /// 托盘是否可用（占位恒 false）
+  static bool get ready => false;
+
   static Future<void> ensure() async {}
 
   static Future<void> updateMenu({required bool fishMode}) async {}

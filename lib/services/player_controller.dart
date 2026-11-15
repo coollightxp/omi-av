@@ -3016,7 +3016,13 @@ class PlayerController extends ChangeNotifier {
     _notifAsked = true;
     try {
       if (await notifGranted()) return;
-      await requestNotif();
+      final ok = await requestNotif();
+      if (!ok) {
+        // 系统框只在首次真正弹出；拒绝过之后只能手动去开。这里给一次
+        // 轻提示，指明入口，别让用户以为是「后台播放坏了」
+        OsdBus.show('通知权限未开，后台听电台看不到控制卡片（设置→系统可开启）',
+            icon: Icons.notifications_off_outlined);
+      }
     } catch (_) {}
   }
 
@@ -4121,6 +4127,13 @@ class PlayerController extends ChangeNotifier {
   Future<void> enterBackgroundAudio() async {
     if (!kIsWindowsDesktop) return;
     await TrayService.ensure();
+    // 托盘图标没建起来时绝不隐藏窗口：用户没有入口能把窗口找回来，
+    // 只能任务管理器结束进程（摸鱼模式同理）
+    if (!TrayService.ready) {
+      OsdBus.show('托盘图标不可用，未隐藏窗口',
+          icon: Icons.warning_amber_rounded);
+      return;
+    }
     try {
       await windowManager.hide();
     } catch (_) {}
@@ -4130,6 +4143,11 @@ class PlayerController extends ChangeNotifier {
   Future<void> enterFishMode() async {
     if (!kIsWindowsDesktop || fishMode) return;
     await TrayService.ensure();
+    if (!TrayService.ready) {
+      OsdBus.show('托盘图标不可用，未进入摸鱼模式',
+          icon: Icons.warning_amber_rounded);
+      return;
+    }
     await TrayService.updateMenu(fishMode: true);
     _mutedBeforeFish = _isMuted;
     if (!_isMuted) await setMuted(true);

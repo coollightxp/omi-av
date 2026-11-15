@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 
 /// 安卓原生桥：系统画中画（小窗）、退到后台听电视、
@@ -12,6 +14,8 @@ const MethodChannel _channel = MethodChannel('omi/pip');
 
 void Function(bool active)? _pipCb;
 void Function(String cmd)? _audioCb;
+void Function()? _backCb;
+bool _backReadySent = false;
 bool _handlerInstalled = false;
 
 void _ensureHandler() {
@@ -26,8 +30,35 @@ void _ensureHandler() {
         // 通知栏按钮：playpause / prev / next / stop / restore
         _audioCb?.call(call.arguments?.toString() ?? '');
         break;
+      case 'onBackKey':
+        // 安卓系统返回键（遥控器/虚拟导航键）：原生直接上报，
+        // 不走 popRoute → PopScope（部分 ROM 冷启动后不回调）
+        _backCb?.call();
+        break;
     }
   });
+}
+
+/// 注册「返回键」回调，并通知原生可以接管返回键。
+///
+/// 安卓 13+ / 部分 ROM 上，系统返回经 `popRoute` → `PopScope` 后
+/// `onPopInvoked` 不回调，表现为「进程序后按多少次返回都不出退出卡」。
+/// 这里改由 MainActivity 的 `dispatchKeyEvent` 直接上报，Dart 侧统一
+/// 分派到播放页的状态机（抽屉/设置/定时/退出卡…）。
+void setBackHandler(void Function()? cb) {
+  _backCb = cb;
+  _ensureHandler();
+  if (cb == null || _backReadySent) return;
+  _backReadySent = true;
+  unawaited(_notifyBackReady());
+}
+
+/// 告诉原生「Dart 侧返回回调已就位，可以接管 KEYCODE_BACK」。
+/// 在这之前原生仍走系统默认通路，避免冷启动早期把返回键吞掉。
+Future<void> _notifyBackReady() async {
+  try {
+    await _channel.invokeMethod('backReady');
+  } catch (_) {}
 }
 
 /// 进入系统画中画；成功返回 true（Android 8.0+ 且 activity 在前台）

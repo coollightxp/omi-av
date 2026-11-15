@@ -20,10 +20,15 @@ class _OmiWindowListener extends WindowListener {
   @override
   void onWindowClose() async {
     if (TrayService.closeToTray) {
-      await windowManager.hide();
-    } else {
-      await ExitGuard.quit();
+      // 托盘图标没建起来时不能隐藏窗口：隐藏后没有任何入口能找回，
+      // 用户只能任务管理器结束（托盘失败多为图标资源路径/系统策略）
+      await TrayService.ensure();
+      if (TrayService.ready) {
+        await windowManager.hide();
+        return;
+      }
     }
+    await ExitGuard.quit();
   }
 }
 

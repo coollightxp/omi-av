@@ -121,6 +121,10 @@ jobs:
 
           class MainActivity : FlutterActivity() {
               private val channelName = "omi/pip"
+              // Dart 侧通道（configureFlutterEngine 里赋值）：返回键上报要用
+              private var ch: MethodChannel? = null
+              // Dart 侧注册好返回回调之前，返回键仍走系统默认通路
+              private var backReady = false
 
               // 外接遥控器/键盘时，安卓会给拿到焦点的 View 画一圈系统焦点
               // 高亮；FlutterView 全屏，按一下 OK 整个画面就被绿框包住
@@ -135,6 +139,19 @@ jobs:
                       super.dispatchKeyEvent(event)
                       return true
                   }
+                  // 返回键：直接上报 Dart，由播放页状态机决定关哪一层
+                  // （抽屉/EPG/底栏/设置/定时/退出卡）还是弹退出卡。
+                  // 以前靠 Flutter 的 popRoute → PopScope.onPopInvoked，
+                  // 部分 ROM 冷启动后不回调，用户看到「按多少次返回都不
+                  // 出退出卡」；这里绕开路由，键一定进 Dart
+                  if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+                      if (!backReady) return super.dispatchKeyEvent(event)
+                      if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+                          ch?.invokeMethod("onBackKey", null)
+                      }
+                      // 抬起也吃掉：否则 ACTION_UP 会再触发一次默认返回
+                      return true
+                  }
                   return super.dispatchKeyEvent(event)
               }
 
@@ -144,6 +161,15 @@ jobs:
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       v.defaultFocusHighlightEnabled = false
                   }
+                  // 冷启动后 FlutterView 不一定拿到窗口焦点：遥控器/键盘的
+                  // 「第一下」被系统用来把焦点移过去，按键本身不进 Flutter
+                  // （实测「进程序后按一下 OK 没反应，第二下才弹左侧面板」）。
+                  // 首帧显示后主动抢一次焦点，第一下按键就生效
+                  try {
+                      v.isFocusable = true
+                      v.isFocusableInTouchMode = true
+                      v.requestFocus()
+                  } catch (e: Exception) {}
               }
               // 切后台自动画中画：Dart 侧播放状态变化时同步（见 setAutoPip）
               private var autoPipArmed = false
@@ -154,10 +180,16 @@ jobs:
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+                  this.ch = ch
                   // 通知栏/锁屏卡片（MediaService）经同一通道向 Dart 发按钮命令
                   MediaService.dart = ch
                   ch.setMethodCallHandler { call, result ->
                           when (call.method) {
+                              // Dart 已装好返回回调：此后返回键由 Dart 接管
+                              "backReady" -> {
+                                  backReady = true
+                                  result.success(true)
+                              }
                               "enter" -> result.success(enterPip())
                               "exit" -> result.success(true)
                               "isTv" -> result.success(isTv())

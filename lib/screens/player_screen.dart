@@ -54,6 +54,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   bool _bottomPanelVisible = false;
   bool _settingsOpen = false;
 
+  /// 底部信息面板是**用户主动呼出**的（长按 OK / 底部按钮），
+  /// 而不是起播后自动闪一下 / 鼠标 hover 带出来的。
+  ///
+  /// 起播那一下会自动显示信息面板再定时隐藏（给「这台在演什么」一个交代）。
+  /// 但它同时把 OK/返回 抢了过去：用户实测「开机后按 OK，左边列表不出，
+  /// 得按第二下」「开机后按返回不出退出卡，按一下 OK 再按返回就好了」——
+  /// 就是第一下被这个自动面板吃掉了。自动面板不该拦截遥控器按键
+  bool _bottomPanelFromUser = false;
+
   // 手势调节状态
   bool _showBrightnessIndicator = false;
   bool _showVolumeIndicator = false;
@@ -226,6 +235,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 全局硬件键盘监听：不依赖 Flutter 焦点，任何控件持有焦点、面板
     // 关闭后都能收到按键；中文输入法状态下硬件 KeyDown 照样送达。
     HardwareKeyboard.instance.addHandler(_onGlobalKeyEvent);
+    // 安卓返回键：原生直接上报（绕开 popRoute/PopScope 的 ROM 差异）
+    setBackHandler(_onNativeBack);
     // 深层 widget（设置/EPG 面板）发来的中央 OSD 消息
     OsdBus.message.addListener(_onBusOsd);
     // 网页诊断日志随导出带版本号，便于定位是哪一版产生的故障
@@ -332,6 +343,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _osdTimer?.cancel();
         setState(() {
           _bottomPanelVisible = false;
+          _bottomPanelFromUser = false;
           _bottomHovering = false;
           _topBarVisible = false;
           _leftDrawerOpen = false;
@@ -354,7 +366,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
     if (becamePlaying && c.currentChannel != null && !mini) {
       setState(() {
+        // 起播自动闪一下信息面板：不算用户呼出，OK/返回 不被它拦截
         _bottomPanelVisible = true;
+        _bottomPanelFromUser = false;
         _bottomHovering = false;
       });
       _scheduleBottomHide();
@@ -367,6 +381,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       if (c.webPageActive && !mini) {
         setState(() {
           _bottomPanelVisible = true;
+          _bottomPanelFromUser = false;
           _bottomHovering = false;
         });
         _scheduleBottomHide();
@@ -523,6 +538,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onGlobalKeyEvent);
+    setBackHandler(null);
     _winHotkeys.setDigitHandler(null);
     _winHotkeys.setActionHandler(null);
     _ctl?.onCardExit = null;
@@ -821,7 +837,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           onReload: controller.reloadCurrentChannel,
                           onDismissRemote: () {
                             if (_bottomPanelVisible) {
-                              setState(() => _bottomPanelVisible = false);
+                              setState(() {
+                                _bottomPanelVisible = false;
+                                _bottomPanelFromUser = false;
+                              });
                             }
                             _bottomHideTimer?.cancel();
                           },
@@ -1043,6 +1062,55 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     return false;
   }
 
+  /// 安卓系统返回键（原生 dispatchKeyEvent 直接上报，见 services/pip.dart）。
+  ///
+  /// 为什么不用 PopScope 一条路：Flutter 的系统返回要走
+  /// `popRoute → Navigator.maybePop → PopScope.onPopInvoked`，部分 ROM
+  /// （尤其冷启动后）这一链不回调，用户实测「进程序后按多少次返回都
+  /// 不出退出卡」。原生直接上报后，返回键一定落到这里，再按当前打开的
+  /// 层级一层层关，语义与页面内 `_handleBackPressed` 完全一致。
+  void _onNativeBack() {
+    if (!mounted) return;
+    final esc = KeyDownEvent(
+      timeStamp: Duration.zero,
+      logicalKey: LogicalKeyboardKey.escape,
+      physicalKey: PhysicalKeyboardKey.escape,
+      character: null,
+    );
+    // 页面内的两级卡片（时间选择压在定时卡片上）
+    if (_timePickOpen) {
+      _handleTimePickKey(esc);
+      return;
+    }
+    if (_sleepCardOpen) {
+      _handleSleepCardKey(esc);
+      return;
+    }
+    if (_shutdownDialogOpen) {
+      _confirmShutdown(false);
+      return;
+    }
+    if (_exitDialogOpen) {
+      // 退出卡片自己处理返回（与卡片内 PopScope 同一入口）：
+      // 这里不再落到 _handleBackPressed，否则重入守卫会把键吞掉。
+      // 加一道僵尸保护：标志位还在但卡片路由已经不在时，绝不能调
+      // Navigator.pop——那会把播放页自己弹掉（黑屏）
+      if (_modalRouteOpen) {
+        _handleExitDialogKey(LogicalKeyboardKey.escape, true, false);
+      } else {
+        _exitDialogOpen = false;
+      }
+      return;
+    }
+    // 其它压在播放页上的弹层（扫码/设置子卡片/电台搜索/编辑…）：
+    // 交给路由栈自己关一层，播放页状态不动
+    if (_modalRouteOpen) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    _handleBackPressed();
+  }
+
   Future<void> _handleBackPressed() async {
     // 单一闸门：同一次按下的第二份投递直接丢弃（否则上一份刚把卡片
     // 关掉、这一份又把退出卡重新弹出来，表现=「返回键像没反应」）
@@ -1150,11 +1218,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       setState(() => _rightEpgOpen = false);
       return;
     }
-    if (_bottomPanelVisible) {
+    if (_bottomPanelVisible && _bottomPanelFromUser) {
       _logBackEaten('bottom_panel');
       _bottomHideTimer?.cancel();
-      setState(() => _bottomPanelVisible = false);
+      setState(() {
+        _bottomPanelVisible = false;
+        _bottomPanelFromUser = false;
+      });
       return;
+    }
+    // 起播自动闪一下 / hover 带出来的信息面板：不拦返回，顺手收起，
+    // 继续往下走（用户要的是「开机第一下返回就出退出卡」）
+    if (_bottomPanelVisible) {
+      _logBackEaten('bottom_auto');
+      _bottomHideTimer?.cancel();
+      setState(() {
+        _bottomPanelVisible = false;
+        _bottomPanelFromUser = false;
+      });
     }
     // 缓冲中（内置播放器 loading / 网页起播阶段）同样允许呼出退出卡片：
     // 此时画面还没出来，但用户按返回/右键就是想退出，不能吞掉按键
@@ -1939,10 +2020,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 全部转作面板内导航，不触发播放控制
   bool get _navPanelOpen => _leftDrawerOpen || _rightEpgOpen;
 
-  /// 底部控制面板是否由用户主动呼出（长按 OK / 鼠标 hover）。
+  /// 底部控制面板是否**由用户主动呼出**（长按 OK / 面板内按钮）。
   /// 为 true 期间 ←/→ 与 OK 用于面板内按钮导航，返回键关闭面板。
-  /// 面板显隐与 _bottomPanelVisible 一对一，不再被 state 强制联动
-  bool get _bottomPanelActive => _bottomPanelVisible;
+  /// 起播自动闪一下 / 鼠标 hover 带出来的面板不算：它不该抢走
+  /// 启动后的第一下 OK 和第一下返回（用户实测的两处「按了没反应」）
+  bool get _bottomPanelActive => _bottomPanelVisible && _bottomPanelFromUser;
 
   /// 把遥控器动作分发给当前打开的侧边面板，并取消桌面端自动隐藏
   /// （遥控器没有鼠标 hover，面板应一直保留到返回键关闭）
@@ -3047,6 +3129,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else {
           _leftDrawerOpen = true;
           _rightEpgOpen = false;
+          // 底部信息面板让位：左侧列表是压在最上面的覆盖层，
+          // 两者同时挂着一按 OK 就不知道进哪一层（面板串台）
+          _bottomHideTimer?.cancel();
+          _bottomPanelVisible = false;
+          _bottomPanelFromUser = false;
         }
       } else {
         if (_rightEpgOpen) {
@@ -3054,6 +3141,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else {
           _rightEpgOpen = true;
           _leftDrawerOpen = false;
+          // 同左侧：覆盖层打开时收起底部信息面板，避免串层
+          _bottomHideTimer?.cancel();
+          _bottomPanelVisible = false;
+          _bottomPanelFromUser = false;
         }
       }
     });
@@ -3365,6 +3456,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     setState(() {
       _bottomPanelVisible = !_bottomPanelVisible;
+      // 长按 OK 呼出的面板：后续 OK/←/→ 归它导航
+      _bottomPanelFromUser = _bottomPanelVisible;
       if (_bottomPanelVisible) {
         _scheduleBottomHide();
       }
@@ -3754,7 +3847,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final delay = context.read<PlayerController>().settings.autoHideDelay;
     _bottomHideTimer = Timer(Duration(milliseconds: delay), () {
       if (mounted && !_bottomHovering) {
-        setState(() => _bottomPanelVisible = false);
+        setState(() {
+          _bottomPanelVisible = false;
+          _bottomPanelFromUser = false;
+        });
       }
     });
   }
@@ -3767,7 +3863,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 已投屏（isCasting）必须照常呼出——那上面有「断开投屏/静音/旋转」，
     // 鼠标用户全靠它，挡掉等于没有退出口
     if (c.castWaiting) return;
-    setState(() => _bottomPanelVisible = true);
+    setState(() {
+      // hover 带出来的面板不算用户主动呼出，不抢遥控器按键
+      if (!_bottomPanelVisible) _bottomPanelFromUser = false;
+      _bottomPanelVisible = true;
+    });
     _bottomHideTimer?.cancel();
   }
 
