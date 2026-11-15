@@ -410,9 +410,12 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             // 新的一次按下：清掉可能残留的"吃掉抬起"标记
             _swallowOkUp = false;
             // 长按 OK（800ms）= 收藏/取消收藏；抬起前未超时则按短按播放
+            // 蓝牙遥控器抬起事件可能迟到甚至丢失：计时器到点时抽屉可能
+            // 已经因为别的原因关掉了，绝不能在抽屉不可见时还偷偷收藏
             _okLongFired = false;
             _okLongTimer?.cancel();
             _okLongTimer = Timer(const Duration(milliseconds: 800), () {
+              if (!widget.isOpen || !mounted) return;
               _okLongFired = true;
               final idx = _kbChannelIndex.clamp(0, channels.length - 1);
               _toggleFavorite(channels[idx]);

@@ -113,6 +113,7 @@ jobs:
           import android.os.Build
           import android.provider.Settings
           import android.util.Rational
+          import android.view.View
           import androidx.core.app.NotificationManagerCompat
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
@@ -120,6 +121,30 @@ jobs:
 
           class MainActivity : FlutterActivity() {
               private val channelName = "omi/pip"
+
+              // 外接遥控器/键盘时，安卓会给拿到焦点的 View 画一圈系统焦点
+              // 高亮；FlutterView 全屏，按一下 OK 整个画面就被绿框包住
+              // （2026-11-14 实测）。Flutter 首帧显示后按官方常量找到
+              // FlutterView，关掉它的系统焦点高亮，焦点提示交给 Flutter
+              // 内部（面板行高亮等）负责
+              // 遥控器「静音」键：先让 Flutter 收到（播放器自己静音，
+              // UI 会显示静音图标），然后 return true 阻止 AudioService
+              // 再静音系统。否则一次按键两处静音，取消时只解除一处
+              override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+                  if (event.keyCode == android.view.KeyEvent.KEYCODE_VOLUME_MUTE) {
+                      super.dispatchKeyEvent(event)
+                      return true
+                  }
+                  return super.dispatchKeyEvent(event)
+              }
+
+              override fun onFlutterUiDisplayed() {
+                  super.onFlutterUiDisplayed()
+                  val v = findViewById<View>(FlutterActivity.FLUTTER_VIEW_ID)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      v.defaultFocusHighlightEnabled = false
+                  }
+              }
               // 切后台自动画中画：Dart 侧播放状态变化时同步（见 setAutoPip）
               private var autoPipArmed = false
               // requestNotif 的系统弹窗是异步的：把 result 挂起，等用户
@@ -1172,6 +1197,14 @@ jobs:
             '    bool force_swallow = false;',
             '    if (kb->vkCode == VK_BROWSER_BACK) {',
             '      action = "back";',
+            '      force_swallow = true;',
+            '    } else if (kb->vkCode == VK_VOLUME_MUTE) {',
+            '      // 遥控器静音键：系统本来会先把系统音量静音，程序这边也跟着',
+            '      // toggle 一次，两处状态各记一份——取消时只解除一处，表现',
+            '      // 就是「取消静音还是没声 / 响一下又被静音」。前台是我们',
+            '      // 的时候直接吞掉，只让播放器自己静音（UI 有图标），',
+            '      // 系统音量不动',
+            '      action = "mute";',
             '      force_swallow = true;',
             '    } else if (kb->vkCode >= 0x30 && kb->vkCode <= 0x39) {',
             '      digit = static_cast<int>(kb->vkCode - 0x30);',
