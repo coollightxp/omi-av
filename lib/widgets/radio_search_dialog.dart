@@ -700,11 +700,28 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     final size = MediaQuery.of(context).size;
     // 遥控器 OK 通常发 select，Flutter 默认只认 Enter/Space：
     // 这里把 select / 手柄 A / 小键盘回车都映射成「激活当前焦点项」
+    //
+    // 方向键则**反过来**：全部映射成「什么也不做、且不许冒泡」。
+    //
+    // 2026-11-15 诊断日志实测：按一下 ↓，日志只有一条 `radio_row 0->1`，
+    // 但下一次按键的起点是 2 —— 说明我们移完一格之后，Flutter 的默认
+    // 方向导航（DirectionalFocusIntent）又把焦点顺着控件树推了一格。
+    // 一次按下走两格就是这样来的，靠按键去重根本挡不住，因为第二格
+    // 不是按键事件推的。这里把默认导航短路掉，方向键只由 `_handleKey`
+    // 一处处理，一行就是一格。
     return Shortcuts(
       shortcuts: const <ShortcutActivator, Intent>{
         SingleActivator(LogicalKeyboardKey.select): ActivateIntent(),
         SingleActivator(LogicalKeyboardKey.numpadEnter): ActivateIntent(),
         SingleActivator(LogicalKeyboardKey.gameButtonA): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.arrowUp):
+            DoNothingAndStopPropagationIntent(),
+        SingleActivator(LogicalKeyboardKey.arrowDown):
+            DoNothingAndStopPropagationIntent(),
+        SingleActivator(LogicalKeyboardKey.arrowLeft):
+            DoNothingAndStopPropagationIntent(),
+        SingleActivator(LogicalKeyboardKey.arrowRight):
+            DoNothingAndStopPropagationIntent(),
       },
       child: FocusTraversalGroup(
         policy: WidgetOrderTraversalPolicy(),
