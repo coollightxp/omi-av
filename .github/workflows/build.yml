@@ -956,9 +956,9 @@ jobs:
 
   build-android-x64:
     name: Build Android APK (x86_64)
-    # 通知栏/锁屏 MediaService 为 CI 注入的 Kotlin，从未被真正编译过——
-    # 临时放开 push 构建以便验证并产出可安装 APK；验证通过后可改回省额度
-    if: github.event_name != 'push' || true
+    # x86_64 只在发正式版时编（release published / tag）：平时 push 测试
+    # 只跑 安卓真机(arm64+armv7) + Windows 两个作业，省 CI 额度。
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
       OMI_KEYSTORE: /home/runner/.android/omi.keystore
