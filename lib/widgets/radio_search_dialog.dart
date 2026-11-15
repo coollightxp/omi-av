@@ -194,6 +194,12 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
         _moveInRow(region: false, delta: left ? -1 : 1);
         return KeyEventResult.handled;
       }
+      // 结果列表里按右：立刻回到列表最上边（焦点回第一行、列表滚到顶）。
+      // 一屏几十条的长列表，用 ↑ 一路翻回去太累——这是用户明确要的出口
+      if (!left && _rowFocus.values.any((n) => n.hasFocus)) {
+        _jumpListTop();
+        return KeyEventResult.handled;
+      }
       // 列表末尾「回到顶部」：往右就是出口（用户要求的"这一行往右退出"）
       if (_topRow.hasFocus && !left) {
         _backToTop();
@@ -329,9 +335,25 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   /// 两格」，顺序也跟眼睛看到的对不上。这里直接列出每一行，一行一个
   /// 停靠点，上下必定只走一格；到底后 % 回到页签，绝不会被困住。
   List<FocusNode> _navStops() {
-    final stops = <FocusNode>[_tabSearchFocus, _tabMineFocus];
+    // 页签行、搜索行都是「同一视觉行里的几个格子」：上下只停一次，
+    // 行内用左右切换。代表节点取当前所在的那一格（不在行上时取行首），
+    // 这样 [_stopIndexOf] 能把行内任何一格都归并到这一行上。
+    //
+    // 以前把「搜索按钮」「仅中国」也各算一个上下停靠点：它们在屏幕上和
+    // 输入框是同一行，遥控器往下按却在原地绕三下才下得去（用户实测
+    // 「往下按到搜索图标、再往下是仅中国、再下才是分类」）。现在与设置
+    // 面板同一套规律：一行一个停靠点。
+    final p = FocusManager.instance.primaryFocus;
+    final tabRep =
+        (p == _tabMineFocus || p == _tabSearchFocus) ? p! : _tabSearchFocus;
+    final barRep = switch (_barIndex) {
+      1 => _searchBtnFocus,
+      2 => _cnFocus,
+      _ => _queryFocus,
+    };
+    final stops = <FocusNode>[tabRep];
     if (_tab == 0) {
-      stops.addAll([_queryFocus, _searchBtnFocus, _cnFocus, _regionRow, _tagRow]);
+      stops.addAll([barRep, _regionRow, _tagRow]);
       for (final s in _results) {
         stops.add(_rowNodeFor('search:${s.id}'));
       }
@@ -354,6 +376,19 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     while (cur != null) {
       final i = stops.indexOf(cur);
       if (i >= 0) return i;
+      // 同一视觉行里的其它格子归到该行：页签两格、搜索条三格。
+      // 不归一的话，焦点落在「仅中国」上会被判成"不在停靠点里"，
+      // 一按上下就窜到页签（遥控器上就是"按一下跳回最上面"）
+      if (cur == _tabSearchFocus || cur == _tabMineFocus) {
+        final t = stops
+            .indexWhere((n) => n == _tabSearchFocus || n == _tabMineFocus);
+        if (t >= 0) return t;
+      }
+      if (cur == _queryFocus || cur == _searchBtnFocus || cur == _cnFocus) {
+        final b = stops.indexWhere((n) =>
+            n == _queryFocus || n == _searchBtnFocus || n == _cnFocus);
+        if (b >= 0) return b;
+      }
       cur = cur.parent;
     }
     return -1;
@@ -418,6 +453,25 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
         curve: Curves.easeOut,
       );
     }
+  }
+
+  /// 列表里按右：焦点回第一行、列表滚回顶部。
+  /// 只回列表顶、不跳回页签——用户按右是为了接着从上往下挑，
+  /// 要回页签用 ↑ 或末尾那条「回到顶部」。
+  void _jumpListTop() {
+    if (_tab == 0) {
+      if (_results.isEmpty) return;
+      _rowNodeFor('search:${_results.first.id}').requestFocus();
+    } else {
+      final items = RadioLibrary.items;
+      if (items.isEmpty) return;
+      _rowNodeFor('mine:${items.first.id}').requestFocus();
+    }
+    _ensureVisible();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_resultScroll.hasClients) _resultScroll.jumpTo(0);
+    });
   }
 
   /// 「我的电台」页签上按 OK：焦点进卡片，落到第一台
@@ -588,10 +642,14 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
               ),
             ),
           ),
-          GhostButton(
-            icon: Icons.close,
-            tooltip: '关闭',
-            onPressed: () => Navigator.pop(context),
+          // 关闭 ✕ 不进焦点序列：遥控器的出口是返回键/菜单键，
+          // 焦点停在这颗叉上没有意义，还会让上下走位多一跳
+          ExcludeFocus(
+            child: GhostButton(
+              icon: Icons.close,
+              tooltip: '关闭',
+              onPressed: () => Navigator.pop(context),
+            ),
           ),
         ],
       ),
