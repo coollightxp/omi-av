@@ -2227,19 +2227,18 @@ class _PlayerSettingsTab extends StatelessWidget {
                 },
               ),
             ),
-            // 声音实验室（方案 12.3 第二档）：mpv lavfi 音频滤镜，
-            // 内置播放器全局生效（电视伴音/电台都可用；网页频道不支持）
+            // 音效选档已收进播放页底部面板的「音效」弹窗（用户要求：
+            // 直接的东西放明面上，设置里不重复放）；这里只留自定义均衡器
             ListTile(
               leading: const Icon(Icons.equalizer, color: Colors.white70),
-              title: const Text('声音实验室',
+              title: const Text('自定义均衡器（10 段）',
                   style: TextStyle(color: Colors.white, fontSize: 15)),
               subtitle: Text(
-                '当前：${controller.audioPreset.isEmpty ? '标准' : _audioPresetLabelOf(controller.audioPreset)}'
-                ' · 人声更清楚 / 低音更带感 / 夜间音量平稳，仅内置播放器',
+                _eqSummary(controller.audioEqGains),
                 style: const TextStyle(color: Colors.white54, fontSize: 12),
               ),
               trailing: const Icon(Icons.chevron_right, color: Colors.white38),
-              onTap: () => _showAudioPresetDialog(context, controller),
+              onTap: () => _showEqDialog(context, controller),
             ),
             SwitchListTile(
               secondary: const Icon(Icons.graphic_eq, color: Colors.white70),
@@ -2406,87 +2405,6 @@ class _PlayerSettingsTab extends StatelessWidget {
         ),
       ],
     );
-  }
-
-  static String _audioPresetLabelOf(String key) {
-    switch (key) {
-      case 'space':
-        return '3D 全景环绕';
-      case 'voice':
-        return '清澈人声';
-      case 'bass':
-        return '澎湃低音';
-      case 'vintage':
-        return '复古胆机';
-      case 'live':
-        return '现场 LIVE';
-      case 'car':
-        return '车载座舱';
-      case 'night':
-        return '夜间模式';
-      default:
-        return '标准';
-    }
-  }
-
-  Future<void> _showAudioPresetDialog(
-      BuildContext context, PlayerController controller) async {
-    final current = controller.audioPreset;
-    final options = <(String, String, String)>[
-      ('', '标准 / 原声无损', '不加处理，原声直出'),
-      ('space', '3D 全景环绕', '立体声拉宽+微回声，声音往外撑开'),
-      ('voice', '清澈人声', '新闻/口播更清楚，压轰鸣提人声'),
-      ('bass', '澎湃低音', '60/130Hz 双点提升，音乐台更带感'),
-      ('vintage', '复古胆机', '削高频毛刺暖低频，老收音机的味道'),
-      ('live', '现场 LIVE', '厅堂混响，宛如音乐厅前排'),
-      ('car', '车载座舱', '去风噪补鼓点，车载扬声器调校'),
-      ('night', '夜间模式', '音量忽大忽小被抹平，睡前听不打醒'),
-    ];
-    final picked = await showChildDialog<String>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('声音实验室'),
-        children: [
-          for (final o in options)
-            RadioGroup<String>(
-              groupValue: current,
-              onChanged: (v) => Navigator.pop(ctx, v),
-              child: RadioListTile<String>(
-                value: o.$1,
-                title: Text(o.$2,
-                    style: const TextStyle(color: Colors.white, fontSize: 15)),
-                subtitle: Text(o.$3,
-                    style:
-                        const TextStyle(color: Colors.white38, fontSize: 12)),
-              ),
-            ),
-          RadioGroup<String>(
-            groupValue: current,
-            onChanged: (v) => Navigator.pop(ctx, v),
-            child: RadioListTile<String>(
-              value: 'custom',
-              title: Text('自定义均衡器',
-                  style: const TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: Text(_eqSummary(controller.audioEqGains),
-                  style: const TextStyle(color: Colors.white38, fontSize: 12)),
-            ),
-          ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Text('仅内置播放器生效；网页频道用站点自己的播放器，不参与',
-                style: TextStyle(color: Colors.white24, fontSize: 11.5)),
-          ),
-        ],
-      ),
-    );
-    if (picked == null) return;
-    if (picked == 'custom') {
-      await controller.setAudioPreset('custom');
-      if (!context.mounted) return;
-      await _showEqDialog(context, controller);
-      return;
-    }
-    await controller.setAudioPreset(picked);
   }
 
   /// 均衡器概要（拖到非 0 的段才显示）

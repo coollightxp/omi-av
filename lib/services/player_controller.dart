@@ -26,6 +26,7 @@ import 'cast_stream_proxy.dart';
 import 'dlna_service.dart';
 import 'win_hotkeys.dart';
 import 'cast_log.dart';
+import 'web_diag.dart';
 import 'format_hint.dart';
 import 'net_warm.dart';
 import 'media/omi_video_backend.dart';
@@ -3765,6 +3766,9 @@ class PlayerController extends ChangeNotifier {
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     final total = _settings.retryTimes;
+    // 留痕：跟「选音效后马上报错」这类时序问题对时间线用
+    WebDiag.log('play_err',
+        'preset=${_settings.audioPreset}|ch=${_currentChannel?.name ?? '-'}');
     // 后台（通知卡片在操作）不重试。
     //
     // 后台没有界面可看，重试只会让卡片在「播放/暂停」之间反复闪、声音
@@ -4220,6 +4224,17 @@ class PlayerController extends ChangeNotifier {
   String get playEngine => _settings.playEngine;
   bool get useMdkEngine => _settings.playEngine == 'mdk';
 
+  /// 场景音效（mpv lavfi 滤镜）当前会话是否可用：
+  /// - MDK 引擎不吃 mpv 的 af 属性（选了也是静默无效）→ 不可用；
+  /// - 电台固定走 MPV → 可用；MDK 起播失败自动回退 MPV（_forceMpv）→ 可用；
+  /// - 网页频道前台时声音走站点自己的播放器 → 不可用。
+  /// 底部面板据此把「音效」按钮置灰，设置里的均衡器同理参考此判断提示。
+  bool get audioFxAvailable =>
+      (_settings.playEngine != 'mdk' ||
+          _forceMpv ||
+          (currentChannel?.isRadio ?? false)) &&
+      !_webPageActive;
+
   /// 切换播放内核。正在播内置流时立刻重开当前台，让用户当场看到差别；
   /// 网页频道不受影响（网页走 WebView，与内核无关）
   Future<void> setPlayEngine(String engine) async {
@@ -4258,6 +4273,30 @@ class PlayerController extends ChangeNotifier {
       on ? '真波形纹理：开（下次换台生效）' : '真波形纹理：关',
       icon: Icons.graphic_eq,
     );
+  }
+
+  /// 当前音效档显示名
+  String get audioPresetLabel => _audioPresetLabel(_settings.audioPreset);
+
+  /// 场景音效固定顺序（底部面板「音效」按钮一键循环用）
+  static const List<String> kAudioPresetCycleOrder = [
+    '',
+    'space',
+    'voice',
+    'bass',
+    'vintage',
+    'live',
+    'car',
+    'night',
+  ];
+
+  /// 底部面板「音效」按钮：按固定顺序循环，遥控器/手机一键切换，
+  /// 不用进设置翻（用户要求：这是个很直接的东西）
+  Future<void> cycleAudioPreset() async {
+    final i = kAudioPresetCycleOrder.indexOf(_settings.audioPreset);
+    final next =
+        kAudioPresetCycleOrder[(i < 0 ? 0 : i + 1) % kAudioPresetCycleOrder.length];
+    await setAudioPreset(next);
   }
 
   /// 切换声音实验室预设（'' = 标准）：mpv lavfi 音频滤镜。

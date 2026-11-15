@@ -82,6 +82,10 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   /// 结果列表滚动控制器：回到顶部要能把列表也拉回去
   final ScrollController _resultScroll = ScrollController();
 
+  /// 头部（标题/页签/搜索条/筛选行）的测量锚点：整页滚动后，键盘导航
+  /// 的跳转偏移要加上头部高度才能落到正确行上
+  final GlobalKey _headerKey = GlobalKey();
+
   /// 「我的电台」列表自己的滚动控制器（两个列表不能共用同一个）
   final ScrollController _mineScroll = ScrollController();
 
@@ -512,9 +516,11 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     final sc = _tab == 0 ? _resultScroll : _mineScroll;
     if (sc.hasClients) {
       final h = _measuredRowHeight();
+      // 整页滚动后，列表上方还有头部（标题/页签/搜索/筛选），跳转偏移要加上它
+      final headerH = _headerKey.currentContext?.size?.height ?? 0;
       final target = index == null
           ? sc.position.maxScrollExtent
-          : (index * h - 2 * h).clamp(0.0, sc.position.maxScrollExtent);
+          : (headerH + index * h - 2 * h).clamp(0.0, sc.position.maxScrollExtent);
       sc.jumpTo(target);
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -744,20 +750,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
                 border: Border.all(color: AppColors.stroke),
               ),
               clipBehavior: Clip.antiAlias,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _header(),
-                  _tabBar(),
-                  const Divider(color: AppColors.divider, height: 1),
-                  if (_tab == 0) ...[
-                    _searchBar(),
-                    _filterRows(),
-                    const Divider(color: AppColors.divider, height: 1),
-                  ],
-                  Expanded(child: _tab == 0 ? _resultArea() : _mineArea()),
-                ],
-              ),
+              child: _tab == 0 ? _searchPage() : _minePage(),
             ),
           ),
         ),
@@ -866,81 +859,102 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
 
   // ==================== 我的电台（管理） ====================
 
-  Widget _mineArea() {
+  /// 整页可滚动的「我的电台」页：头部 + 台单进同一个 CustomScrollView，
+  /// 手机上从任何位置上滑都能看到底部。
+  Widget _minePage() {
     final items = RadioLibrary.items;
-    if (items.isEmpty) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(28),
+    return CustomScrollView(
+      controller: _mineScroll,
+      // 缓存给足：上下移动时紧邻的那一行必定已构建，聚焦不卡
+      cacheExtent: 800,
+      slivers: [
+        SliverToBoxAdapter(
+          key: _headerKey,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.library_music_outlined,
-                  color: AppColors.textTertiary, size: 40),
-              SizedBox(height: 14),
-              Text(
-                '还没有自己的电台\n在「搜索电台」里找到台后点 + 就加到这里',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                    color: AppColors.textTertiary, fontSize: 13, height: 1.6),
-              ),
+              _header(),
+              _tabBar(),
+              const Divider(color: AppColors.divider, height: 1),
+              if (items.isNotEmpty) _mineSummaryRow(items.length),
             ],
           ),
         ),
-      );
-    }
-    final c = context.watch<PlayerController>();
-    final playingId = c.currentChannel?.id;
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '共 ${items.length} 个 · 点一下直接试听，叉掉即移除',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      color: AppColors.textTertiary, fontSize: 11.5),
-                ),
+        if (items.isEmpty)
+          const SliverFillRemaining(
+            hasScrollBody: false,
+            child: Padding(
+              padding: EdgeInsets.all(28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.library_music_outlined,
+                      color: AppColors.textTertiary, size: 40),
+                  SizedBox(height: 14),
+                  Text(
+                    '还没有自己的电台\n在「搜索电台」里找到台后点 + 就加到这里',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        color: AppColors.textTertiary,
+                        fontSize: 13,
+                        height: 1.6),
+                  ),
+                ],
               ),
-              TextButton.icon(
-                onPressed: () => _clearAll(),
-                icon: const Icon(Icons.delete_sweep_outlined, size: 16),
-                label: const Text('清空', style: TextStyle(fontSize: 12)),
-                style: TextButton.styleFrom(
-                  foregroundColor: AppColors.textTertiary,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: const Size(0, 32),
-                ),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView.separated(
-            controller: _mineScroll,
+            ),
+          )
+        else
+          SliverPadding(
             padding: const EdgeInsets.only(bottom: 8),
-            // 同搜索结果列表：缓存给足，紧邻行一定已构建，上下只走一格
-            cacheExtent: 800,
-            itemCount: items.length,
-            separatorBuilder: (_, __) =>
-                const Divider(color: AppColors.divider, height: 1),
-            itemBuilder: (context, i) {
-              final s = items[i];
-              return _MineRow(
-                station: s,
-                playing: playingId == RadioLibrary.channelIdOf(s.id),
-                focusNode: _rowNodeFor('mine:${s.id}'),
-                onPlay: () => _play(s),
-                onRemove: () => _toggle(s),
-              );
-            },
+            sliver: SliverList.separated(
+              itemCount: items.length,
+              separatorBuilder: (_, __) =>
+                  const Divider(color: AppColors.divider, height: 1),
+              itemBuilder: (context, i) {
+                final s = items[i];
+                final playingId = context.watch<PlayerController>()
+                    .currentChannel
+                    ?.id;
+                return _MineRow(
+                  station: s,
+                  playing: playingId == RadioLibrary.channelIdOf(s.id),
+                  focusNode: _rowNodeFor('mine:${s.id}'),
+                  onPlay: () => _play(s),
+                  onRemove: () => _toggle(s),
+                );
+              },
+            ),
           ),
-        ),
       ],
+    );
+  }
+
+  Widget _mineSummaryRow(int count) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              '共 $count 个 · 点一下直接试听，叉掉即移除',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  color: AppColors.textTertiary, fontSize: 11.5),
+            ),
+          ),
+          TextButton.icon(
+            onPressed: () => _clearAll(),
+            icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+            label: const Text('清空', style: TextStyle(fontSize: 12)),
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.textTertiary,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(0, 32),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1248,76 +1262,111 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     );
   }
 
-  Widget _resultArea() {
+  /// 整页可滚动的「搜索电台」页：标题/页签/搜索条/地区/分类/结果列表
+  /// 全在一个 CustomScrollView 里。以前头部是固定的、只有 Expanded 里的
+  /// 列表能滚 —— Windows 720p 下列表区够大没感觉；手机横屏 400dp 高，
+  /// 固定头部占掉大半，从列表区外上滑毫无反应，用户以为「不支持触屏」。
+  Widget _searchPage() {
+    return CustomScrollView(
+      controller: _resultScroll,
+      // 缓存给足：上下移动时紧邻的那一行必定已构建，聚焦不卡
+      cacheExtent: 800,
+      slivers: [
+        SliverToBoxAdapter(
+          key: _headerKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _header(),
+              _tabBar(),
+              const Divider(color: AppColors.divider, height: 1),
+              _searchBar(),
+              _filterRows(),
+              const Divider(color: AppColors.divider, height: 1),
+            ],
+          ),
+        ),
+        _resultSliver(),
+      ],
+    );
+  }
+
+  Widget _resultSliver() {
     if (_loading) {
-      return const Center(
-        child: SizedBox(
-          width: 26,
-          height: 26,
-          child: CircularProgressIndicator(strokeWidth: 2.4),
+      return const SliverFillRemaining(
+        hasScrollBody: false,
+        child: Center(
+          child: SizedBox(
+            width: 26,
+            height: 26,
+            child: CircularProgressIndicator(strokeWidth: 2.4),
+          ),
         ),
       );
     }
     if (_error.isNotEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.cloud_off,
-                  color: AppColors.textTertiary, size: 36),
-              const SizedBox(height: 12),
-              Text(
-                _error,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: AppColors.textSecondary, fontSize: 13),
-              ),
-              const SizedBox(height: 12),
-              TextButton(
-                onPressed: () => _search(),
-                child: const Text('重试'),
-              ),
-            ],
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.cloud_off,
+                    color: AppColors.textTertiary, size: 36),
+                const SizedBox(height: 12),
+                Text(
+                  _error,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      color: AppColors.textSecondary, fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: () => _search(),
+                  child: const Text('重试'),
+                ),
+              ],
+            ),
           ),
         ),
       );
     }
     if (_results.isEmpty) {
-      return Center(
-        child: Text(
-          _lastQuery.isEmpty && _tag.isEmpty
-              ? '目录暂时没有返回结果'
-              : '没搜到「$_lastQuery」，换个关键词或取消「仅中国」试试',
-          style: const TextStyle(color: AppColors.textTertiary, fontSize: 13),
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: Center(
+          child: Text(
+            _lastQuery.isEmpty && _tag.isEmpty
+                ? '目录暂时没有返回结果'
+                : '没搜到「$_lastQuery」，换个关键词或取消「仅中国」试试',
+            style:
+                const TextStyle(color: AppColors.textTertiary, fontSize: 13),
+          ),
         ),
       );
     }
     final controller = context.watch<PlayerController>();
-    return ListView.separated(
-      controller: _resultScroll,
+    return SliverPadding(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      // 预构建视口外上下各一大段（约 10 行）：上下移动时紧邻的那一行
-      // 必定已经在树上，_focusRow 不用先滚动就能直接聚焦，手感不卡。
-      cacheExtent: 800,
-      // 多一行「回到顶部」：长列表按到底后，遥控器没有别的出口回得去
-      // （用户实测：按到底再往回返，返不回最顶上）
-      itemCount: _results.length + 1,
-      separatorBuilder: (_, __) =>
-          const Divider(color: AppColors.divider, height: 1),
-      itemBuilder: (context, i) {
-        if (i == _results.length) return _backToTopRow();
-        final s = _results[i];
-        final saved = controller.isStationSaved(s.id);
-        return _StationRow(
-          station: s,
-          saved: saved,
-          builtin: _builtinIds.contains(s.id),
-          focusNode: _rowNodeFor('search:${s.id}'),
-          onToggle: () => _toggle(s),
-        );
-      },
+      sliver: SliverList.separated(
+        itemCount: _results.length + 1,
+        separatorBuilder: (_, __) =>
+            const Divider(color: AppColors.divider, height: 1),
+        itemBuilder: (context, i) {
+          if (i == _results.length) return _backToTopRow();
+          final s = _results[i];
+          final saved = controller.isStationSaved(s.id);
+          return _StationRow(
+            station: s,
+            saved: saved,
+            builtin: _builtinIds.contains(s.id),
+            focusNode: _rowNodeFor('search:${s.id}'),
+            onToggle: () => _toggle(s),
+          );
+        },
+      ),
     );
   }
 }

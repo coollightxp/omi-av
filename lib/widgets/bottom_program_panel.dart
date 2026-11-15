@@ -533,6 +533,15 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       // 全屏仍只在桌面端（移动端全屏由系统/手势接管）
       _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
           c.isMuted ? '取消静音' : '静音', c.toggleMute),
+      // 场景音效：点按钮在上方弹出选单（同线路菜单样式）上下选；
+      // MDK 内核/网页频道不支持 mpv 音频滤镜 → 置灰不可点
+      _KbAction(
+          'audioFx',
+          Icons.graphic_eq,
+          c.audioFxAvailable
+              ? '音效：${c.audioPresetLabel}（弹出选单）'
+              : '音效（${c.webPageActive ? '网页频道' : 'MDK 内核'}不支持）',
+          c.audioFxAvailable ? () => _showAudioFxMenu(context, c) : null),
       if (c.isDesktop)
         _KbAction(
             'fullscreen',
@@ -619,6 +628,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     }
 
     addById('mute');
+    addById('audioFx');
     addById('fullscreen');
 
     // 尾部功能组：重载 / 网页切换 / 断开投屏（有则加竖线）
@@ -698,6 +708,81 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     if (key == null) return a.tooltip;
     if (!context.read<PlayerController>().isDesktop) return a.tooltip;
     return '${a.tooltip} ($key)';
+  }
+
+  /// 场景音效选单：仿「线路菜单」（SourceStepper）在按钮上方弹一块
+  /// 小窗口，上下键移动 / OK 选中 / 触屏直点，当前档打勾。
+  /// 设置面板里不再放音效入口（用户要求：这是个很直接的东西，
+  /// 收进设置反而藏了）；自定义均衡器仍留在设置里。
+  Future<void> _showAudioFxMenu(
+      BuildContext context, PlayerController c) async {
+    final box = context.findRenderObject() as RenderBox?;
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (box == null || overlay == null) return;
+    final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final d = AppDensity.of(context);
+    final t = AppTypography.of(context);
+    final order = PlayerController.kAudioPresetCycleOrder;
+    final current = c.audioPreset;
+    // 档位说明与设置里原「声音实验室」一致，弹窗里窄屏只放主标题
+    const labels = <String, String>{
+      '': '标准（原声无损）',
+      'space': '3D 全景环绕',
+      'voice': '清澈人声',
+      'bass': '澎湃低音',
+      'vintage': '复古胆机',
+      'live': '现场 LIVE',
+      'car': '车载座舱',
+      'night': '夜间模式',
+    };
+    final rowH = d.listRowHeight * 0.8;
+    const width = 230.0;
+    final menuH = order.length * rowH + 16;
+    final chosen = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        origin.dx.clamp(8.0, overlay.size.width - width - 8),
+        (origin.dy - menuH).clamp(8.0, double.infinity),
+        overlay.size.width - origin.dx.clamp(0.0, overlay.size.width - width - 8) - width,
+        0,
+      ),
+      color: const Color(0xF01A1614),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(d.modalRadius),
+      ),
+      items: [
+        for (final key in order)
+          PopupMenuItem<String>(
+            value: key,
+            height: rowH,
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 22,
+                  child: key == current
+                      ? const Icon(Icons.check,
+                          size: 16, color: Color(0xFFFFB35C))
+                      : null,
+                ),
+                Text(
+                  labels[key] ?? key,
+                  style: TextStyle(
+                    color: key == current ? Colors.white : Colors.white70,
+                    fontSize: t.body,
+                  ),
+                ),
+                const Spacer(),
+                if (key == current)
+                  Text('当前',
+                      style:
+                          TextStyle(color: Colors.white38, fontSize: t.caption)),
+              ],
+            ),
+          ),
+      ],
+    );
+    if (chosen != null && chosen != current) await c.setAudioPreset(chosen);
   }
 
   /// 分组竖线：电视/桌面显示，手机档不画（5 钮连线显碎）

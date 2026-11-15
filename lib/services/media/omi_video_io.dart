@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../web_diag.dart';
 import 'omi_video_backend.dart';
 import 'omi_video_value.dart';
 
@@ -543,20 +544,34 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
       if (user.isNotEmpty) user,
       if (_meterActive) 'astats=metadata=1:reset=1:measure_perchannel=none',
     ];
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    final chain =
+        parts.isEmpty ? null : '@$_meterLabel:lavfi=[${parts.join(',')}]';
     try {
-      final platform = _player.platform;
-      if (platform is NativePlayer) {
-        if (parts.isEmpty) {
-          await platform.command(['af', 'clear']);
-        } else {
-          await platform.command([
-            'af',
-            'set',
-            '@$_meterLabel:lavfi=[${parts.join(',')}]',
-          ]);
-        }
+      if (chain == null) {
+        await platform.command(['af', 'clear']);
+        WebDiag.log('af_clear ok');
+        return;
       }
-    } catch (_) {}
+      String err = '';
+      try {
+        await platform.command(['af', 'set', chain]);
+      } catch (e1) {
+        // 命令方式被拒（部分平台/内核对 af 子命令支持不全）：
+        // 改走属性写入再试一次，两次都失败才算不支持
+        err = '$e1';
+        await platform.setProperty('af', chain);
+      }
+      // 读回校验：mpv 接受了但把不认识的滤镜悄悄丢掉时，读回里就没有
+      // lavfi 链——这种「假成功」就是用户说的「选了没效果」
+      final back = await platform.getProperty('af');
+      final ok = back.contains('lavfi');
+      WebDiag.log('af_set',
+          'ok=$ok${err.isEmpty ? '' : ' cmdErr=$err'} back=${back.replaceAll(',', ' ')}');
+    } catch (e) {
+      WebDiag.log('af_set fail', '$e');
+    }
   }
 
   /// 异步释放 native 资源（可 await / 可加超时）。
