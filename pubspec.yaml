@@ -1,11 +1,11 @@
 name: omi
 description: 欧米视听 (Omi) — 跨平台直播视听应用：电视直播、电台、投屏接收。
 publish_to: 'none'
-version: 2.3.21+91
+version: 2.3.22+92
 
 environment:
-  sdk: '>=3.3.0 <4.0.0'
-  flutter: '>=3.19.0'
+  sdk: '>=3.10.0 <4.0.0'
+  flutter: '>=3.38.0'
 
 dependencies:
   flutter:
@@ -20,9 +20,20 @@ dependencies:
 
   # Android/Windows/Linux 播放内核：media_kit (libmpv)
   # 自带 HLS/DASH/RTSP 嗅探、HTTP 头透传与断点续传，替代 fvp(MDK)
-  media_kit: ^1.1.11
-  media_kit_video: ^1.2.5
-  media_kit_libs_video: ^1.0.5
+  # 2.3.22 起换用 Predidit 维护分支（Kazumi 同款）：官方打包的安卓
+  # libmpv FFmpeg 滤镜不全（media-kit#570：aresample 缺失 → lavfi
+  # 滤镜图配置失败 → 挂音效整路报错）；该分支安卓 libmpv 升到 v1.3.0
+  # 滤镜齐全，且通过 native assets 自带二进制——不再需要 media_kit_libs_*
+  media_kit:
+    git:
+      url: https://github.com/Predidit/media-kit.git
+      ref: cd75bcfe94ba45ebb6f6b940c68e072d079aee14
+      path: media_kit
+  media_kit_video:
+    git:
+      url: https://github.com/Predidit/media-kit.git
+      ref: cd75bcfe94ba45ebb6f6b940c68e072d079aee14
+      path: media_kit_video
 
   # 状态管理
   provider: ^6.1.2
@@ -104,3 +115,9 @@ flutter:
     - assets/cctv/
     # Windows 系统托盘图标（后台播放/摸鱼模式）
     - assets/tray/
+
+# fork 的 media_kit_video 锁 wakelock_plus 1.3.3（win32 5.x），与
+# share_plus 13（win32 6.x）冲突；wakelock 1.8.2 用的也是 win32 6，
+# API 对 fork 无破坏，统一抬到 1.8.2 解掉
+dependency_overrides:
+  wakelock_plus: ^1.8.2
