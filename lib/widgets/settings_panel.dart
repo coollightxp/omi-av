@@ -251,6 +251,14 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 面板根焦点上的按键：与上面的全局处理器共用同一套逻辑，
   /// 保证焦点在面板内时按键一定先在这里被吃掉
   KeyEventResult _onPanelKeyEvent(FocusNode node, KeyEvent event) {
+    if (!widget.isOpen) return KeyEventResult.ignored;
+    // 上面压着下一级卡片（编辑/确认/扫码…）时，按键归那张卡片。
+    // 设置面板只是淡出，仍在树里；不挡的话上下键会把焦点送到
+    // 看不见的行尾按钮上，OK 一按就执行了（安卓实测：切台时
+    // 弹出「节目单已是最新」，其实就是这条路径）
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) {
+      return KeyEventResult.ignored;
+    }
     if (_handleVertical(event)) return KeyEventResult.handled;
     // 宽屏双栏：内容区按左 = 回分类栏（遥控器用户左右双向都能走）
     if (event is KeyDownEvent || event is KeyRepeatEvent) {
@@ -327,6 +335,7 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 不再有「到顶按上跳回分类栏」——用户明确要求上下只在页内循环，
   /// 只有左右才在两区之间跳。
   bool _handleVertical(KeyEvent event) {
+    if (!widget.isOpen) return false;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final key = event.logicalKey;
     final isUp = key == LogicalKeyboardKey.arrowUp;
@@ -397,7 +406,17 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedPositioned(
+    // 面板常驻挂载（靠位移+透明度收放），**关闭时必须把整棵子树移出
+    // 焦点树**：否则里面的输入框/行尾按钮还能持有焦点。安卓实测后果：
+    // ① 切台时输入法自己蹦出来（隐藏输入框仍连着输入连接）；
+    // ② OK 被设置里「立即更新节目单」吃掉，弹「节目单已是最新」。
+    // 光判 isOpen 不接按键不够——焦点留在里面时，激活走的是焦点树，
+    // 不经过按键分发。
+    return ExcludeFocus(
+      excluding: !widget.isOpen,
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
+        child: AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
       bottom: widget.isOpen ? 0 : -MediaQuery.of(context).size.height,
@@ -552,6 +571,8 @@ class _SettingsPanelState extends State<SettingsPanel>
               ),
             ),
           ),
+        ),
+      ),
         ),
       ),
     );
