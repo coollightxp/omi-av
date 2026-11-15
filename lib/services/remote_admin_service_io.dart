@@ -42,6 +42,16 @@ class RemoteAdminHooks {
   /// 内置节目单状态：{count, at}（网页上显示「N 条节目 · 更新于 …」）
   final Future<Map<String, dynamic>> Function()? builtinEpgInfo;
 
+  /// 内置清单（央视频道 / 电台精选）状态：
+  /// {cctv:{count,at,days}, radio:{count,at,days}}
+  final Future<Map<String, dynamic>> Function()? builtinInfo;
+
+  /// 手动更新内置清单：kind = cctv / radio，返回 {ok, message}
+  final Future<Map<String, dynamic>> Function(String kind)? updateBuiltin;
+
+  /// 设置内置清单自动检查间隔（天）：0 关闭 / 7 每周 / 30 每月
+  final Future<void> Function(String kind, int days)? setBuiltinInterval;
+
   const RemoteAdminHooks({
     required this.getSnapshot,
     required this.applySnapshot,
@@ -54,6 +64,9 @@ class RemoteAdminHooks {
     this.restoreBuiltinRadio,
     this.updateBuiltinEpg,
     this.builtinEpgInfo,
+    this.builtinInfo,
+    this.updateBuiltin,
+    this.setBuiltinInterval,
   });
 }
 
@@ -67,8 +80,7 @@ class RemoteAdminService {
   RemoteAdminHooks? _hooks;
 
   bool get isRunning => _server != null;
-  String get endpoint =>
-      _server == null ? '' : 'http://$_ip:$_port';
+  String get endpoint => _server == null ? '' : 'http://$_ip:$_port';
 
   Future<void> start({required RemoteAdminHooks hooks}) async {
     if (_server != null) return;
@@ -181,6 +193,28 @@ class RemoteAdminService {
           final msg = await fn();
           _json(req, {'ok': true, 'message': msg});
         }
+      } else if (req.method == 'GET' && path == '/api/builtin/info') {
+        // 内置清单（央视频道 / 电台精选）状态，与 App 设置面板一致
+        final info = await _hooks!.builtinInfo?.call() ?? {};
+        _json(req, {'ok': true, ...info});
+      } else if (req.method == 'POST' && path == '/api/builtin/update') {
+        final body = await utf8.decoder.bind(req).join();
+        final kind = (jsonDecode(body) as Map)['kind']?.toString() ?? 'cctv';
+        final fn = _hooks!.updateBuiltin;
+        if (fn == null) {
+          req.response.statusCode = 501;
+          _json(req, {'ok': false, 'error': 'not supported'});
+        } else {
+          _json(req, await fn(kind));
+        }
+      } else if (req.method == 'POST' && path == '/api/builtin/interval') {
+        final body = await utf8.decoder.bind(req).join();
+        final m = (jsonDecode(body) as Map);
+        await _hooks!.setBuiltinInterval?.call(
+          m['kind']?.toString() ?? 'cctv',
+          (m['days'] as num?)?.toInt() ?? 7,
+        );
+        _json(req, {'ok': true});
       } else {
         req.response.statusCode = 404;
         req.response.write('not found');
@@ -301,6 +335,9 @@ button{font-family:inherit;cursor:pointer;-webkit-appearance:none;appearance:non
   background:#1d2330;color:#b9c4da;font-size:12.5px;white-space:nowrap;
 }
 .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
+/* 地区 / 分类两行：每行一个标签 + 横向换行 chip，与电视端一致 */
+.chip-row{display:-webkit-flex;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;-webkit-align-items:center;align-items:center;margin:6px -4px 0}
+.chip-label{-webkit-flex:0 0 34px;flex:0 0 34px;color:#7b869c;font-size:11.5px;padding-left:4px}
 .search-row{display:-webkit-flex;display:flex;margin-top:10px}
 .search-row input{-webkit-flex:1 1 auto;flex:1 1 auto;min-width:0;margin-right:8px}
 .search-row .btn{-webkit-flex:0 0 84px;flex:0 0 84px;height:44px}
@@ -514,13 +551,17 @@ hostEl.textContent=location.host||'Omi';
 var state={playlists:[],epgs:[],radios:[],currentPlaylistId:null,currentEpgId:null,
   radioBuiltin:{},settings:{}};
 var tab='pl', editing=null, editType='url';
-var radioResults=null, radioBusy=false, radioTag='', radioQ='';
+var builtin={cctv:{},radio:{}};
+var radioResults=null, radioBusy=false, radioTag='', radioQ='', radioRegion='';
 var TABS=['pl','radio','epg','play','set','help'];
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function findById(arr,id){for(var i=0;i<arr.length;i++)if(arr[i].id===id)return arr[i];return null}
 function el(id){return document.getElementById(id)}
 function load(){
-  fetch('/api/snapshot').then(function(r){return r.json()}).then(function(d){state=d;render()})
+  fetch('/api/builtin/info').then(function(r){return r.json()})
+    .then(function(d){builtin=d||{}})
+    .then(function(){return fetch('/api/snapshot')}).then(function(r){return r.json()})
+    .then(function(d){state=d;render()})
     .catch(function(){el('list').innerHTML='<div class="empty"><div class="ic">!</div>加载失败<br>请确认手机与电脑在同一 Wi-Fi</div>'});
 }
 function switchTab(t){
@@ -576,6 +617,7 @@ function renderSources(){
       +(cur?'<span class="badge">播放中</span>':'')+'</div>'
       // 内置源不给看地址：assets 路径没有意义，看介绍就行
       +(builtin?'':'<div class="url">'+esc(it.url)+'</div>')+meta
+      +(builtin?builtinActs('cctv'):'')
       +'<div class="acts">'+row1+'</div>'+row2+'</div>';
   }
   box.innerHTML=html;
@@ -593,11 +635,9 @@ function renderRadio(){
       +'<span class="badge" style="color:#9fb2e8;border-color:#2c3a5e;background:#141c2c">内置</span>'
       +(b.current?'<span class="badge">当前</span>':'')+'</div>'
       +'<div class="meta"><span class="tag">出厂自带</span>电视伴音 / 央广 / 省市台 / 音乐 / 故事，共约 60 个台</div>'
-      +'<div class="meta">内置台随安装包发布，单个不可删；要停用请到电脑上的设置里整源移除</div>';
-    if(!b.current){
-      html+='<div class="acts"><button class="btn ok" onclick="selectPlaylist(\''+(b.id||'omi-builtin-radio')+'\')">设为当前</button></div>';
-    }
-    html+='</div>';
+      +'<div class="meta">内置台随安装包发布，单个不可删；要停用请到电脑上的设置里整源移除</div>'
+      +builtinActs('radio')
+      +'</div>';
   }else{
     html+='<div class="card"><div class="card-head"><div class="name">内置电台精选已停用</div></div>'
       +'<div class="meta">恢复后重新加入出厂自带的电台（不影响「我的电台」）</div>'
@@ -609,7 +649,14 @@ function renderRadio(){
     +'<div class="search-row"><input id="r-q" placeholder="台名，如：中国之声" value="'+esc(radioQ)+'"'
     +' onkeydown="if(event.key===\'Enter\'){event.preventDefault();doRadioSearch()}">'
     +'<button class="btn primary" onclick="doRadioSearch()">搜索</button></div>'
-    +'<div class="chips">'+[['新闻','news'],['音乐','music'],['交通','traffic'],['故事','talk'],['戏曲','opera'],['体育','sports'],['财经','business'],['怀旧','oldies']]
+    // 地区 / 分类两行：与电视端搜索弹窗一一对应（电视上是左右换 chip、
+    // OK 过滤；手机上是点选）。用户在电视端加的分类筛选，这里必须同步有
+    +'<div class="chip-row"><span class="chip-label">地区</span>'
+    +['北京','上海','广东','浙江','江苏','四川','湖南','湖北','山东','河南','陕西','福建','辽宁','天津','重庆','安徽']
+      .map(function(t){return '<button class="chip'+(radioRegion===t?' on':'')+'" onclick="searchRegion(\''+t+'\')">'+t+'</button>'}).join('')
+    +'</div>'
+    +'<div class="chip-row"><span class="chip-label">分类</span>'
+    +[['新闻','news'],['音乐','music'],['交通','traffic'],['故事','talk'],['戏曲','opera'],['体育','sports'],['财经','business'],['怀旧','oldies']]
       .map(function(t){return '<button class="chip'+(radioTag===t[1]?' on':'')+'" onclick="searchTag(\''+t[1]+'\')">'+t[0]+'</button>'}).join('')
     +'</div>'
     +'<div class="meta">搜索在电脑侧发起，手机只要能连上电脑就行；搜到的台点「加入」进「我的电台」</div></div>';
@@ -664,10 +711,15 @@ function hasStation(id){
 }
 function doRadioSearch(){
   var q=el('r-q')?el('r-q').value.trim():'';
-  radioQ=q;radioTag='';radioRun(q,'');
+  radioQ=q;radioTag='';radioRegion='';radioRun(q,'');
 }
 function searchTag(tag){
-  radioTag=tag;radioQ='';radioRun('',tag);
+  radioTag=tag;radioQ='';radioRegion='';radioRun('',tag);
+}
+// 地区：和电视端一样，把地名塞进查询词，清掉分类
+function searchRegion(city){
+  if(radioRegion===city){radioRegion='';radioQ='';radioRun('','');return}
+  radioRegion=city;radioQ=city;radioTag='';radioRun(city,'');
 }
 function radioRun(q,tag){
   radioBusy=true;radioResults=null;renderRadio();
@@ -702,6 +754,38 @@ function selectPlaylist(id){
 }
 function restoreRadio(){
   fetch('/api/radio/restore',{method:'POST'}).then(function(){toast('已恢复内置电台');setTimeout(load,400)});
+}
+
+// ==================== 内置清单更新（央视 / 电台，与 App 设置面板一致） ====================
+function intervalText(days){
+  if(days===0)return '自动检查：关闭';
+  if(days===30)return '自动检查：每月';
+  return '自动检查：每周';
+}
+function builtinActs(kind){
+  var b=(builtin||{})[kind]||{};
+  return '<div class="meta">清单更新 '+(b.at?fmtTime(b.at):'从未更新')
+    +' · 共 '+(b.count!=null?b.count:'-')+' 个台</div>'
+    +'<div class="acts">'
+    +'<button class="btn b3" onclick="cycleBuiltinInterval(\''+kind+'\')">'+intervalText(b.days)+'</button>'
+    +'<button class="btn ok" id="bu-'+kind+'" onclick="updateBuiltinNow(\''+kind+'\')">立即检查更新</button></div>';
+}
+function cycleBuiltinInterval(kind){
+  var b=(builtin||{})[kind]||{days:7};
+  var next=b.days===7?30:(b.days===30?0:7);
+  fetch('/api/builtin/interval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:kind,days:next})})
+    .then(function(){return fetch('/api/builtin/info')}).then(function(r){return r.json()})
+    .then(function(d){builtin=d;render();toast('自动检查：'+(next===0?'已关闭':(next===30?'每月':'每周')))})
+    .catch(function(){toast('设置失败：电脑端没响应')});
+}
+function updateBuiltinNow(kind){
+  var btn=el('bu-'+kind);
+  if(btn){btn.disabled=true;btn.textContent='检查中…'}
+  fetch('/api/builtin/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:kind})})
+    .then(function(r){return r.json()})
+    .then(function(d){toast(d.message||(d.ok?'已是最新':'更新失败'));load()})
+    .catch(function(){toast('更新失败：电脑端没响应')})
+    .then(function(){if(btn){btn.disabled=false;btn.textContent='立即检查更新'}});
 }
 
 // ==================== EPG ====================
@@ -828,6 +912,9 @@ function renderPlayer(){
   html+=choiceCard('sourceTimeoutSeconds','切源等待时间','起播超过该时间未成功就试下一个源',
     [[5,'5 秒'],[10,'10 秒'],[15,'15 秒'],[20,'20 秒'],[25,'25 秒'],[30,'30 秒']],
     s.sourceTimeoutSeconds||5);
+  html+=choiceCard('tuneDwellMs','换台停留','连续按上下键只更新预览，停顿够才真正切台',
+    [[500,'0.5 秒'],[800,'0.8 秒'],[1200,'1.2 秒'],[2000,'2 秒'],[2500,'2.5 秒'],[3000,'3 秒']],
+    s.tuneDwellMs||1200);
   html+=choiceCard('bufferSeconds','播放缓冲','弱网卡顿可调大，换台后生效',
     [[5,'5 秒'],[10,'10 秒'],[20,'20 秒'],[30,'30 秒']], s.bufferSeconds||5);
   html+='<div class="group-title">界面</div>';

@@ -4,6 +4,7 @@ import 'dart:io' show File, FileStat, Platform;
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' as dialog show showDialog;
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -18,6 +19,7 @@ import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
 import '../services/builtin_epg.dart';
 import '../services/player_controller.dart';
+
 import '../services/source_manager.dart';
 import '../services/channel_blacklist.dart';
 import '../services/channel_alias.dart';
@@ -25,11 +27,61 @@ import '../services/scene_favorites.dart';
 import '../services/radio_recorder.dart';
 import '../services/recording_share.dart';
 import '../services/radio_library.dart';
+import '../services/radio_catalog.dart';
 import '../services/web_diag.dart';
 import 'ime_safe_text_field.dart';
+
 import 'scaled_panel.dart';
 
 export 'ime_safe_text_field.dart' show ImeSafeTextField;
+
+/// 设置卡片之上是否压着「下一级卡片」（编辑、确认、诊断、文件选择、
+/// 在线电台搜索……）。
+///
+/// 播放页订阅它：为 true 时把设置卡片淡出，屏幕上任何时候只有一张卡片
+/// 亮着；下一级被返回/取消/关掉后自动淡回来。以前两张卡片（加半透明
+/// 遮罩）叠在一起，透出来的内容混成一片，看着很乱。
+final ValueNotifier<bool> settingsChildOpen = ValueNotifier<bool>(false);
+
+/// 设置面板「把焦点拉回来」的信号。
+///
+/// 播放页在设置打开时收到 OK，却发现 primaryFocus 已经不在面板里
+/// （改设置项会重建行控件，原 FocusNode 被换掉/卸载），就 poke 一下。
+/// 面板收到后把焦点落到左栏分类——下一次 OK 至少有个确定的目标，
+/// 不会出现「按 OK 什么也不发生，只能按返回重进设置」。
+final ValueNotifier<int> settingsPanelFocusPoke = ValueNotifier<int>(0);
+
+/// 设置里弹下一级卡片一律走这里：弹出前先把设置卡片让开，
+/// 关闭（含取消、返回、点遮罩、Esc）后恢复。
+///
+/// 十几处调用点逐个改是唯一可靠的办法——漏一个就会出现
+/// 「两张卡片同时亮」，正是用户看到的"画面乱"。
+Future<T?> showChildDialog<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  bool barrierDismissible = true,
+  Color? barrierColor,
+  String? barrierLabel,
+  bool useRootNavigator = true,
+  RouteSettings? routeSettings,
+  Offset? anchorPoint,
+}) async {
+  settingsChildOpen.value = true;
+  try {
+    return await dialog.showDialog<T>(
+      context: context,
+      builder: builder,
+      barrierDismissible: barrierDismissible,
+      barrierColor: barrierColor,
+      barrierLabel: barrierLabel,
+      useRootNavigator: useRootNavigator,
+      routeSettings: routeSettings,
+      anchorPoint: anchorPoint,
+    );
+  } finally {
+    settingsChildOpen.value = false;
+  }
+}
 
 typedef _ImeSafeTextField = ImeSafeTextField;
 
@@ -99,18 +151,6 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 否则每次拨开关都会重建整个播放树，正在播时就是"卡一下"）
   PlayerController? _settingsOwner;
 
-  /// 面板是否还在控件树里。
-  ///
-  /// 之前关闭时用的是「移到屏幕下方 + opacity 0」，面板始终留在树上：
-  ///  - opacity 层需要 saveLayer，Windows 老显卡/驱动上合成失败会画出一块
-  ///    纯白矩形（用户看到的「占满窗口的大白框」），且这层会吃掉鼠标
-  ///    hover 与点击——底部面板唤不出、双击不能全屏、安卓左右面板点不出来
-  ///  - 关闭后 opacity 0 依然参与命中测试，等于一块透明的挡板压在画面上
-  /// 现在改成：打开时渲染、关闭动画走完立刻从树上摘掉，全程不产生
-  /// opacity 层。
-  bool _renderPanel = false;
-  Timer? _unmountTimer;
-
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -134,39 +174,58 @@ class _SettingsPanelState extends State<SettingsPanel>
     _tabController.addListener(_onTabIndexChanged);
     // 上下方向键统一由面板自己接管（见 _onVerticalKey）
     HardwareKeyboard.instance.addHandler(_onVerticalKey);
+    // 下一级卡片开合时只改本卡片透明度（不重建整棵树）
+    settingsChildOpen.addListener(_onChildOpenChanged);
+    // 播放页发现焦点悬空时 poke：把焦点拉回分类栏
+    settingsPanelFocusPoke.addListener(_onFocusPoke);
     // 安卓端：开始采样剪贴板（粘贴按钮弹出历史供选择）
     if (_showPasteButton) _ClipHistory.ensureWatching();
-    _renderPanel = widget.isOpen;
-  }
-
-  @override
-  void didUpdateWidget(covariant SettingsPanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.isOpen == oldWidget.isOpen) return;
-    _unmountTimer?.cancel();
-    if (widget.isOpen) {
-      setState(() => _renderPanel = true);
-    } else {
-      // 等滑出动画（300ms）走完再卸载，别在半空中消失
-      _unmountTimer = Timer(const Duration(milliseconds: 320), () {
-        if (mounted) setState(() => _renderPanel = false);
-      });
-    }
   }
 
   @override
   void dispose() {
+    settingsChildOpen.removeListener(_onChildOpenChanged);
+    settingsPanelFocusPoke.removeListener(_onFocusPoke);
     _settingsOwner?.settingsNotifier.removeListener(_onSettingsChanged);
     HardwareKeyboard.instance.removeHandler(_onVerticalKey);
     _tabController.removeListener(_onTabIndexChanged);
-    _unmountTimer?.cancel();
     _navFocus.dispose();
     _panelFocusNode.dispose();
     _tabController.dispose();
     super.dispose();
   }
 
+  /// 下一级卡片开/合：只要重画本卡片（改的是 AnimatedOpacity 的终值）
+  void _onChildOpenChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// 播放页 poke：焦点悬空/跑出面板时，把焦点落回左栏分类。
+  /// 只动焦点，不重建、不弹键盘。
+  void _onFocusPoke() {
+    if (!mounted || !widget.isOpen) return;
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
+    _navFocus.requestFocus();
+  }
+
   int _lastTabIndex = 0;
+
+  /// 打开设置时的初始定位（用户反馈：以前进来焦点不知所踪，要乱按
+  /// 好几下才摸到左栏）。现在打开即三件事：
+  /// ① 分类回到第一个「直播源」；② 焦点直接落在左栏分类上——
+  /// 上/下键立刻就能循环切分类，OK / 右键才进右栏，与两区模型一致；
+  /// ③ post-frame 再取焦点，等首帧把面板布局出来，避免焦点被
+  /// 动画中途的树吃掉。关闭时不做任何事，焦点自然还给播放页。
+  @override
+  void didUpdateWidget(covariant SettingsPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isOpen && widget.isOpen) {
+      if (_tabController.index != 0) _tabController.index = 0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && widget.isOpen) _navFocus.requestFocus();
+      });
+    }
+  }
 
   void _onTabIndexChanged() {
     if (_tabController.index == _lastTabIndex) return;
@@ -192,12 +251,14 @@ class _SettingsPanelState extends State<SettingsPanel>
     }
   }
 
-  /// 上下键改为在设置内容里纵向移动焦点。
+  /// 遥控器/键盘导航（用户定义的逻辑）：
+  /// - 左栏分类（整栏只有 _navFocus 一个停靠点）：上下**循环**切分类，
+  ///   OK / 右键进右栏内容区；
+  /// - 右栏内容：上下**循环**走控件，互不越区；左右归控件（滑块/分段
+  ///   选择），调到最左再按左才退回左栏（见 _onPanelKeyEvent）。
   ///
-  /// 不使用几何方向计算（focusInDirection）也不依赖 WidgetOrder 遍历：
-  /// 直接取「面板根节点下所有可聚焦节点」的树顺序（即界面自上而下的顺序），
-  /// 上一格/下一格走一步。这样不会隔行跳、也不会穿到播放页其它面板。
-  /// 到最上面落到页签栏，页签栏上用左右键切页。
+  /// 关键取舍：上下永远不跨区——跨区只走左右。这样遥控器用户按上下
+  /// 不会突然"跳上去"，也不会在输入框里被困住（输入框不做停靠点）。
   bool _onVerticalKey(KeyEvent event) {
     if (!widget.isOpen) return false;
     // 设置里弹出对话框（编辑源、二维码等）时放行：焦点属于对话框，
@@ -208,60 +269,145 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   /// 面板根焦点上的按键：与上面的全局处理器共用同一套逻辑，
   /// 保证焦点在面板内时按键一定先在这里被吃掉
-  KeyEventResult _onPanelKeyEvent(FocusNode node, KeyEvent event) =>
-      _handleVertical(event) ? KeyEventResult.handled : KeyEventResult.ignored;
+  KeyEventResult _onPanelKeyEvent(FocusNode node, KeyEvent event) {
+    if (!widget.isOpen) return KeyEventResult.ignored;
+    // 上面压着下一级卡片（编辑/确认/扫码…）时，按键归那张卡片。
+    // 设置面板只是淡出，仍在树里；不挡的话上下键会把焦点送到
+    // 看不见的行尾按钮上，OK 一按就执行了（安卓实测：切台时
+    // 弹出「节目单已是最新」，其实就是这条路径）
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) {
+      return KeyEventResult.ignored;
+    }
+    if (_handleVertical(event)) return KeyEventResult.handled;
+    // 宽屏双栏：内容区按左 = 回分类栏（遥控器用户左右双向都能走）
+    if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.arrowLeft &&
+          !_navFocus.hasFocus &&
+          // 输入框里按左是移光标，不能把焦点抢回分类栏
+          !_focusInEditableText &&
+          _stopIndexOf(_contentStops(), FocusManager.instance.primaryFocus) >=
+              0) {
+        _navFocus.requestFocus();
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
 
+  bool get _focusInEditableText =>
+      FocusManager.instance.primaryFocus?.context
+          ?.findAncestorWidgetOfExactType<EditableText>() !=
+      null;
+
+  /// 内容区所有可聚焦节点的树顺序（不含分类栏）。
+  ///
+  /// 两条规则，都是为了"上下键一格一格按视觉顺序走"：
+  /// 1. **输入框也要算停靠点**：直播源的名称/地址、分组过滤这些都必须
+  ///    能按到（用户反馈：一路往下跳，输入框被整个跳过）；
+  /// 2. **只留最外层**：SwitchListTile / Slider / InkWell 内部还会再建
+  ///    焦点节点，不去重就会出现同一行停两次、顺序看起来乱蹦。
+  List<FocusNode> _contentStops() {
+    final all = <FocusNode>[];
+    for (final n in _panelFocusNode.traversalDescendants) {
+      if (n == _navFocus) continue;
+      if (!n.canRequestFocus || n.context == null) continue;
+      all.add(n);
+    }
+    final keep = <FocusNode>[];
+    for (final n in all) {
+      var p = n.parent;
+      var nested = false;
+      while (p != null) {
+        if (keep.contains(p)) {
+          nested = true;
+          break;
+        }
+        p = p.parent;
+      }
+      if (!nested) keep.add(n);
+    }
+    return keep;
+  }
+
+  /// 当前焦点在 [stops] 里的位置：焦点可能落在某个停靠点的**子节点**上
+  /// （输入框内的 EditableText、按钮内部的 InkWell 焦点等），
+  /// 这时要沿祖先链找最近的那个停靠点，否则会误判成"不在列表里"
+  /// 而把头/尾当成目标——表现就是跳得很乱。
+  int _stopIndexOf(List<FocusNode> stops, FocusNode? from) {
+    var cur = from;
+    while (cur != null) {
+      final i = stops.indexOf(cur);
+      if (i >= 0) return i;
+      cur = cur.parent;
+    }
+    return -1;
+  }
+
+  /// 上下键在设置里移动焦点：
+  ///
+  /// 两区模型（用户定义的遥控器逻辑）：
+  /// - 左栏分类：上下在 6 个分类间**循环**；OK / 右键进入右栏内容区；
+  /// - 右栏内容：上下在控件间**循环**（到底再按下回最上，到顶再按上回
+  ///   最下）；左右留给控件自己（滑块/分段选择），没有左右语义或已调到
+  ///   最左时按左，一路退回左栏分类（见 _onPanelKeyEvent）。
+  ///
+  /// 不再有「到顶按上跳回分类栏」——用户明确要求上下只在页内循环，
+  /// 只有左右才在两区之间跳。
   bool _handleVertical(KeyEvent event) {
+    if (!widget.isOpen) return false;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final key = event.logicalKey;
     final isUp = key == LogicalKeyboardKey.arrowUp;
     if (!isUp && key != LogicalKeyboardKey.arrowDown) return false;
 
-    // 焦点在输入框内时放行：输入法（尤其是中文）用上下键选候选词，
-    // 面板不能在这里抢焦点切控件——否则选词过程被中断，老系统
-    // （Win10 1607）上还会出现输入框无响应（AppHangB1）
-    final focusCtx = FocusManager.instance.primaryFocus?.context;
-    if (focusCtx != null &&
-        focusCtx.findAncestorWidgetOfExactType<EditableText>() != null) {
-      return false;
+    // 输入法正在组词：上下键归输入法（中文候选词），面板不许抢
+    if (_imeComposing) return false;
+
+    // 分类栏持有焦点：上下循环切换分类
+    if (_navFocus.hasFocus) {
+      final n = _tabController.length;
+      if (n <= 1) return true;
+      _tabController.index = (_tabController.index + (isUp ? -1 : 1) + n) % n;
+      return true;
     }
 
-    // 面板内所有可聚焦节点的树顺序（页签栏在最前，内容自上而下）
-    final stops = <FocusNode>[];
-    for (final n in _panelFocusNode.traversalDescendants) {
-      if (n.canRequestFocus && n.context != null) stops.add(n);
-    }
-    if (stops.isEmpty) return false;
-
-    final focus = FocusManager.instance.primaryFocus;
-    final idx = stops.indexWhere((n) => n == focus || n.hasFocus);
-    if (idx < 0) {
-      // 焦点还停在面板外（刚打开时）：从页签栏进入
+    final stops = _contentStops();
+    if (stops.isEmpty) {
       _navFocus.requestFocus();
       return true;
     }
-    final target = idx + (isUp ? -1 : 1);
-    if (target < 0 || target >= stops.length) {
-      // 已到顶/到底：吞掉按键，停在原处
+    final idx = _stopIndexOf(stops, FocusManager.instance.primaryFocus);
+    if (idx < 0) {
+      // 焦点确实不在面板里（刚打开）：从内容区第一项开始
+      stops.first.requestFocus();
+      _scrollFocusedIntoView();
       return true;
     }
+    // 循环：越过最后一格回第一格，越过第一格回最后一格
+    final target = (idx + (isUp ? -1 : 1) + stops.length) % stops.length;
     stops[target].requestFocus();
     _scrollFocusedIntoView();
     return true;
+  }
+
+  /// 输入法是否正在组词（组词期间上下键要留给候选词）
+  bool get _imeComposing {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    final et = ctx.findAncestorWidgetOfExactType<EditableText>();
+    if (et == null) return false;
+    final c = et.controller.value.composing;
+    return c.isValid && !c.isCollapsed;
   }
 
   /// 把当前焦点滚到可视区（设置内容是可滚动的长列表）。
   /// 焦点变更在微任务里生效，下一帧再取 primaryFocus。
   /// 从分类栏进入内容区：聚焦右栏第一个可聚焦控件
   void _focusFirstContent() {
-    for (final n in _panelFocusNode.traversalDescendants) {
-      if (n == _navFocus) continue;
-      if (n.canRequestFocus && n.context != null) {
-        n.requestFocus();
-        _scrollFocusedIntoView();
-        return;
-      }
-    }
+    final stops = _contentStops();
+    if (stops.isEmpty) return;
+    stops.first.requestFocus();
+    _scrollFocusedIntoView();
   }
 
   void _scrollFocusedIntoView() {
@@ -279,19 +425,39 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   @override
   Widget build(BuildContext context) {
-    // 收起后彻底不在树上：不留 opacity 层、不留透明挡板
-    if (!_renderPanel) return const SizedBox.shrink();
+    // 面板常驻挂载（靠位移+透明度收放），**关闭时必须把整棵子树移出
+    // 焦点树**：否则里面的输入框/行尾按钮还能持有焦点。安卓实测后果：
+    // ① 切台时输入法自己蹦出来（隐藏输入框仍连着输入连接）；
+    // ② OK 被设置里「立即更新节目单」吃掉，弹「节目单已是最新」。
+    // 光判 isOpen 不接按键不够——焦点留在里面时，激活走的是焦点树，
+    // 不经过按键分发。
+    //
+    // 注意包装顺序：AnimatedPositioned 必须是 Stack 的**直接子级**
+    // （定位靠 Stack 的 parent data），ExcludeFocus/IgnorePointer 只能
+    // 套在它里面——v2.1.43 把它们包在了外面，定位失效，滑下去的面板
+    // 露在屏幕上成了一层灰罩（2.1.43 实测）。
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
       bottom: widget.isOpen ? 0 : -MediaQuery.of(context).size.height,
       left: 0,
       right: 0,
-      child: IgnorePointer(
-        ignoring: !widget.isOpen,
-        child: ScaledPanel(
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 200),
+        // 上面压了下一级卡片（编辑/确认/诊断/扫码…）就先淡出，
+        // 屏幕上只亮一张卡片；关掉下一级自动淡回来
+        opacity: widget.isOpen && !settingsChildOpen.value ? 1.0 : 0.0,
+        // 关闭时整棵子树退出焦点树 + 不响应指针（详见 build 开头注释）。
+        // 下级卡片亮着时同理：本卡片已淡到 opacity 0，但**仍然全屏宽
+        // 占位**，不关指针的话它会静默吃掉鼠标 hover（用户实测：设置里
+        // 弹过下一级卡片后，鼠标挪到左边缘频道面板不再弹出）。
+        child: IgnorePointer(
+          ignoring: !widget.isOpen || settingsChildOpen.value,
+          child: ExcludeFocus(
+            excluding: !widget.isOpen || settingsChildOpen.value,
+            child: ScaledPanel(
           alignment: Alignment.bottomCenter,
-          scale: panelScaleOf(context),
+          scale: panelScaleOf(context) * windowFitScaleOf(context),
           // 限宽居中：设置面板不再通栏铺满，宽屏下保持 760 逻辑像素以内
           child: Align(
             alignment: Alignment.bottomCenter,
@@ -299,12 +465,17 @@ class _SettingsPanelState extends State<SettingsPanel>
               constraints: const BoxConstraints(maxWidth: 760),
               // RepaintBoundary + 不透明底色：局部重绘漏洞的兜底
               child: RepaintBoundary(
-                child: RepaintBoundary(
+                // 鼠标右键 = 返回上一级（与遥控器返回、Esc 同一语义）。
+                // 播放页那层全屏右键监听在设置打开时是摘掉的（否则会盖在
+                // 卡片上面、把输入框的全选/复制菜单也一起吞掉），所以这
+                // 里必须在卡片自身上接住。卡片里的输入框自带右键处理，
+                // 命中输入框时由它赢下手势竞技场，右键仍是系统菜单。
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onSecondaryTapUp: (_) => widget.onClose(),
                   child: Material(
-                    // elevation 的阴影环在 Windows 局部重绘时容易留一圈白边
-                    // （老毛病），改成 0，靠描边 + 底色差把面板立起来
                     color: AppColors.overlaySolid,
-                    elevation: 0,
+                    elevation: 28,
                     shape: const RoundedRectangleBorder(
                       borderRadius:
                           BorderRadius.vertical(top: Radius.circular(16)),
@@ -429,6 +600,8 @@ class _SettingsPanelState extends State<SettingsPanel>
             ),
           ),
         ),
+          ),
+        ),
       ),
     );
   }
@@ -480,8 +653,10 @@ class _SettingsNav extends StatelessWidget {
         ? LogicalKeyboardKey.arrowRight
         : LogicalKeyboardKey.arrowDown;
 
+    // 上下（窄屏为左右）在分类间循环：最后一个再往下回第一个，
+    // 第一个再往上回最后一个
     if (k == prev) {
-      if (index > 0) onChanged(index - 1);
+      onChanged((index - 1 + _items.length) % _items.length);
       return KeyEventResult.handled;
     }
     // 宽屏左栏在最左侧：向左没有去处，吞掉，避免焦点穿出设置面板
@@ -489,7 +664,7 @@ class _SettingsNav extends StatelessWidget {
       return KeyEventResult.handled;
     }
     if (k == next) {
-      if (index < _items.length - 1) onChanged(index + 1);
+      onChanged((index + 1) % _items.length);
       return KeyEventResult.handled;
     }
     if (k == enter ||
@@ -556,42 +731,48 @@ class _SettingsNav extends StatelessWidget {
             ? AppColors.accent.withValues(alpha: 0.18)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          onTap: () => onChanged(i),
-          child: Container(
-            padding: EdgeInsets.symmetric(
-              horizontal: vertical ? 12 : 14,
-              vertical: vertical ? 11 : 8,
-            ),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: selected ? AppColors.accent : Colors.transparent,
-                width: 1,
+        // 分类项不参与焦点遍历：整栏只有外层 _navFocus 一个停靠点，
+        // 上下键不会在分类项之间落焦点框（否则会出现「分类高亮 +
+        // 焦点框」两套视觉同时跳）。鼠标点击不受影响
+        child: ExcludeFocus(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => onChanged(i),
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: vertical ? 12 : 14,
+                vertical: vertical ? 11 : 8,
               ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  icon,
-                  size: 18,
-                  color: selected ? AppColors.accent : Colors.white54,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: selected ? AppColors.accent : Colors.transparent,
+                  width: 1,
                 ),
-                if (vertical)
-                  const SizedBox(width: 10)
-                else
-                  const SizedBox(width: 6),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: selected ? Colors.white : Colors.white60,
-                    fontSize: vertical ? 14 : 13,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    icon,
+                    size: 18,
+                    color: selected ? AppColors.accent : Colors.white54,
                   ),
-                ),
-              ],
+                  if (vertical)
+                    const SizedBox(width: 10)
+                  else
+                    const SizedBox(width: 6),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      color: selected ? Colors.white : Colors.white60,
+                      fontSize: vertical ? 14 : 13,
+                      fontWeight:
+                          selected ? FontWeight.w600 : FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -601,6 +782,165 @@ class _SettingsNav extends StatelessWidget {
 }
 
 // ==================== 播放列表管理标签页 ====================
+
+/// 「网络地址 / 本地文件」两段开关（遥控器版）。
+///
+/// 不用 SegmentedButton：它内部把每个段都建成焦点节点，遥控器要按
+/// 好几下才落得进去，而且左右是「移焦点」不是「改选中」，用户按完
+/// 不知道到底选了哪个（对号跟着焦点还是跟着选中也说不清）。
+///
+/// 这里整排只占**一个**焦点停靠点：
+/// - 左右 = 直接切换选中（选中态和对号永远一致，不再飘）
+/// - OK = 确认并把焦点送到「列表名称」
+/// - 上下 = 交给设置面板统一走位（本组件不拦）
+class _TypeSwitch extends StatefulWidget {
+  const _TypeSwitch({
+    required this.value,
+    required this.onChanged,
+    required this.onConfirm,
+  });
+
+  final PlaylistSourceType value;
+  final ValueChanged<PlaylistSourceType> onChanged;
+  final VoidCallback onConfirm;
+
+  @override
+  State<_TypeSwitch> createState() => _TypeSwitchState();
+}
+
+class _TypeSwitchState extends State<_TypeSwitch> {
+  final FocusNode _node = FocusNode(debugLabel: 'playlistTypeSwitch');
+
+  static const _items = [
+    (PlaylistSourceType.url, '网络地址', Icons.cloud_outlined),
+    (PlaylistSourceType.local, '本地文件', Icons.folder_outlined),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    // 焦点进出要重画外框
+    _node.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _node.dispose();
+    super.dispose();
+  }
+
+  int get _index => _items.indexWhere((e) => e.$1 == widget.value);
+
+  void _move(int d) {
+    final n = _items.length;
+    final i = ((_index < 0 ? 0 : _index) + d) % n;
+    widget.onChanged(_items[(i + n) % n].$1);
+    _node.requestFocus();
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final k = event.logicalKey;
+    if (k == LogicalKeyboardKey.arrowLeft) {
+      // 已经在第一项（网络地址）上：左键交还给设置面板 → 回左栏分类，
+      // 与"任何列表往左都回分类栏"一致
+      if (_index <= 0) return KeyEventResult.ignored;
+      _move(-1);
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.arrowRight) {
+      _move(1);
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA ||
+        k == LogicalKeyboardKey.space) {
+      widget.onConfirm();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final focused = _node.hasFocus;
+    return Focus(
+      focusNode: _node,
+      onKeyEvent: _onKey,
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.03),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: focused ? Colors.white : AppColors.stroke,
+            width: focused ? 1.6 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            for (final (value, label, icon) in _items)
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    widget.onChanged(value);
+                    _node.requestFocus();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 9),
+                    decoration: BoxDecoration(
+                      color: value == widget.value
+                          ? AppColors.accent.withValues(alpha: 0.20)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          icon,
+                          size: 16,
+                          color: value == widget.value
+                              ? AppColors.accent
+                              : AppColors.textSecondary,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          label,
+                          style: TextStyle(
+                            color: value == widget.value
+                                ? Colors.white
+                                : AppColors.textSecondary,
+                            fontSize: 13,
+                            fontWeight: value == widget.value
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                          ),
+                        ),
+                        // 对号只跟选中走，不跟焦点走
+                        if (value == widget.value) ...[
+                          const SizedBox(width: 4),
+                          const Icon(Icons.check,
+                              size: 14, color: AppColors.accent),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _PlaylistTab extends StatefulWidget {
   @override
@@ -614,8 +954,16 @@ class _PlaylistTabState extends State<_PlaylistTab> {
   PlaylistSourceType _type = PlaylistSourceType.url;
   bool _isLoading = false;
 
+  /// 类型开关按 OK 后把焦点送到名称框（用户定的顺序）
+  final FocusNode _nameFocus = FocusNode(debugLabel: 'playlistName');
+
+  /// 底栏「立即检查更新」按钮：最后一行源按右直接落过去
+  final FocusNode _updateCtaFocus = FocusNode(debugLabel: 'builtinUpdateCta');
+
   @override
   void dispose() {
+    _nameFocus.dispose();
+    _updateCtaFocus.dispose();
     _nameController.dispose();
     _urlController.dispose();
     _groupFilterController.dispose();
@@ -663,94 +1011,63 @@ class _PlaylistTabState extends State<_PlaylistTab> {
     setState(() => _isLoading = false);
   }
 
-  /// 编辑已有播放列表（名称/地址/类型）
+  /// 编辑已有播放列表（名称/地址/类型）。
+  /// 遥控器导航走 RemoteEditDialog（上下换行/左右换项/OK 激活/返回只关本层）
   Future<void> _editPlaylist(PlaylistSource source) async {
     final nameCtl = TextEditingController(text: source.name);
     final urlCtl = TextEditingController(text: source.url);
     final filterCtl = TextEditingController(text: source.groupFilter);
     var type = source.type;
     if (!mounted) return;
-    final result = await showDialog<PlaylistSource>(
+    final result = await showChildDialog<PlaylistSource>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialog) => AlertDialog(
-          title: const Text('编辑播放列表'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SegmentedButton<PlaylistSourceType>(
-                  segments: const [
-                    ButtonSegment(
-                        value: PlaylistSourceType.url, label: Text('网络地址')),
-                    ButtonSegment(
-                        value: PlaylistSourceType.local, label: Text('本地文件')),
-                  ],
-                  selected: {type},
-                  onSelectionChanged: (s) => setDialog(() => type = s.first),
-                ),
-                const SizedBox(height: 10),
-                _ImeSafeTextField(
-                  controller: nameCtl,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: _inputDecoration('列表名称'),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _ImeSafeTextField(
-                        controller: urlCtl,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: _inputDecoration(
-                            type == PlaylistSourceType.url ? '直播源地址' : '本地文件路径',
-                            urlCtl),
-                      ),
-                    ),
-                    if (type == PlaylistSourceType.local)
-                      IconButton(
-                        icon: const Icon(Icons.folder_open,
-                            color: Colors.blueAccent),
-                        onPressed: () async {
-                          final f = await _pickLocalFileWithTopmostFix();
-                          if (f?.path != null) urlCtl.text = f!.path!;
-                        },
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                _ImeSafeTextField(
-                  controller: filterCtl,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: _inputDecoration('分组过滤（可选）：只导入命中的分组，逗号分隔'),
-                ),
-              ],
-            ),
+      builder: (ctx) => RemoteEditDialog(
+        title: '编辑播放列表',
+        segments: const ['网络地址', '本地文件'],
+        initialSeg: type == PlaylistSourceType.local ? 1 : 0,
+        onSegChanged: (i) =>
+            type = i == 1 ? PlaylistSourceType.local : PlaylistSourceType.url,
+        fields: (seg) => [
+          EditFieldSpec(controller: nameCtl, hint: '列表名称'),
+          EditFieldSpec(
+            controller: urlCtl,
+            hint: seg == PlaylistSourceType.local.index ? '本地文件路径' : '直播源地址',
+            suffix: seg == PlaylistSourceType.local.index
+                ? () => IconButton(
+                      icon: const Icon(Icons.folder_open,
+                          color: Colors.blueAccent),
+                      onPressed: () async {
+                        final f = await _pickLocalFileWithTopmostFix();
+                        if (f?.path != null) urlCtl.text = f!.path!;
+                      },
+                    )
+                : null,
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('取消'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final name = nameCtl.text.trim();
-                final url = urlCtl.text.trim();
-                if (name.isEmpty || url.isEmpty) return;
-                Navigator.pop(
-                  ctx,
-                  source.copyWith(
-                    name: name,
-                    url: url,
-                    type: type,
-                    groupFilter: filterCtl.text.trim(),
-                  ),
-                );
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
+          EditFieldSpec(controller: filterCtl, hint: '分组过滤（可选）：只导入命中的分组，逗号分隔'),
+        ],
+        actions: [
+          (
+            '取消',
+            () => Navigator.pop(ctx),
+          ),
+          (
+            '保存',
+            () {
+              final name = nameCtl.text.trim();
+              final url = urlCtl.text.trim();
+              if (name.isEmpty || url.isEmpty) return;
+              Navigator.pop(
+                ctx,
+                source.copyWith(
+                  name: name,
+                  url: url,
+                  type: type,
+                  groupFilter: filterCtl.text.trim(),
+                ),
+              );
+            },
+          ),
+        ],
       ),
     );
     if (result != null && mounted) {
@@ -769,7 +1086,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
   Future<void> _diagnoseSource(PlaylistSource p) async {
     if (!mounted) return;
     final controller = context.read<PlayerController>();
-    showDialog<void>(
+    showChildDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
@@ -848,18 +1165,12 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   Row(
                     children: [
                       Expanded(
-                        child: SegmentedButton<PlaylistSourceType>(
-                          segments: const [
-                            ButtonSegment(
-                                value: PlaylistSourceType.url,
-                                label: Text('网络地址')),
-                            ButtonSegment(
-                                value: PlaylistSourceType.local,
-                                label: Text('本地文件')),
-                          ],
-                          selected: {_type},
-                          onSelectionChanged: (s) =>
-                              setState(() => _type = s.first),
+                        child: _TypeSwitch(
+                          value: _type,
+                          onChanged: (t) => setState(() => _type = t),
+                          // OK 确认后直接把焦点送到「列表名称」：
+                          // 用户定义的顺序是 类型 → 名称 → 地址 → 分组 → 添加
+                          onConfirm: () => _nameFocus.requestFocus(),
                         ),
                       ),
                     ],
@@ -867,6 +1178,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   const SizedBox(height: 8),
                   _ImeSafeTextField(
                     controller: _nameController,
+                    focusNode: _nameFocus,
                     style: const TextStyle(color: Colors.white),
                     decoration: _inputDecoration('列表名称（如：我的电视）'),
                   ),
@@ -932,12 +1244,7 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   title: p.isBuiltin && !p.name.contains('内置')
                       ? '${p.name} · 内置'
                       : p.name,
-                  // 内置源不给看 assets 路径（对用户没有意义），给介绍文案；
-                  // 只有用户自己加的源才显示真实地址
-                  subtitle: p.isBuiltin
-                      ? '出厂自带 · 央视网 + 央视频免费直播页 · '
-                          '随安装包发布，只能设为当前或整源移除'
-                      : p.url,
+                  subtitle: p.url,
                   icon: p.type == PlaylistSourceType.url
                       ? Icons.cloud
                       : Icons.folder,
@@ -945,29 +1252,37 @@ class _PlaylistTabState extends State<_PlaylistTab> {
                   // 行上按 OK = 选定该播放列表；左右键进入行尾按钮
                   onSelect:
                       isCurrent ? null : () => controller.selectPlaylist(p.id),
+                  // 最后一行按右直接落到「立即检查更新」
+                  onRightEdge: index == tvPlaylists.length - 1
+                      ? () => _updateCtaFocus.requestFocus()
+                      : null,
                   actions: [
-                    // 内置源/我的电台地址都不是可编辑的字符串：不给编辑入口
+                    // 内置源地址不是可编辑的字符串、也无需诊断：右键只留
+                    // 「刷新 / 删除」两项（用户实测要求就是这个顺序）
                     if (!p.isBuiltin &&
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.edit, Colors.lightBlueAccent, '编辑',
                           () => _editPlaylist(p)),
-                    // 内置源的地址是 assets 路径，复制出来没有意义，不提供
                     if (!p.isBuiltin &&
                         p.type != PlaylistSourceType.radioLibrary)
                       _RowAction(Icons.copy, Colors.white60, '复制名称和地址',
                           () => _copyPlaylist(p)),
-                    if (!p.isBuiltin && p.type == PlaylistSourceType.url)
+                    if (p.type == PlaylistSourceType.url && !p.isBuiltin)
                       _RowAction(Icons.network_check, Colors.tealAccent, '诊断地址',
                           () => _diagnoseSource(p)),
                     _RowAction(Icons.refresh, Colors.amber, '刷新',
                         () => controller.refreshChannels()),
-                    _RowAction(Icons.delete, Colors.redAccent, '删除',
-                        () => controller.removePlaylist(p.id)),
+                    // 内置源删不掉（删了也会被自动补回），不给删除按钮：
+                    // 摆在那只会让用户以为能删（2026-11-14 用户点名）
+                    if (!p.isBuiltin)
+                      _RowAction(Icons.delete, Colors.redAccent, '删除',
+                          () => controller.removePlaylist(p.id)),
                   ],
                 );
               }),
             const Divider(height: 24, color: Colors.white12),
-            _BuiltinUpdateSection(_BuiltinUpdateSection.cctv),
+            _BuiltinUpdateSection(_BuiltinUpdateSection.cctv,
+                ctaFocusNode: _updateCtaFocus),
           ],
         );
       },
@@ -1030,7 +1345,13 @@ class _RadioSourcesTab extends StatelessWidget {
                     ),
                   ),
                   OutlinedButton.icon(
-                    onPressed: () => RadioSearchDialog.show(context),
+                    // 走本文件的包装：弹窗打开期间设置卡片先让开，
+                    // 屏幕上只留一张卡片（以前两张叠着，底下透出来很乱）
+                    onPressed: () => showChildDialog<void>(
+                      context: context,
+                      barrierColor: AppColors.scrim,
+                      builder: (_) => const RadioSearchDialog(),
+                    ),
                     icon: const Icon(Icons.travel_explore, size: 18),
                     label: const Text('在线电台'),
                     style: OutlinedButton.styleFrom(
@@ -1055,8 +1376,6 @@ class _RadioSourcesTab extends StatelessWidget {
             else
               ...List.generate(radioPlaylists.length, (index) {
                 final p = radioPlaylists[index];
-                final isCurrent =
-                    controller.sourceManager.currentPlaylistId == p.id;
                 final isLibrary = p.id == PlaylistSource.radioLibraryId;
                 return _SourceRow(
                   title: p.isBuiltin ? '${p.name} · 内置' : p.name,
@@ -1066,17 +1385,26 @@ class _RadioSourcesTab extends StatelessWidget {
                       : '在线目录加入的电台 · 共 ${RadioLibrary.count} 个 · '
                           '单个移除/清空都在「在线电台」搜索页里',
                   icon: p.isBuiltin ? Icons.radio : Icons.podcasts,
-                  isCurrent: isCurrent,
-                  onSelect:
-                      isCurrent ? null : () => controller.selectPlaylist(p.id),
+                  // 电台源不参与「当前源」选择：内置精选随包自带不用选，
+                  // 我的电台是自动并进电台目录的。以前这里能选，一选就把
+                  // 电视直播源顶掉（电视那栏变空），两个域必须分开
+                  isCurrent: false,
+                  onSelect: () => OsdBus.show(
+                    '电台源随包内置，无需选择（左侧「电台」标签直接可听）',
+                    icon: Icons.radio,
+                  ),
                   actions: [
-                    _RowAction(Icons.refresh, Colors.amber, '刷新',
-                        () => controller.refreshChannels()),
-                    _RowAction(
-                        Icons.delete,
-                        Colors.redAccent,
-                        isLibrary ? '清空我的电台' : '整源移除',
-                        () => controller.removePlaylist(p.id)),
+                    // 刷新增只刷电台目录：电视清单不受影响
+                    _RowAction(Icons.refresh, Colors.amber, '刷新电台目录',
+                        () => controller.reloadRadioCatalog()),
+                    // 内置精选不给「整源移除」：删掉还会留一条恢复入口，
+                    // 多出来的只是误操作（用户要求内置的不显示删除）
+                    if (!p.isBuiltin)
+                      _RowAction(
+                          Icons.delete,
+                          Colors.redAccent,
+                          isLibrary ? '清空我的电台' : '整源移除',
+                          () => controller.removePlaylist(p.id)),
                   ],
                 );
               }),
@@ -1093,8 +1421,8 @@ class _RadioSourcesTab extends StatelessWidget {
                   actions: const [],
                 ),
               ),
-            // 内置电台清单更新区：与直播源页的「内置央视频道」同款
             const Divider(height: 24, color: Colors.white12),
+            // 内置电台清单更新区：与直播源页的「内置央视频道」同款
             _BuiltinUpdateSection(_BuiltinUpdateSection.radio),
             // ===== 方案 12.3 第一档：场景收藏 / 电台别名 / 录音库 =====
             // 默认收起：展开才构建列表，切到本页签首屏只画三行标题——
@@ -1151,7 +1479,7 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
 
   Future<void> _newScene() async {
     final ctl = TextEditingController();
-    final name = await showDialog<String>(
+    final name = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('新建收藏场景'),
@@ -1177,7 +1505,7 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
 
   Future<void> _renameScene(String oldName) async {
     final ctl = TextEditingController(text: oldName);
-    final name = await showDialog<String>(
+    final name = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('重命名场景：$oldName'),
@@ -1201,7 +1529,7 @@ class _SceneManageSectionState extends State<_SceneManageSection> {
   }
 
   Future<void> _deleteScene(String name) async {
-    final ok = await showDialog<bool>(
+    final ok = await showChildDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('删除场景〈$name〉？'),
@@ -1369,7 +1697,7 @@ class _AliasSectionState extends State<_AliasSection> {
   Future<void> _editAlias(Channel ch) async {
     final controller = context.read<PlayerController>();
     final ctl = TextEditingController(text: ChannelAlias.aliasOf(ch.id) ?? '');
-    final alias = await showDialog<String>(
+    final alias = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('别名：${ch.name}'),
@@ -1552,7 +1880,7 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
   }
 
   Future<void> _delete(File f) async {
-    final ok = await showDialog<bool>(
+    final ok = await showChildDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('删除录音？'),
@@ -1749,44 +2077,33 @@ class _EpgTabState extends State<_EpgTab> {
     setState(() => _isLoading = false);
   }
 
-  /// 编辑已有 EPG 源（名称/地址）
+  /// 编辑已有 EPG 源（名称/地址）。
+  /// 遥控器导航走 RemoteEditDialog（上下换行/OK 激活/返回只关本层）
   Future<void> _editEpg(EpgSource source) async {
     final nameCtl = TextEditingController(text: source.name);
     final urlCtl = TextEditingController(text: source.url);
     if (!mounted) return;
-    final result = await showDialog<EpgSource>(
+    final result = await showChildDialog<EpgSource>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('编辑 EPG'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _ImeSafeTextField(
-              controller: nameCtl,
-              style: const TextStyle(color: Colors.white),
-              decoration: _inputDecoration('EPG 名称'),
-            ),
-            const SizedBox(height: 8),
-            _ImeSafeTextField(
-              controller: urlCtl,
-              style: const TextStyle(color: Colors.white),
-              decoration: _inputDecoration('XMLTV EPG 地址 URL', urlCtl),
-            ),
-          ],
-        ),
+      builder: (ctx) => RemoteEditDialog(
+        title: '编辑 EPG',
+        fields: (seg) => [
+          EditFieldSpec(controller: nameCtl, hint: 'EPG 名称'),
+          EditFieldSpec(controller: urlCtl, hint: 'XMLTV EPG 地址 URL'),
+        ],
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+          (
+            '取消',
+            () => Navigator.pop(ctx),
           ),
-          ElevatedButton(
-            onPressed: () {
+          (
+            '保存',
+            () {
               final name = nameCtl.text.trim();
               final url = urlCtl.text.trim();
               if (name.isEmpty || url.isEmpty) return;
               Navigator.pop(ctx, source.copyWith(name: name, url: url));
             },
-            child: const Text('保存'),
           ),
         ],
       ),
@@ -1877,8 +2194,10 @@ class _EpgTabState extends State<_EpgTab> {
                         () => builtin
                             ? controller.updateBuiltinEpg()
                             : controller.refreshEpg()),
-                    _RowAction(Icons.delete, Colors.redAccent, '删除',
-                        () => controller.removeEpg(e.id)),
+                    // 内置节目单是随包自带的，删了没意义
+                    if (!builtin)
+                      _RowAction(Icons.delete, Colors.redAccent, '删除',
+                          () => controller.removeEpg(e.id)),
                   ],
                 );
               }),
@@ -2014,6 +2333,18 @@ class _PlayerSettingsTab extends StatelessWidget {
                   s.copyWith(autoHideDelay: (v * 1000).round())),
             ),
             _buildSlider(
+              icon: Icons.slow_motion_video,
+              title: '换台停留',
+              value: s.tuneDwellMs / 1000,
+              min: 0.5,
+              max: 3.0,
+              divisions: 10,
+              label: '${(s.tuneDwellMs / 1000).toStringAsFixed(1)} 秒',
+              onChanged: (v) => controller
+                  .updateSettings(s.copyWith(tuneDwellMs: (v * 1000).round())),
+              subtitleText: '连续按上下键时只更新左上角预览、继续播当前台，停顿够才真正切台',
+            ),
+            _buildSlider(
               icon: Icons.swap_horiz,
               title: '切源等待时间',
               value: s.sourceTimeoutSeconds.toDouble(),
@@ -2120,7 +2451,7 @@ class _PlayerSettingsTab extends StatelessWidget {
       ('bass', '低音增强', '音乐台更带感'),
       ('night', '夜间模式', '音量忽大忽小被抹平，睡前听不打醒'),
     ];
-    final picked = await showDialog<String>(
+    final picked = await showChildDialog<String>(
       context: context,
       builder: (ctx) => SimpleDialog(
         title: const Text('声音实验室'),
@@ -2185,7 +2516,7 @@ class _PlayerSettingsTab extends StatelessWidget {
   /// 自定义均衡器：10 段滑杆（31Hz~16kHz，±12dB），松手即生效
   Future<void> _showEqDialog(
       BuildContext context, PlayerController controller) async {
-    await showDialog<void>(
+    await showChildDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) {
@@ -2224,16 +2555,20 @@ class _PlayerSettingsTab extends StatelessWidget {
                         ),
                         const SizedBox(width: 8),
                         Expanded(
-                          child: Slider(
+                          // 遥控器/键盘：左右调该频段，上下自动跳到上下一条
+                          // （原生 Slider 会把上下键当成调值，焦点卡死在这里）
+                          child: _NavSlider(
                             value: gains[i],
                             min: -12,
                             max: 12,
                             divisions: 24,
                             label:
                                 '${gains[i] > 0 ? '+' : ''}${gains[i].toStringAsFixed(1)}',
-                            onChanged: (v) async {
-                              await controller.setAudioEqGain(i, v);
-                              setLocal(() {});
+                            onChanged: (v) {
+                              () async {
+                                await controller.setAudioEqGain(i, v);
+                                setLocal(() {});
+                              }();
                             },
                           ),
                         ),
@@ -2392,6 +2727,10 @@ class _NavSliderState extends State<_NavSlider> {
         (widget.value + (key == LogicalKeyboardKey.arrowRight ? _step : -_step))
             .clamp(widget.min, widget.max)
             .toDouble();
+    // 已经到头还继续按同方向：不吞掉按键，让它冒泡到设置面板——
+    // 最左再按左 = 退回左侧分类栏（遥控器用户的"离开内容区"手势），
+    // 否则滑块把左右键永远吃掉，焦点被困在这一行里
+    if (next == widget.value) return KeyEventResult.ignored;
     widget.onChanged!(next);
     return KeyEventResult.handled;
   }
@@ -2474,6 +2813,34 @@ class _SystemSettingsTab extends StatelessWidget {
                       controller.updateSettings(s.copyWith(closeToTray: v)),
                   activeColor: Colors.blueAccent,
                 ),
+              if (defaultTargetPlatform == TargetPlatform.windows)
+                SwitchListTile(
+                  secondary: const Icon(Icons.volume_off, color: Colors.white70),
+                  title: const Text('缩到托盘时静音',
+                      style: TextStyle(color: Colors.white, fontSize: 15)),
+                  subtitle: const Text(
+                      '进后台播放/摸鱼时自动静音，回到窗口再还原原音量；'
+                      '关着则缩下去仍继续出声',
+                      style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  value: s.trayMute,
+                  onChanged: (v) =>
+                      controller.updateSettings(s.copyWith(trayMute: v)),
+                  activeColor: Colors.blueAccent,
+                ),
+              if (defaultTargetPlatform == TargetPlatform.windows)
+                SwitchListTile(
+                  secondary: const Icon(Icons.visibility_off,
+                      color: Colors.white70),
+                  title: const Text('F9 一键摸鱼',
+                      style: TextStyle(color: Colors.white, fontSize: 15)),
+                  subtitle: const Text(
+                      '按 F9 立刻缩到托盘并静音（老板键），再按 F9 或点托盘图标恢复',
+                      style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  value: s.fishHotkey,
+                  onChanged: (v) =>
+                      controller.updateSettings(s.copyWith(fishHotkey: v)),
+                  activeColor: Colors.blueAccent,
+                ),
               SwitchListTile(
                 secondary:
                     const Icon(Icons.power_settings_new, color: Colors.white70),
@@ -2498,6 +2865,9 @@ class _SystemSettingsTab extends StatelessWidget {
                 activeColor: Colors.blueAccent,
               ),
             ],
+            // 定时关闭不做在这里：它跟「退出/关机」同一类动作，入口统一
+            // 收在退出卡片（长按返回键 / 遥控器退出键）的「定时关闭」里，
+            // 两处并存只会让人不知道该信哪个
             // 开关状态由独立 clockVisible 驱动：切换只重建时钟，不触发
             // 整棵播放 Stack 重建（旧做法反复切换会灰屏）
             ValueListenableBuilder<bool>(
@@ -2893,6 +3263,7 @@ class _SourceRow extends StatefulWidget {
     required this.isCurrent,
     required this.onSelect,
     required this.actions,
+    this.onRightEdge,
   });
 
   final String title;
@@ -2903,6 +3274,10 @@ class _SourceRow extends StatefulWidget {
   /// null＝已是当前源，选定无效果
   final VoidCallback? onSelect;
   final List<_RowAction> actions;
+
+  /// 行尾最后一个按钮上再按右的去处（目前只有最后一行用到：
+  /// 直接落到「立即检查更新」，不用再按一下下键）
+  final VoidCallback? onRightEdge;
 
   @override
   State<_SourceRow> createState() => _SourceRowState();
@@ -2951,6 +3326,19 @@ class _SourceRowState extends State<_SourceRow> {
     final k = event.logicalKey;
     if (k == LogicalKeyboardKey.arrowLeft ||
         k == LogicalKeyboardKey.arrowRight) {
+      // 列表行处在最左（整行）时，左键不再是"到头停住"，而是交还给
+      // 设置面板 → 直接退回左栏分类（用户要求：任何列表往左都回分类）
+      if (k == LogicalKeyboardKey.arrowLeft && _index == 0) {
+        return KeyEventResult.ignored;
+      }
+      // 最后一个行内按钮上再按右：交出去（落「立即检查更新」）
+      if (k == LogicalKeyboardKey.arrowRight &&
+          _index == widget.actions.length &&
+          widget.actions.isNotEmpty &&
+          widget.onRightEdge != null) {
+        widget.onRightEdge!();
+        return KeyEventResult.handled;
+      }
       final target =
           (k == LogicalKeyboardKey.arrowLeft ? _index - 1 : _index + 1)
               .clamp(0, widget.actions.length)
@@ -3096,15 +3484,24 @@ class _SourceRowState extends State<_SourceRow> {
 /// 白色圆角卡片 + 圆角模块二维码，URL 独立底色展示，
 /// 「复制地址 / 关闭」两个按钮等高并排，遥控器返回键也可关闭。
 Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
-  return showDialog<void>(
+  return showChildDialog<void>(
     context: context,
     barrierColor: Colors.black.withOpacity(0.72),
     builder: (ctx) => Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 40),
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 360),
-        padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
+        // 手机上嫌大（2K 屏：150dp 在 1440px 上仍占三分之一屏宽）。
+        // 短边 <600 用 110 的码 + 240 的卡片，桌面/平板维持 216/360。
+        constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.shortestSide < 600
+                ? 210
+                : 360),
+        padding: EdgeInsets.fromLTRB(
+            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
+            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
+            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
+            18),
         decoration: BoxDecoration(
           color: const Color(0xFFF7F8FA),
           borderRadius: BorderRadius.circular(22),
@@ -3123,7 +3520,9 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
             const SizedBox(height: 18),
             // 二维码：白底圆角卡片内嵌圆角方块码，四周留白保证可识别
             Container(
-              padding: const EdgeInsets.all(14),
+              // 手机上白底留白同步收窄，整块更紧凑（2K 屏手机实测仍偏大）
+              padding: EdgeInsets.all(
+                  MediaQuery.of(context).size.shortestSide < 600 ? 10 : 14),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(16),
@@ -3138,7 +3537,8 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
               child: QrImageView(
                 data: url,
                 version: QrVersions.auto,
-                size: 216,
+                size:
+                    MediaQuery.of(context).size.shortestSide < 600 ? 96 : 216,
                 backgroundColor: Colors.white,
                 padding: EdgeInsets.zero,
                 eyeStyle: const QrEyeStyle(
@@ -3262,7 +3662,7 @@ class _PasteIconButton extends StatelessWidget {
       OsdBus.show('剪贴板是空的', icon: Icons.content_paste_off);
       return;
     }
-    final picked = await showDialog<String>(
+    final picked = await showChildDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('从剪贴板选择'),
@@ -3314,6 +3714,342 @@ class _PasteIconButton extends StatelessWidget {
   }
 }
 
+/// 设置里的编辑弹窗（编辑播放列表 / 编辑 EPG）是否打开。
+/// 播放页的全局按键处理据此放行：弹窗自己接管遥控器（含返回只关
+/// 弹窗这一层，不再把底下的设置卡片一起关掉——2026-11-14 用户实测）
+int _editDialogDepth = 0;
+bool get settingsEditDialogOpen => _editDialogDepth > 0;
+
+/// 编辑弹窗一行输入框的描述（由调用方按当前分段给）
+class EditFieldSpec {
+  const EditFieldSpec({
+    required this.controller,
+    required this.hint,
+    this.suffix,
+  });
+
+  final TextEditingController controller;
+  final String hint;
+
+  /// 行尾附件（本地文件行的选文件按钮）；每次 build 重新求值
+  final Widget? Function()? suffix;
+}
+
+/// 编辑弹窗的行导航游标：buildRow 用它画"当前行"的白框
+class EditNavCursor {
+  const EditNavCursor({
+    required this.active,
+    required this.btnIndex,
+    this.fieldNode,
+  });
+
+  /// 遥控器光标停在这一行（且不在打字态）
+  final bool active;
+
+  /// 末行按钮排内游标（0=取消, 1=保存）
+  final int btnIndex;
+
+  /// 输入框行由弹窗创建并托管的焦点节点；OK 聚焦进入打字态
+  final FocusNode? fieldNode;
+}
+
+/// 设置编辑弹窗通用骨架（编辑播放列表 / 编辑 EPG 共用）。
+///
+/// 遥控器操作顺序（用户定义，与设置页同一套心智）：
+/// - **上下**：行间循环（分段开关 → 名称 → 地址 → 分组 → 取消/保存）
+/// - **左右**：分段开关行直接切换；末行在 取消/保存 间切换；输入框行
+///   聚焦后左右交给文本光标
+/// - **OK**：输入框行=聚焦打字；分段行=确认进下一行；末行=执行按钮
+/// - **返回**：打字态=退出打字回行导航；否则**只关本弹窗**
+///
+/// 按键走 HardwareKeyboard 通道（设置页/电台弹窗同款，实测在这台
+/// 机器上可靠；Focus.onKeyEvent 通道实测收不到）。
+class RemoteEditDialog extends StatefulWidget {
+  const RemoteEditDialog({
+    super.key,
+    required this.title,
+    required this.fields,
+    required this.actions,
+    this.segments,
+    this.initialSeg = 0,
+    this.onSegChanged,
+  });
+
+  final String title;
+
+  /// 顶部分段开关（网络地址/本地文件）；为 null 则没有这一行
+  final List<String>? segments;
+  final int initialSeg;
+  final ValueChanged<int>? onSegChanged;
+
+  /// 输入框行：按当前分段给（分段切换时整列重建）
+  final List<EditFieldSpec> Function(int seg) fields;
+
+  /// 末行按钮（取消 / 保存）
+  final List<(String, VoidCallback)> actions;
+
+  @override
+  State<RemoteEditDialog> createState() => _RemoteEditDialogState();
+}
+
+class _RemoteEditDialogState extends State<RemoteEditDialog> {
+  late int _seg = widget.initialSeg;
+  bool get _hasSeg => widget.segments != null && widget.segments!.isNotEmpty;
+
+  /// 行数 = 分段行(0/1) + 输入框行们 + 末行按钮排
+  int get _fieldRows => widget.fields(_seg).length;
+  int get _rowCount => (_hasSeg ? 1 : 0) + _fieldRows + 1;
+  int _row = 0;
+
+  /// 末行按钮游标：默认落在「保存」上（保存是高频动作，取消有返回键兜底）
+  int _btn = 1;
+
+  final Map<int, FocusNode> _fieldNodes = {};
+
+  FocusNode _node(int row) => _fieldNodes.putIfAbsent(
+      row, () => FocusNode(debugLabel: 'editDlg:row$row'));
+
+  @override
+  void initState() {
+    super.initState();
+    _editDialogDepth++;
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
+  }
+
+  @override
+  void dispose() {
+    _editDialogDepth--;
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+    for (final n in _fieldNodes.values) {
+      n.dispose();
+    }
+    super.dispose();
+  }
+
+  bool _isField(int row) => row >= (_hasSeg ? 1 : 0) && row < _rowCount - 1;
+
+  /// 是否正处于"往输入框里打字"的状态（鼠标点进输入框也算）
+  bool get _typing {
+    if (!_isField(_row)) return false;
+    return _node(_row).hasFocus;
+  }
+
+  bool _onHardwareKey(KeyEvent event) {
+    if (!mounted) return false;
+    // 上层还有别的弹窗（比如从这里再弹文件选择器）：按键归它
+    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return false;
+    final k = event.logicalKey;
+    final isDown = event is KeyDownEvent;
+
+    // 返回/菜单：打字态=退出打字回行导航；否则只关本弹窗
+    if (k == LogicalKeyboardKey.escape ||
+        k == LogicalKeyboardKey.goBack ||
+        k == LogicalKeyboardKey.contextMenu) {
+      if (!isDown) return true;
+      if (_typing) {
+        _node(_row).unfocus();
+        setState(() {});
+        return true;
+      }
+      Navigator.pop(context);
+      return true;
+    }
+
+    // 打字态：OK/回车=提交回行导航；其余（字母、方向、组词）全给输入框
+    if (_typing) {
+      if (isDown &&
+          (k == LogicalKeyboardKey.enter ||
+              k == LogicalKeyboardKey.numpadEnter ||
+              k == LogicalKeyboardKey.select ||
+              k == LogicalKeyboardKey.gameButtonA)) {
+        _node(_row).unfocus();
+        setState(() => _row = (_row + 1) % _rowCount);
+        return true;
+      }
+      return false;
+    }
+
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+
+    if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
+      final d = k == LogicalKeyboardKey.arrowUp ? -1 : 1;
+      setState(() => _row = (_row + d + _rowCount) % _rowCount);
+      return true;
+    }
+    if (k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight) {
+      final d = k == LogicalKeyboardKey.arrowLeft ? -1 : 1;
+      final lastRow = _rowCount - 1;
+      if (_hasSeg && _row == 0) {
+        // 分段开关：左右直接切换（用户定义的"左右调最上边"）
+        final n = widget.segments!.length;
+        setState(() {
+          _seg = (_seg + d + n) % n;
+          _row = 0;
+        });
+        widget.onSegChanged?.call(_seg);
+        return true;
+      }
+      if (_row == lastRow) {
+        // 按钮排：左右换 取消/保存
+        setState(() => _btn = (_btn + d + 2) % 2);
+        return true;
+      }
+      return true; // 输入框行导航态：吞掉防穿透
+    }
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA ||
+        k == LogicalKeyboardKey.space) {
+      if (!isDown) return true;
+      if (_isField(_row)) {
+        // OK 进输入框打字
+        _node(_row).requestFocus();
+        setState(() {});
+        return true;
+      }
+      if (_hasSeg && _row == 0) {
+        // 分段行 OK=确认，进下一行
+        setState(() => _row = 1 % _rowCount);
+        return true;
+      }
+      // 末行按钮排 OK=执行
+      final acts = widget.actions;
+      if (acts.isNotEmpty) {
+        acts[_btn.clamp(0, acts.length - 1)].$2();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// 当前行光标描边（导航态下白框标识停在哪一行）
+  BoxDecoration _rowRing(bool active) => BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: active ? Colors.white : Colors.transparent,
+          width: active ? 2 : 0,
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final fields = widget.fields(_seg);
+    final lastRow = _rowCount - 1;
+    final children = <Widget>[];
+
+    var row = 0;
+    if (_hasSeg) {
+      final r = row;
+      children.add(Container(
+        decoration: _rowRing(_row == r),
+        padding: const EdgeInsets.all(2),
+        child: SegmentedButton<int>(
+          segments: [
+            for (var i = 0; i < widget.segments!.length; i++)
+              ButtonSegment(value: i, label: Text(widget.segments![i])),
+          ],
+          selected: {_seg},
+          onSelectionChanged: (s) {
+            setState(() => _seg = s.first);
+            widget.onSegChanged?.call(_seg);
+          },
+        ),
+      ));
+      row++;
+    }
+
+    for (var i = 0; i < fields.length; i++) {
+      final spec = fields[i];
+      final r = row;
+      children.add(Container(
+        decoration: _rowRing(_row == r),
+        padding: const EdgeInsets.all(2),
+        child: ImeSafeTextField(
+          controller: spec.controller,
+          focusNode: _node(r),
+          style: const TextStyle(color: Colors.white),
+          decoration: _inputDecoration(spec.hint)
+              .copyWith(suffixIcon: spec.suffix?.call()),
+        ),
+      ));
+      if (i < fields.length - 1) {
+        children.add(const SizedBox(height: 8));
+      }
+      row++;
+    }
+
+    children.add(const SizedBox(height: 10));
+    children.add(Container(
+      decoration: _rowRing(_row == lastRow),
+      padding: const EdgeInsets.all(2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          for (var i = 0; i < widget.actions.length; i++) ...[
+            if (i > 0) const SizedBox(width: 8),
+            _actionButton(widget.actions[i].$1, i, widget.actions[i].$2),
+          ],
+        ],
+      ),
+    ));
+
+    return AlertDialog(
+      backgroundColor: AppColors.overlaySolid,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: AppColors.stroke),
+      ),
+      title: Text(widget.title,
+          style: const TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: children,
+        ),
+      ),
+    );
+  }
+
+  Widget _actionButton(String label, int index, VoidCallback onTap) {
+    final focused = _row == _rowCount - 1 && _btn == index;
+    final primary = index == 1; // 保存=主按钮
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _row = _rowCount - 1;
+          _btn = index;
+        });
+        onTap();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+        decoration: BoxDecoration(
+          color: primary
+              ? AppColors.accent.withValues(alpha: focused ? 0.30 : 0.18)
+              : Colors.white.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: focused
+                ? Colors.white
+                : (primary ? AppColors.accent : AppColors.stroke),
+            width: focused ? 2 : 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: primary ? Colors.white : AppColors.textSecondary,
+            fontSize: 13.5,
+            fontWeight: primary ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 InputDecoration _inputDecoration(String hint,
     [TextEditingController? pasteTarget]) {
   return InputDecoration(
@@ -3353,7 +4089,7 @@ class _BlacklistRowState extends State<_BlacklistRow> {
   Future<void> _open() async {
     await ChannelBlacklist.ensure();
     if (!mounted) return;
-    await showDialog<void>(
+    await showChildDialog<void>(
       context: context,
       barrierColor: AppColors.scrim,
       builder: (_) => const _BlacklistDialog(),
@@ -3531,7 +4267,11 @@ class _BuiltinListConfig {
 /// 远程 m3u → 存本地缓存。这里只做展示与手动触发，真正的定时在启动时跑。
 class _BuiltinUpdateSection extends StatefulWidget {
   final _BuiltinListConfig config;
-  const _BuiltinUpdateSection(this.config);
+
+  /// 「立即检查更新」按钮的焦点节点：上一行列表按右直接落过来
+  final FocusNode? ctaFocusNode;
+
+  const _BuiltinUpdateSection(this.config, {this.ctaFocusNode});
 
   static final cctv = _BuiltinListConfig(
     icon: Icons.live_tv,
@@ -3609,8 +4349,12 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
     await _load();
     OsdBus.show(msg, icon: ok ? Icons.check_circle : Icons.error_outline);
     if (ok) {
-      // 正在用这个源就把列表刷新掉
-      if (c.sourceManager.currentPlaylistId == widget.config.sourceId) {
+      // 电台清单更新：只重建电台目录（它读的就是这份缓存）；
+      // 电视源更新：当前正在用才重建电视列表
+      if (widget.config.sourceId == PlaylistSource.builtinRadioId) {
+        RadioCatalog.invalidate();
+        await c.reloadRadioCatalog();
+      } else if (c.sourceManager.currentPlaylistId == widget.config.sourceId) {
         await c.refreshChannels();
       }
     }
@@ -3682,6 +4426,7 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
               ),
               const Spacer(),
               TextButton.icon(
+                focusNode: widget.ctaFocusNode,
                 onPressed: _busy ? null : _update,
                 icon: _busy
                     ? const SizedBox(

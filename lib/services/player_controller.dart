@@ -27,6 +27,7 @@ import 'dlna_service.dart';
 import 'win_hotkeys.dart';
 import 'cast_log.dart';
 import 'format_hint.dart';
+import 'net_warm.dart';
 import 'media/omi_video_backend.dart';
 import 'media/omi_video_engine.dart';
 import 'media_capture_service.dart';
@@ -52,7 +53,15 @@ import 'pip.dart';
 import 'system_power.dart';
 
 /// 播放器状态
-enum PlayerState { idle, loading, playing, paused, error, ended, waitingForNetwork }
+enum PlayerState {
+  idle,
+  loading,
+  playing,
+  paused,
+  error,
+  ended,
+  waitingForNetwork
+}
 
 /// 定时关闭到点后做什么。三者是不同概念，别混：
 /// - [pause]：停止播放、保留当前画面（电台听着睡着，第二天接着听）
@@ -184,6 +193,7 @@ class PlayerController extends ChangeNotifier {
   /// 启动画面开始时刻与最少停留计时（见 _init 末尾）
   final DateTime _bootStartAt = DateTime.now();
   Timer? _bootMinTimer;
+
   /// 启动画面上的状态文案（"正在读取节目列表…"等）
   String _bootStatus = '正在启动…';
 
@@ -208,6 +218,7 @@ class PlayerController extends ChangeNotifier {
   // 播放进度定时刷新（进度条/倒计时）
   Timer? _tickTimer;
   Timer? _epgDayTimer;
+
   /// 已经检查过跨天的日期（yyyyMMdd），避免同一天反复拉节目单
   String _epgDayChecked = '';
 
@@ -223,14 +234,17 @@ class PlayerController extends ChangeNotifier {
 
   /// 很多电台的 ICY 元数据就是流文件名（index.m3u8 / 64k.mp3），
   /// 拿它当"曲目"显示非常难看。带协议头或以媒体扩展名结尾的一律视为
-  /// 非曲目，界面不显示、记录也不收
+  /// 非曲目，界面不显示、记录也不收。
+  /// 另：含 U+FFFD（替换符）的视为乱码——不少中文台（AsiaFM 等）的
+  /// ICY 标题是 GBK 编码，mpv 按 UTF-8 解出来就是一串替换符，
+  /// 显示出来就是乱码，宁可当无曲目处理
   static final RegExp _junkTrackRe = RegExp(
     r'(://|\.(m3u8?|mp3|aac|flv|ts|mp4|ogg|opus)(\?.*)?$)',
     caseSensitive: false,
   );
 
   static bool isJunkTrack(String t) =>
-      t.isEmpty || _junkTrackRe.hasMatch(t);
+      t.isEmpty || t.contains('\uFFFD') || _junkTrackRe.hasMatch(t);
 
   // ---------- 待机态：投屏等待 / 待选台（方案 3.7、第九节） ----------
 
@@ -247,6 +261,14 @@ class PlayerController extends ChangeNotifier {
 
   /// 等待期间要先记住"该回到哪个台"，超时/双击返回时用它
   Channel? _pendingRestoreChannel;
+
+  /// 最近一次真实播放的频道（不含 __dlna_cast__ 虚拟频道）。
+  ///
+  /// 连续投屏时 `_preCastChannel` 会拿不到值：第二段开始时 `_currentChannel`
+  /// 已经是上一段的 `__dlna_cast__`，按原逻辑只能记 null，于是这段播完
+  /// 「等待投屏」倒计时一结束就掉回「请选择频道」空态（用户 2.1.47 实测，
+  /// 偶发）。用它兜底，保证总有台可回。
+  Channel? _lastRealChannel;
 
   bool _awaitingChannelPick = false;
 
@@ -267,6 +289,7 @@ class PlayerController extends ChangeNotifier {
   double get brightness => _brightness;
   PlayerSettings get settings => _settings;
   OmiVideoBackend? get videoController => _videoController;
+
   /// 电视域分类：整组都是电台的分组不进来（内置电台源已整体标 radio，
   /// 这里再兜一层，防其它源里"广播"分组漏进电视标签）
   List<ChannelCategory> get categories => [
@@ -369,6 +392,12 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> _init() async {
+    // 前后台监听：安卓后台切台时新播放器拿不到 Surface，视频轨先关掉
+    // （见 _onAppHidden / _playCurrentSource）
+    _lifecycleListener = AppLifecycleListener(
+      onHide: _onAppHidden,
+      onShow: _onAppShown,
+    );
     // 启动计时：初始化耗时不足最短展示时长时，撤屏前补足等待。
     // 首次启动（无列表/无 EPG/无历史频道）全程只有毫秒级 prefs 读取，
     // 若不兜底，启动画面一闪而过甚至完全看不到，品牌动画形同虚设
@@ -386,17 +415,16 @@ class PlayerController extends ChangeNotifier {
     // 延迟 20 秒避开启动最忙的时段，失败静默用本地清单
     Timer(const Duration(seconds: 20), () {
       unawaited(sourceManager.maybeAutoUpdateBuiltinCctv().then((_) {
-        if (sourceManager.currentPlaylistId ==
-            PlaylistSource.builtinCctvId) {
+        if (sourceManager.currentPlaylistId == PlaylistSource.builtinCctvId) {
           unawaited(refreshChannels());
         }
       }));
-      // 内置电台清单：同一套到期机制，互不影响
-      unawaited(sourceManager.maybeAutoUpdateBuiltinRadio().then((_) {
-        if (sourceManager.currentPlaylistId ==
-            PlaylistSource.builtinRadioId) {
-          unawaited(refreshChannels());
-        }
+      // 内置电台清单：同一套到期机制，互不影响。
+      // 电台目录读的就是这份清单缓存：更新后直接重建电台目录，
+      // 绝不能去 refreshChannels（那是电视域，会把正在看的电视列表换掉）
+      unawaited(sourceManager.maybeAutoUpdateBuiltinRadio().then((_) async {
+        RadioCatalog.invalidate();
+        await reloadRadioCatalog();
       }));
       // 内置节目单：每天从央视网抓「今天 + 明天」，只有真更新过才重解析
       unawaited(BuiltinEpg.maybeAutoRefresh().then((updated) async {
@@ -454,12 +482,15 @@ class PlayerController extends ChangeNotifier {
       notifyListeners();
     });
 
-    // 一个源都没有时（新装/刚删光）：把内置电台精选设为当前源，
-    // 让首启就有内容，而不是一进来面对空列表
-    if (sourceManager.currentPlaylist == null &&
-        sourceManager.playlists
-            .any((p) => p.id == PlaylistSource.builtinRadioId)) {
-      await sourceManager.selectPlaylist(PlaylistSource.builtinRadioId);
+    // 一个源都没有时（新装/刚删光）：落到内置央视频道。
+    // 以前这里塞的是内置电台——电台是独立目录（RadioCatalog），当「当前
+    // 电视源」用会把电视那栏占住，用户看着像空的还选不回来
+    if (sourceManager.currentPlaylist == null) {
+      final hasCctv = sourceManager.playlists
+          .any((p) => p.id == PlaylistSource.builtinCctvId);
+      if (hasCctv) {
+        await sourceManager.selectPlaylist(PlaylistSource.builtinCctvId);
+      }
     }
 
     // 如果有选中的播放列表，加载频道；否则保持空列表，等用户添加
@@ -492,9 +523,19 @@ class PlayerController extends ChangeNotifier {
     // 频道加载完毕后，恢复上次退出时播放的频道。
     // 设置里关掉「启动时恢复上次频道」→ 停在待选台画面，
     // 不发任何网络请求（待选台壳由播放页渲染）
+    //
+    // 顺序很关键：这里**只解析、不起播**。以前在撤屏前 await 起播，
+    // 机器快的时候声音比画面先到——启动动画还盖着，台已经响了。
+    Channel? resumeTarget;
     if (_settings.resumeLastChannel) {
       _boot('正在恢复上次播放的频道…');
-      await restoreLastChannel();
+      resumeTarget = await _resolveLastChannel();
+      if (resumeTarget != null) {
+        // 台名/台标先给播放页：撤屏时不至于闪一下待选台再跳到播放页
+        _currentChannel = resumeTarget;
+        _state = PlayerState.loading;
+        notifyListeners();
+      }
     } else {
       _awaitingChannelPick = true;
       _state = PlayerState.idle;
@@ -516,6 +557,14 @@ class PlayerController extends ChangeNotifier {
     }
     _bootReady = true;
     notifyListeners();
+
+    // 启动画面退场之后再拉流：先把这一帧画出来（界面已切到播放页、
+    // 台标台名就位），再让内核起播。多给 200ms 是给首帧合成留余量，
+    // 否则刚撤屏就出声，仍然像"动画没走完就播了"
+    if (resumeTarget != null) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      unawaited(_startResumePlayback(resumeTarget));
+    }
   }
 
   // ==================== 网络状态处理 ====================
@@ -575,6 +624,14 @@ class PlayerController extends ChangeNotifier {
   /// 等待网络可用（最多等 30 秒），返回是否有网
   Future<bool> _waitForNetwork() async {
     if (NetworkMonitor.instance.hasNetwork) return true;
+    // 已有播放器实例（正在播/刚暂停）= 网络是通的，直接放行。
+    //
+    // 安卓息屏或后台时 DNS 探测常被系统限流，缓存值会被误判成"断网"；
+    // 照它去等 30 秒，用户看到的就是「通知栏按下一台没反应，
+    // 回到 App 才突然跳台」。播放本身能连上就说明网没问题。
+    if (_videoController != null || isPlaying) return true;
+    // 缓存说没网：实时补检一次（刚连 Wi-Fi / 后台转前台时缓存滞后）
+    if (await NetworkMonitor.instance.checkNow()) return true;
     _state = PlayerState.waitingForNetwork;
     notifyListeners();
     return NetworkMonitor.instance.waitForNetwork(
@@ -631,9 +688,12 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 启动时恢复上次播放的频道：优先在当前播放列表中精确匹配，
-  /// 匹配不到则用记录的播放地址构造临时频道播放
-  Future<void> restoreLastChannel() async {
+  /// 解析「上次播放的频道」：只读 prefs + 在已加载列表里找，**不发起播放**。
+  ///
+  /// 拆两段是为了启动时序——先把台名/台标给播放页，等启动动画退场之后
+  /// 再拉流。否则机器快的时候声音会比画面先到（用户实测「启动界面还没
+  /// 过去，台就响起来了」）。
+  Future<Channel?> _resolveLastChannel() async {
     try {
       final p = await SharedPreferences.getInstance();
       // 上次在哪个域就在哪个域恢复；该域没记录时回落到另一个域
@@ -643,15 +703,14 @@ class PlayerController extends ChangeNotifier {
       if (str == null || str.isEmpty) {
         str = p.getString(isRadio ? _kLastChannel : _kLastRadioChannel);
       }
-      if (str == null || str.isEmpty) return;
-      final Map<String, dynamic> data =
-          jsonDecode(str) as Map<String, dynamic>;
+      if (str == null || str.isEmpty) return null;
+      final Map<String, dynamic> data = jsonDecode(str) as Map<String, dynamic>;
       final urls = (data['streamUrls'] as List<dynamic>?)
               ?.map((e) => e.toString())
               .where((e) => e.isNotEmpty)
               .toList() ??
           const <String>[];
-      if (urls.isEmpty) return;
+      if (urls.isEmpty) return null;
       final id = data['id'] as String? ?? '';
       final name = data['name'] as String? ?? '';
       final srcIdx = (data['sourceIndex'] as int?) ?? 0;
@@ -679,23 +738,34 @@ class PlayerController extends ChangeNotifier {
         groupTitle: data['groupTitle'] as String? ?? '',
         userAgent: data['userAgent'] as String? ?? '',
       );
-      _sourceIndex =
-          srcIdx < target.streamUrls.length ? srcIdx : 0;
-      // 上次是网页频道：启动时也自动打开网页播放
-      await playChannel(target);
-      // 开机时系统网络/DNS 可能尚未就绪，首次拉流偶发超时失败。
-      // 3 秒后在用户无操作（未手动切台/未投屏）的前提下自动重试一次
+      _sourceIndex = srcIdx < target.streamUrls.length ? srcIdx : 0;
+      return target;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 启动时恢复上次播放的频道：优先在当前播放列表中精确匹配，
+  /// 匹配不到则用记录的播放地址构造临时频道播放
+  Future<void> restoreLastChannel() async {
+    final target = await _resolveLastChannel();
+    if (target == null) return;
+    await _startResumePlayback(target);
+  }
+
+  /// 恢复播放：起播 + 开机偶发超时的兜底重试（系统网络/DNS 尚未就绪）
+  Future<void> _startResumePlayback(Channel target) async {
+    await playChannel(target);
+    if (_state == PlayerState.error &&
+        !_isCasting &&
+        identical(_currentChannel, target)) {
+      await Future.delayed(const Duration(seconds: 3));
       if (_state == PlayerState.error &&
           !_isCasting &&
           identical(_currentChannel, target)) {
-        await Future.delayed(const Duration(seconds: 3));
-        if (_state == PlayerState.error &&
-            !_isCasting &&
-            identical(_currentChannel, target)) {
-          await playChannel(target);
-        }
+        await playChannel(target);
       }
-    } catch (_) {}
+    }
   }
 
   /// DLNA 服务状态（设置面板展示，方便确认是否开启）
@@ -721,9 +791,8 @@ class PlayerController extends ChangeNotifier {
       var uuid = prefs.getString('dlna_uuid') ?? '';
       if (uuid.isEmpty) {
         final rnd = Random();
-        uuid = List.generate(
-                8, (_) => '0123456789abcdef'[rnd.nextInt(16)])
-            .join();
+        uuid =
+            List.generate(8, (_) => '0123456789abcdef'[rnd.nextInt(16)]).join();
         await prefs.setString('dlna_uuid', uuid);
       }
       await dlnaService.start(
@@ -731,8 +800,7 @@ class PlayerController extends ChangeNotifier {
         hooks: DlnaHooks(
           onPlay: (url, title) => playCastUrl(url, title),
           onPause: () async {
-            if (_videoController != null &&
-                _videoController!.value.isPlaying) {
+            if (_videoController != null && _videoController!.value.isPlaying) {
               await _videoController!.pause();
               _state = PlayerState.paused;
               notifyListeners();
@@ -834,8 +902,9 @@ class PlayerController extends ChangeNotifier {
             }
           },
           selectPlaylist: (id) async {
-            await sourceManager.selectPlaylist(id);
-            await refreshChannels();
+            // 走控制器同一个入口：电台源在这里只刷电台目录，
+            // 不把电视当前源顶掉（网页端和本机是同一套规则）
+            await selectPlaylist(id);
           },
           restoreBuiltinRadio: () => restoreBuiltinRadio(),
           // 内置节目单：网页上「立即更新」直接让电脑端去央视网抓
@@ -856,6 +925,37 @@ class PlayerController extends ChangeNotifier {
               'count': await BuiltinEpg.programCount(),
               'at': at?.toIso8601String(),
             };
+          },
+          // 内置清单（央视频道 / 电台精选）：网页上与 App 设置面板
+          // 同款的更新时间 / 自动检查间隔 / 立即检查更新
+          builtinInfo: () async {
+            final sm = sourceManager;
+            return {
+              'cctv': {
+                'count': await sm.builtinCctvChannelCount(),
+                'at': (await sm.getBuiltinCctvFetchedAt())?.toIso8601String(),
+                'days': await sm.getBuiltinCctvIntervalDays(),
+              },
+              'radio': {
+                'count': await sm.builtinRadioStationCount(),
+                'at': (await sm.getBuiltinRadioFetchedAt())?.toIso8601String(),
+                'days': await sm.getBuiltinRadioIntervalDays(),
+              },
+            };
+          },
+          updateBuiltin: (kind) async {
+            final (ok, msg) = kind == 'radio'
+                ? await sourceManager.updateBuiltinRadio(force: true)
+                : await sourceManager.updateBuiltinCctv(force: true);
+            notifyListeners();
+            return {'ok': ok, 'message': msg};
+          },
+          setBuiltinInterval: (kind, days) async {
+            if (kind == 'radio') {
+              await sourceManager.setBuiltinRadioIntervalDays(days);
+            } else {
+              await sourceManager.setBuiltinCctvIntervalDays(days);
+            }
           },
         ),
       );
@@ -923,6 +1023,7 @@ class PlayerController extends ChangeNotifier {
         'radioMeter': s.radioMeter,
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
+        'tuneDwellMs': s.tuneDwellMs,
         'sourceTimeoutSeconds': s.sourceTimeoutSeconds,
         'bufferSeconds': s.bufferSeconds,
         'resumeLastChannel': s.resumeLastChannel,
@@ -985,8 +1086,8 @@ class PlayerController extends ChangeNotifier {
     final rawEpg = (data['epgs'] as List?) ?? const [];
     final epgs = rawEpg
         .whereType<Map>()
-        .map((m) => EpgSource.fromJson(
-            _normalizeRemoteItem(m.cast<String, dynamic>())))
+        .map((m) =>
+            EpgSource.fromJson(_normalizeRemoteItem(m.cast<String, dynamic>())))
         .toList();
     final newEpgId = data['currentEpgId']?.toString();
     final oldEpgId = sourceManager.currentEpgId;
@@ -1071,6 +1172,12 @@ class PlayerController extends ChangeNotifier {
       int autoHide = cur.autoHideDelay;
       final ahRaw = ri('autoHideDelay');
       if (ahRaw != null) autoHide = ahRaw.clamp(1000, 10000);
+      int tuneDwell = cur.tuneDwellMs;
+      final tdRaw = ri('tuneDwellMs');
+      if (tdRaw != null &&
+          const {500, 800, 1200, 2000, 2500, 3000}.contains(tdRaw)) {
+        tuneDwell = tdRaw;
+      }
       int sourceTimeout = cur.sourceTimeoutSeconds;
       final soRaw = ri('sourceTimeoutSeconds');
       if (soRaw != null && soRaw >= 5 && soRaw <= 30) {
@@ -1155,6 +1262,7 @@ class PlayerController extends ChangeNotifier {
           closeToTray: closeToTray,
           gestureSensitivity: gesture,
           autoHideDelay: autoHide,
+          tuneDwellMs: tuneDwell,
           sourceTimeoutSeconds: sourceTimeout,
           bufferSeconds: buffer,
           preferredQuality: quality,
@@ -1216,6 +1324,9 @@ class PlayerController extends ChangeNotifier {
         (_currentChannel?.id.startsWith('__dlna_cast__') ?? false)
             ? null
             : _currentChannel;
+    // 连播第二段起：当前频道是上一段的虚拟投屏频道，上面只能得到 null，
+    // 退回最近一次真实频道（电台/直播台），否则这段播完会掉进「请选择频道」
+    _preCastChannel ??= _lastRealChannel;
     _isCasting = true;
     // 重置卡顿看门狗
     _watchPosMs = -1;
@@ -1268,7 +1379,7 @@ class PlayerController extends ChangeNotifier {
     // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
     // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
     dlnaService.kickCastClients();
-    final restore = _preCastChannel;
+    final restore = _preCastChannel ?? _lastRealChannel;
     _preCastChannel = null;
     // 方案 3.7：投屏结束后按设置进「正在等待投屏」，给发送端连播
     // （电视剧下一集）留窗口；0=马上返回，-1=一直等
@@ -1324,7 +1435,7 @@ class PlayerController extends ChangeNotifier {
     if (!_castWaiting) return;
     _castWaiting = false;
     _castWaitRemain = 0;
-    final restore = _pendingRestoreChannel;
+    final restore = _pendingRestoreChannel ?? _lastRealChannel;
     _pendingRestoreChannel = null;
     if (restore != null) {
       await playChannel(restore);
@@ -1397,8 +1508,7 @@ class PlayerController extends ChangeNotifier {
       if (lower.isEmpty) continue;
       for (final cat in _categories) {
         for (final ch in cat.channels) {
-          if (ch.tvgName.isNotEmpty &&
-              ch.tvgName.toLowerCase() == lower) {
+          if (ch.tvgName.isNotEmpty && ch.tvgName.toLowerCase() == lower) {
             return ch;
           }
           final name = ch.name.toLowerCase();
@@ -1436,8 +1546,7 @@ class PlayerController extends ChangeNotifier {
         try {
           await VolumeController.instance.setVolume(_volume);
         } catch (_) {}
-        OsdBus.show('检测到系统音量被静音，已恢复',
-            icon: Icons.volume_up);
+        OsdBus.show('检测到系统音量被静音，已恢复', icon: Icons.volume_up);
       } else {
         _volume = vol;
       }
@@ -1536,6 +1645,14 @@ class PlayerController extends ChangeNotifier {
 
   /// 播放指定频道（从第一个源开始，失败自动尝试下一个源）
   Future<void> playChannel(Channel channel) async {
+    // 卡片上刚按了 ❌：这一瞬间正在飞的「下一台」不能把它拉回来。
+    // 时序：后台换台本来就慢（openInPlace 要几秒），用户等不及点了退出，
+    // 迟到的换台随后完成 → 卡片重新出现、声音又响（实测「退不出去」）
+    final exitAt = _cardExitAt;
+    if (exitAt != null &&
+        DateTime.now().difference(exitAt) < const Duration(seconds: 3)) {
+      return;
+    }
     // 手动切台 = 放弃等待投屏
     _clearCastWait();
     // 电台不需要小窗（只有带画面的直播才值得置顶小窗）。从视频小窗切到
@@ -1549,9 +1666,17 @@ class PlayerController extends ChangeNotifier {
       _radioTracks.clear();
       _lastMediaTitle = '';
     }
+    // 主动播放（点台/换台/重播同一台）：即使之前按过卡片上的 ❌，
+    // 也应该重新出卡片。以前只在「换到另一台」时复位，从列表里点回
+    // 当前这一台就永远不出卡片了
+    _audioCardClosed = false;
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
+    _softErrPending = false;
+    _softErrSecondRound = false;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     _lastError = null;
@@ -1570,7 +1695,13 @@ class PlayerController extends ChangeNotifier {
     }
     // 无网络时等待网络（开机启动时系统网络可能未就绪）
     if (!await _waitForNetwork()) {
-      // 30 秒内仍无网络，保持等待状态，后台继续检测
+      // 30 秒内仍无网络：保持等待状态，后台继续检测。
+      // 但必须先把「目标频道」记下来——否则等网这段里 _currentChannel
+      // 还是上一台，网络一恢复 _onNetworkRestored 又会播回旧台，
+      // 用户刚点的这一台就丢了
+      _currentChannel = channel;
+      _sourceIndex = 0;
+      notifyListeners();
       return;
     }
     // 切到与「网页→内置接管」无关的频道（普通换台/启动恢复）：
@@ -1618,8 +1749,15 @@ class PlayerController extends ChangeNotifier {
       }
     }
     _webPageActive = false;
+    // 关键：原生侧的低级钩子一旦进入「网页前台转发」模式，所有动作键都
+    // 被它截走转给 WebView，Flutter 就再也收不到 OK/方向键（返回键例外，
+    // 钩子仍交给 App）。这里只改字段不会把转发关掉——网页崩过一次再切回
+    // 直播时，表现就是「只有返回键/右键有反应，OK 打不开频道列表」
+    // （2.1.47 实测）。必须显式把 W0 发回去。
     _webPageForeground = false;
+    WinHotkeys().setWebForward(false);
     _currentChannel = channel;
+    if (!channel.id.startsWith('__dlna_cast__')) _lastRealChannel = channel;
     _sourceIndex = 0;
     // 立刻通知界面把网页控件摘掉。这里下面要等 2.5 秒让 WebView2 销毁
     // 完成（否则和 mpv 初始化抢 COM 会崩），如果这中间不刷新界面，
@@ -1676,6 +1814,22 @@ class PlayerController extends ChangeNotifier {
   /// 网页内视频是否处于播放态（由网页 play/pause 事件回传，
   /// 供底部面板播放按钮显示正确图标）
   bool _webPlaying = false;
+
+  /// 网页是否已真正起播（黑幕「等到出画面才揭开」的判据，
+  /// 见 player_screen 里的 _WebLoadingCurtain）
+  bool get webPlaying => _webPlaying;
+
+  /// 网页画面是否真的出来了（探针：未暂停 + readyState≥2 + 进度在走
+  /// + videoWidth 达标）。比 `webPlaying`（页面 play 事件）晚，用于
+  /// 决定加载幕什么时候可以揭开——事件先到、首帧后到，按事件揭幕会露黑屏
+  bool _webFramesReady = false;
+  bool get webFramesReady => _webFramesReady;
+
+  void setWebFramesReady(bool ready) {
+    if (_webFramesReady == ready) return;
+    _webFramesReady = ready;
+    notifyListeners();
+  }
 
   /// ===== 网页频道控制桥（由内嵌 WebView 注册/注销）=====
   /// 执行 JS 并返回结果
@@ -1861,7 +2015,8 @@ class PlayerController extends ChangeNotifier {
   void _applyWebQuality() {
     final eval = _webEval;
     if (eval == null) return;
-    eval('window.__omSetRes && window.__omSetRes("${webQualityLevels[_webQualityIndex]}")');
+    eval(
+        'window.__omSetRes && window.__omSetRes("${webQualityLevels[_webQualityIndex]}")');
   }
 
   /// 网页清晰度切换：网页频道前台时，遥控器左右键即调清晰度（档位并入
@@ -1892,6 +2047,7 @@ class PlayerController extends ChangeNotifier {
   void setWebPlaying(bool playing) {
     if (_webPlaying == playing) return;
     _webPlaying = playing;
+    if (!playing) _webFramesReady = false;
     notifyListeners();
   }
 
@@ -1912,16 +2068,14 @@ class PlayerController extends ChangeNotifier {
   Future<void> _openWebPageChannel(Channel channel) async {
     // 网页直播支持已关闭：不创建/调用 WebView，给一条提示后保持原状
     if (!_settings.webEnabled) {
-      OsdBus.show('网页直播支持已关闭，可在 设置 → 系统 中开启',
-          icon: Icons.language);
+      OsdBus.show('网页直播支持已关闭，可在 设置 → 系统 中开启', icon: Icons.language);
       return;
     }
     // 系统没有可用的内嵌网页运行时（老系统/未装 WebView2）：
     // 绝不能创建 InAppWebView 平台视图——创建即抛异常，退出时也容易
     // 连带崩溃。这里直接拦下并提示，普通频道/EPG/多源管理不受影响
     if (!webEmbeddedRuntimeReady()) {
-      OsdBus.show('未检测到可用的 WebView2 运行时，网页频道不可用',
-          icon: Icons.language);
+      OsdBus.show('未检测到可用的 WebView2 运行时，网页频道不可用', icon: Icons.language);
       return;
     }
     // 已在播放同一个网页频道：保持现状（网页已在前台/后台缓冲中），
@@ -1949,12 +2103,16 @@ class PlayerController extends ChangeNotifier {
         if (_currentChannel?.id != channel.id) return;
       }
       // 上一个频道（电台/直播流）刚拆完解码器就创建 WebView2，
-      // 部分机器会撞出 0xc0000005，先让系统喘口气
-      await Future<void>.delayed(const Duration(milliseconds: 600));
+      // 部分机器会撞出 0xc0000005，先让系统喘口气。
+      // 1607 + 老显卡驱动上 600ms 实测仍会崩（D3D 设备释放慢），放宽到
+      // 1000ms；这段时间界面本来就是「正在进入网页播放」的黑屏，用户无感
+      await Future<void>.delayed(const Duration(milliseconds: 1000));
       if (_currentChannel?.id != channel.id) return;
       // 网页先在后台全屏缓冲（视频位保持黑屏），起播后再推到前台
       _webPageActive = true;
       _webPageForeground = false;
+      _webPlaying = false;
+      _webFramesReady = false;
       notifyListeners();
     } else {
       await launchExternal(channel.webPageUrl);
@@ -1970,11 +2128,13 @@ class PlayerController extends ChangeNotifier {
     // 它会一直盖在画面上（白底 + 吃鼠标 + 吃双击）
     try {
       // ignore: avoid_dynamic_calls
-      unawaited(webController?.setSize(const Size(0, 0)) ??
-          Future<void>.value());
+      unawaited(
+          webController?.setSize(const Size(0, 0)) ?? Future<void>.value());
     } catch (_) {}
     _webPageActive = false;
     _webPageForeground = false;
+    _webPlaying = false;
+    _webFramesReady = false;
     WinHotkeys().setCursorHide(false);
     WinHotkeys().setWebForward(false);
     notifyListeners();
@@ -2040,8 +2200,7 @@ class PlayerController extends ChangeNotifier {
       if (web != null && t != null) {
         // 网页 → 内置
         _userWebChoiceUrl = null;
-        OsdBus.show('正在切换到内置播放器全屏播放',
-            icon: Icons.switch_video);
+        OsdBus.show('正在切换到内置播放器全屏播放', icon: Icons.switch_video);
         await playSniffedWebStream(
           url: t.url,
           referer: t.referer,
@@ -2102,9 +2261,9 @@ class PlayerController extends ChangeNotifier {
         return true;
       } else if (kind == 'flv') {
         final h = hdrs()..['Range'] = 'bytes=0-4095';
-        final r =
-            await http.get(Uri.parse(url), headers: h).timeout(
-                const Duration(seconds: 8));
+        final r = await http
+            .get(Uri.parse(url), headers: h)
+            .timeout(const Duration(seconds: 8));
         if (r.statusCode != 200 && r.statusCode != 206) return false;
         final ct = r.headers['content-type'] ?? '';
         if (ct.contains('x-flv') || ct.contains('video-flv')) return true;
@@ -2139,10 +2298,9 @@ class PlayerController extends ChangeNotifier {
     required String referer,
     String? userAgent,
   }) async {
-    final web =
-        (_currentChannel != null && _currentChannel!.isWebPage)
-            ? _currentChannel
-            : null;
+    final web = (_currentChannel != null && _currentChannel!.isWebPage)
+        ? _currentChannel
+        : null;
     _lastWebChannel = web;
     // 记住最近一个可直连嗅探目标：控制面板可在网页/内置间来回切换
     _sniffTarget = _SniffTarget(
@@ -2192,8 +2350,7 @@ class PlayerController extends ChangeNotifier {
     _sniffTarget = null;
     final web = _lastWebChannel;
     if (web != null) _abandonedSniffWebUrl = web.webPageUrl;
-    OsdBus.show('内置播放器无法播放该流，已切回网页播放',
-        icon: Icons.language);
+    OsdBus.show('内置播放器无法播放该流，已切回网页播放', icon: Icons.language);
     if (web != null) {
       Future(() => _openWebPageChannel(web));
     }
@@ -2248,14 +2405,22 @@ class PlayerController extends ChangeNotifier {
   /// 供换台防抖预览：OSD 立即显示目标频道，停顿后 playChannel 真正切流
   Channel? adjacentChannel(int delta) => _stepChannel(delta);
 
+  /// 从指定台起算的相邻频道（不触发播放）。
+  ///
+  /// 连按 ↑/↓ 时必须从「当前预览台」继续走，否则每一步都从正在播的
+  /// 台算 ±1，按五下还是同一个台（用户实测：连按不前进）
+  Channel? adjacentChannelFrom(Channel base, int delta) =>
+      _stepChannel(delta, base: base);
+
   /// 同域内按偏移取下一台，跳过黑名单。
   /// OSD 预览（adjacentChannel）与实际换台（playAdjacentChannel）共用这一份，
   /// 否则会出现"预览显示 A、切过去是 B"。
-  Channel? _stepChannel(int delta) {
+  Channel? _stepChannel(int delta, {Channel? base}) {
     final all = _switchDomainChannels;
     if (all.isEmpty) return null;
-    if (_currentChannel == null) return all.first;
-    final idx = all.indexWhere((c) => c.id == _currentChannel!.id);
+    final from = base ?? _currentChannel;
+    if (from == null) return all.first;
+    final idx = all.indexWhere((c) => c.id == from.id);
     if (idx < 0) return all.first;
     var i = idx;
     // 最多绕一圈：全部被屏蔽时停在原地，不能死循环
@@ -2285,7 +2450,11 @@ class PlayerController extends ChangeNotifier {
   /// 与当前节目源无关，所以从左侧电台标签起的台也能一直往下翻。
   List<Channel> get _switchDomainChannels {
     final isRadio = _currentChannel?.isRadio ?? false;
-    if (isRadio && _radioCategories.isNotEmpty) {
+    if (isRadio) {
+      // 电台域只在电台目录里循环。目录没准备好就返回空（本次不换台）——
+      // 绝不能退到电视列表：在通知栏按「下一台」会切进需要画面的电视频道，
+      // 后台拿不到 Surface，起播就停在等纹理上（用户实测「按了没反应，
+      // 回 App 才跳台」）。不换台总比换错域强。
       return [for (final cat in _radioCategories) ...cat.channels];
     }
     return [for (final cat in _categories) ...cat.channels];
@@ -2340,8 +2509,14 @@ class PlayerController extends ChangeNotifier {
       _sourceIndex = 0;
     }
     final gen = ++_playGeneration;
-    _state = PlayerState.loading;
-    notifyListeners();
+    _instanceBornAt = DateTime.now();
+    // 后台换台不要进 loading：卡片会跟着在「播放/暂停」之间闪一下，
+    // 而且加载失败时用户看到的是一张不知道在干嘛的卡片。后台保持
+    // 上一态直到真有结果（成功 → playing，失败 → 暂停等用户点）
+    if (!_isBackgroundNow) {
+      _state = PlayerState.loading;
+      notifyListeners();
+    }
 
     // 缓冲设置即时生效：每次起播前按当前设置重新注册 fvp 选项，
     // 不必重启程序（registerWith 的全局选项对之后创建的播放器生效）。
@@ -2364,12 +2539,6 @@ class PlayerController extends ChangeNotifier {
       }
     }
 
-    await _disposeVideoController();
-
-    // 等待释放期间用户已切新台（新代已接管）：本代直接作废，
-    // 不再做预检/建播放器，避免慢源迟到后与新台两路并存
-    if (gen != _playGeneration) return;
-
     // 频道声明的自定义 UA（M3U http-user-agent）：部分源（如 APTV）
     // 必须带指定 UA，否则返回 404/广告。fvp 经 ffmpeg 透传 HTTP 头。
     // 注意：不要给投屏 URL 主动补 UA/Referer——视频号 CDN 实测对
@@ -2383,6 +2552,42 @@ class PlayerController extends ChangeNotifier {
       headers['Referer'] = channel.httpReferer.trim();
     }
 
+    // 安卓后台电台换台（通知栏上一台/下一台）：**复用现有内核原地换源**。
+    //
+    // 后台没有 Surface：新建内核的 texture 管线拿不到画布，mpv 的 open
+    // 会停在等纹理上——用户实测就是「点了下一台，卡片台名变了但没声，
+    // 切回界面才跳台」。原地 open 不碰 texture，直接用已在跑的音频
+    // 输出换流，后台几秒内就出声。失败（内核释放/不支持）回退重建。
+    final live = _videoController;
+    if (channel.isRadio && _isBackgroundNow && live != null) {
+      try {
+        await live.openInPlace(
+          Uri.parse(channel.streamUrls[_sourceIndex]),
+          headers: headers.isEmpty ? null : headers,
+        );
+        if (gen != _playGeneration) return;
+        await live.play();
+        _state = PlayerState.playing;
+        _lastError = null;
+        _sniffedFromWeb = false;
+        _softErrPending = false;
+        _softErrSecondRound = false;
+        await _saveLastChannel();
+        // 卡片台名/曲目跟着换（原生只改标题不重建服务）
+        _syncAudioNotification();
+        notifyListeners();
+        return;
+      } catch (e) {
+        debugPrint('[Omi] 后台原地换台失败，回退重建内核: $e');
+      }
+    }
+
+    await _disposeVideoController();
+
+    // 等待释放期间用户已切新台（新代已接管）：本代直接作废，
+    // 不再做预检/建播放器，避免慢源迟到后与新台两路并存
+    if (gen != _playGeneration) return;
+
     // libmpv 自行嗅探容器格式，无需 formatHint；Web 端 video_player 仍需
     // 依据后缀/MIME 选择正确解析器，这里统一算好交给门面
     // 依据后缀或轻量预检推断格式
@@ -2394,8 +2599,7 @@ class PlayerController extends ChangeNotifier {
     if (_isCasting && !isHls) {
       final proxied = await CastStreamProxy.instance.wrapUrl(streamUrl);
       if (proxied != null) {
-        CastLog.write(
-            'cast proxy: ${Uri.parse(streamUrl).host} -> 127.0.0.1');
+        CastLog.write('cast proxy: ${Uri.parse(streamUrl).host} -> 127.0.0.1');
         streamUrl = proxied;
       }
     }
@@ -2404,8 +2608,26 @@ class PlayerController extends ChangeNotifier {
     final dotIdx = segName.lastIndexOf('.');
     final ext = dotIdx >= 0 ? segName.substring(dotIdx + 1) : '';
     const knownMediaExt = {
-      'mp4', 'mkv', 'avi', 'flv', 'ts', 'mov', 'wmv', 'm4v', 'webm', 'mpg',
-      'mpeg', '3gp', 'rmvb', 'rm', 'mp3', 'aac', 'flac', 'ogg', 'wav', 'mka',
+      'mp4',
+      'mkv',
+      'avi',
+      'flv',
+      'ts',
+      'mov',
+      'wmv',
+      'm4v',
+      'webm',
+      'mpg',
+      'mpeg',
+      '3gp',
+      'rmvb',
+      'rm',
+      'mp3',
+      'aac',
+      'flac',
+      'ogg',
+      'wav',
+      'mka',
     };
     String? formatHint;
     if (ext == 'm3u8' || ext == 'm3u') {
@@ -2414,8 +2636,7 @@ class PlayerController extends ChangeNotifier {
       formatHint = 'dash';
     } else if (!knownMediaExt.contains(ext)) {
       // 后缀无法识别（php/html/无后缀等）：预检拿真实 Content-Type
-      final fmt =
-          await inferStreamFormat(url: streamUrl, headers: headers);
+      final fmt = await inferStreamFormat(url: streamUrl, headers: headers);
       formatHint = (fmt == 'hls' || fmt == 'dash') ? fmt : null;
     }
 
@@ -2446,6 +2667,16 @@ class PlayerController extends ChangeNotifier {
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
     c.addListener(closure);
+    // 后台切台（通知栏上一台/下一台）：只有**电台**在后台是纯音频。
+    // 安卓侧后台没有 Surface，视频管线一挂着，open 就会停在等纹理上
+    // （用户实测：通知栏切台声音停了，回到界面才接着放），所以电台
+    // 要提前把视频轨摘掉。
+    //
+    // 视频台绝不能这么做：视频在后台是画中画小窗，画面还要用，
+    // 关掉视频轨等于给小窗一块黑布（v2.1.28 曾无条件关，已修）。
+    if (channel.isRadio && _isBackgroundNow) {
+      unawaited(c.setVideoOutputDisabled(true));
+    }
     // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
     // （'custom' 走自定义均衡器增益构建）
     unawaited(c.applyAudioFilter(filterForPreset(_settings.audioPreset)));
@@ -2512,7 +2743,8 @@ class PlayerController extends ChangeNotifier {
       _sniffedFromWeb = false;
       // 记录当前频道，下次启动时恢复。网页嗅探接管时保存的是原网页
       // 频道（webview://），而不是带时效 token 的嗅探流地址
-      if (_lastWebChannel != null && _currentChannel?.id == _lastWebChannel!.id) {
+      if (_lastWebChannel != null &&
+          _currentChannel?.id == _lastWebChannel!.id) {
         await _saveLastChannel(channel: _lastWebChannel);
       } else {
         await _saveLastChannel();
@@ -2613,6 +2845,87 @@ class PlayerController extends ChangeNotifier {
         stopCastAndRestore();
         return;
       }
+      // ---- 错误判定：一次 error 不足以判死 ----
+      //
+      // 底层是 ffmpeg：AAC 坏包、单帧解码失败、切台瞬间上一条连接的残留
+      // 都会抛一次 error，但流本身还在走——用户实测「弹了重试卡片，后台
+      // 其实一直在正常播」。起播阶段最容易被误判：此时 state 还没到
+      // playing、position 还是 0，旧逻辑直接进重试链路，白重连三次才落到
+      // 「链接失效」错误页。
+      //
+      // 改成：先挂一次延迟复检（起播阶段给 3.5 秒宽限，播放中 2.5 秒），
+      // 期间只要「在播 / 位置推进」就当作误报忽略；真的既没声音也没进度、
+      // 而且错误仍在，才走换源/重试。
+      if (!_softErrPending && !_isCasting) {
+        final born = _instanceBornAt;
+        final earlyStart = born != null &&
+            DateTime.now().difference(born) < const Duration(seconds: 8);
+        _softErrPending = true;
+        final startPos = v.position;
+        _softErrTimer?.cancel();
+        // 后台（卡片在操作）把复检压到 1.2 秒：用户看不到界面，长时间
+        // 「没反应」比误判严重——快一点收敛到暂停，卡片按钮变「播放」
+        _softErrTimer = Timer(
+          Duration(
+              milliseconds: _isBackgroundNow ? 1200 : (earlyStart ? 3500 : 2500)),
+          () {
+            _softErrPending = false;
+            final vc = _videoController;
+            // 期间已换台/换实例：本次判定作废
+            if (vc == null || !identical(vc, self)) return;
+            final cur = vc.value;
+            // 在播或进度在走 = 流是活的，这次 error 是噪声。
+            // 如果刚才已经落到错误页，这里顺手恢复——否则会出现
+            // 「界面停在重试卡片、后台声音一直在放」的鬼状态
+            if (cur.isPlaying || cur.position > startPos) {
+              _recoverFromSoftError();
+              return;
+            }
+            // error 已消失（底层自己恢复了）
+            if (!cur.hasError) return;
+            // 电台 AAC 流坏包扎堆：一轮复检不够，再给一轮 4 秒——
+            // 两轮过去仍然既没进度又在报错，才真正走重试
+            if ((_currentChannel?.isRadio ?? false) && !_softErrSecondRound) {
+              _softErrSecondRound = true;
+              _softErrPending = true;
+              final pos2 = cur.position;
+              _softErrTimer?.cancel();
+              _softErrTimer = Timer(
+                  Duration(milliseconds: _isBackgroundNow ? 1500 : 4000), () {
+                _softErrPending = false;
+                final vc2 = _videoController;
+                if (vc2 == null || !identical(vc2, self)) return;
+                final v2 = vc2.value;
+                if (v2.isPlaying || v2.position > pos2) {
+                  _recoverFromSoftError();
+                  return;
+                }
+                if (!v2.hasError) return;
+                if (hasNextSource) {
+                  nextSource();
+                  return;
+                }
+                if (_sniffedFromWeb) {
+                  _sniffPlaybackFailed();
+                  return;
+                }
+                _enterErrorOrRetry();
+              });
+              return;
+            }
+            if (hasNextSource) {
+              nextSource();
+              return;
+            }
+            if (_sniffedFromWeb) {
+              _sniffPlaybackFailed();
+              return;
+            }
+            _enterErrorOrRetry();
+          },
+        );
+        return;
+      }
       // 播放中途出错且有备用源时自动切换
       if (hasNextSource) {
         nextSource();
@@ -2630,9 +2943,7 @@ class PlayerController extends ChangeNotifier {
     // 发送端据此知道视频结束。之后按「投屏播完后」设置处理：
     // 0=立即切回直播；N 秒=等待连播（电视剧下一集），超时才切回；
     // -1=一直等待新投屏或用户手动切台/断开。
-    if (_isCasting &&
-        v.isCompleted &&
-        _state == PlayerState.playing) {
+    if (_isCasting && v.isCompleted && _state == PlayerState.playing) {
       _state = PlayerState.ended;
       notifyListeners();
       _castEndedTimer?.cancel();
@@ -2659,8 +2970,20 @@ class PlayerController extends ChangeNotifier {
 
   String _lastAudioSig = '';
 
+  /// 用户点了通知卡片上的「关闭」：卡片收起来之后**不要再自动弹回来**。
+  /// 以前 stop 只是暂停 + 关卡片，而暂停会走 notifyListeners → 签名变化
+  /// → 又推一次 audioUpdate，表现就是「卡片闪一下又回来了」。
+  bool _audioCardClosed = false;
+
+  /// 卡片上按 ❌ 的时刻：之后 3 秒内到期的换台一律作废（见 playChannel）
+  DateTime? _cardExitAt;
+
   /// 通知权限只申请一次（系统窗只弹一次，之后拒绝就只能去设置里开）
   bool _notifAsked = false;
+
+  /// 卡片 ❌ 的界面层收尾（结束 Activity + 杀进程），由播放页注册。
+  /// 放在界面层是为了不在 controller 里 import dart:io（Web 构建会挂）
+  Future<void> Function()? onCardExit;
 
   Future<void> _ensureNotifPermission() async {
     if (_notifAsked) return;
@@ -2676,6 +2999,8 @@ class PlayerController extends ChangeNotifier {
   void _syncAudioNotification() {
     // 电视/盒子不做后台播放：没有通知栏，息屏也不该挂着前台服务
     if (!_androidNative || _isTv) return;
+    // 用户主动关掉了卡片：等他回 App 重新播放，不要自动弹回来
+    if (_audioCardClosed) return;
     final ch = _currentChannel;
     if (ch == null || !ch.isRadio) {
       if (_lastAudioSig.isNotEmpty) {
@@ -2697,8 +3022,7 @@ class PlayerController extends ChangeNotifier {
     _lastAudioSig = sig;
     // 台标：源里给的优先，其次 Radio Browser 索引（与 ChannelBadge 同源）；
     // 原生下载做卡片大图 + 锁屏封面，失败回落应用图标
-    final logoUrl =
-        ch.logoUrl.isNotEmpty ? ch.logoUrl : RadioLogo.logoFor(ch);
+    final logoUrl = ch.logoUrl.isNotEmpty ? ch.logoUrl : RadioLogo.logoFor(ch);
     unawaited(audioNotify(
       name: name,
       program: program,
@@ -2709,21 +3033,121 @@ class PlayerController extends ChangeNotifier {
 
   /// 通知栏按钮回调：只在本域内换台，播完关卡片
   void _onAudioCommand(String cmd) {
+    // 卡片只属于电台域。万一有残留卡片（刚切到视频台、原生还没收到
+    // stop），上一台/下一台也不能把视频台切走
+    final radio = _currentChannel?.isRadio ?? false;
     switch (cmd) {
       case 'playpause':
         unawaited(togglePlayPause());
       case 'prev':
-        unawaited(playAdjacentChannel(-1));
+        if (radio) unawaited(playAdjacentChannel(-1));
       case 'next':
-        unawaited(playAdjacentChannel(1));
+        if (radio) unawaited(playAdjacentChannel(1));
       case 'stop':
-        if (isPlaying) unawaited(togglePlayPause());
-        _lastAudioSig = '';
-        unawaited(audioStop());
+        // ❌ = 与退出卡片上「退出」完全同一条流程（用户口径）：
+        // 停内核 → 收前台服务 → 结束 Activity → 杀进程。
+        // 以前只做「暂停 + 收卡片」，用户看到的是「后台还活着」，
+        // 自然就认为「叉没退出去」
+        unawaited(_quitFromCard());
       case 'restore':
         // 原生侧负责把界面拉回前台，这里只需要刷新一次状态
         notifyListeners();
     }
+  }
+
+  /// 卡片 ❌：走退出流程（停播 → 关服务 → 由界面层结束 Activity/杀进程）
+  Future<void> _quitFromCard() async {
+    await shutdownForExit();
+    final cb = onCardExit;
+    if (cb == null) {
+      _exitFromCard();
+      return;
+    }
+    try {
+      await cb();
+    } catch (_) {}
+  }
+
+  /// 通知卡片 ❌ 的旧实现（只暂停 + 收卡片），仅作无界面回调时的兜底。
+  /// 必须**无条件**把内核停下来。
+  ///
+  /// 以前这里是 `if (isPlaying) togglePlayPause()`。后台换台失败正在自动
+  /// 重试时 `isPlaying` 是 false，于是什么都没停：卡片收了、声音还在，
+  /// 用户只能杀进程——再从桌面点图标就是一个新内核 + 旧内核同时在响
+  /// （用户实测「退不出去，再开一个出现两个声音」）。
+  void _exitFromCard() {
+    _audioCardClosed = true;
+    _cardExitAt = DateTime.now();
+    // 作废所有在飞的播放流程：❌ 到达时后台换台可能正跑到一半
+    // （openInPlace / 预检 / 建内核），这些流程的每个 await 检查点都会
+    // 因代际变化退出。没有这一刀，迟到的换台会建出新内核开播——
+    // 卡片没了、界面显示暂停、声音却还在响（用户实测）
+    _playGeneration++;
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
+    _softErrPending = false;
+    _softErrSecondRound = false;
+    _autoReloadCount = 0;
+    final vc = _videoController;
+    if (vc != null) unawaited(vc.pause());
+    _state = PlayerState.paused;
+    _lastError = null;
+    _lastAudioSig = '';
+    // 兜底硬停：pause 在 mpv loadfile 中途不保证生效（后台换台正在
+    // openInPlace 时尤其如此），只有把内核整个释放才能保证「后台一定
+    // 没声」。回前台再按播放会重建内核（见 togglePlayPause）
+    unawaited(_hardStopForCardExit());
+    notifyListeners();
+  }
+
+  /// 卡片 ❌ 之后的兜底硬停：先 pause，再释放内核，最后收前台服务。
+  /// 任何一步失败都不阻塞下一步（各自带超时）。
+  Future<void> _hardStopForCardExit() async {
+    try {
+      await _videoController
+          ?.pause()
+          .timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+    try {
+      await _disposeVideoController().timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
+      await audioStop().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+  }
+
+  /// 真正退出应用前调用：把播放停干净 + 收掉前台服务。
+  ///
+  /// 安卓上点「退出」只是 finish Activity，FlutterEngine 与 Dart isolate
+  /// 一起被销毁时 mpv 的原生实例不保证释放——声音继续响，再从桌面点图标
+  /// 就成了两路同时在放。必须在销毁前主动 pause + stop 服务。
+  Future<void> shutdownForExit() async {
+    _audioCardClosed = true;
+    _cardExitAt = DateTime.now();
+    // 作废在飞的换台（同 _exitFromCard），然后**真正释放内核**：
+    // 只 pause 的话 isolate 销毁后 mpv 原生实例的清理没有着落，
+    // 进程残留 + 再次启动就是两路声音甚至起播崩溃
+    _playGeneration++;
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
+    try {
+      await _videoController
+          ?.pause()
+          .timeout(const Duration(milliseconds: 400));
+    } catch (_) {}
+    try {
+      await _disposeVideoController(detachUi: false)
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
+      await audioStop().timeout(const Duration(milliseconds: 400));
+    } catch (_) {}
+    // 给原生侧留一点收尾时间（服务 stopForeground / mpv 线程退出）
+    await Future<void>.delayed(const Duration(milliseconds: 200));
   }
 
   // ---------- 睡眠定时（方案 12.4 / 13.3：睡前听广播的高频场景） ----------
@@ -2748,9 +3172,8 @@ class PlayerController extends ChangeNotifier {
     _sleepTickTimer?.cancel();
     // 先立刻算一次：徽标/卡片不必等第一个整秒才出现
     final first = sleepRemain;
-    sleepCountdown.value = (first == null || first <= Duration.zero)
-        ? null
-        : first;
+    sleepCountdown.value =
+        (first == null || first <= Duration.zero) ? null : first;
     _sleepTickTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       final r = sleepRemain;
       sleepCountdown.value = (r == null || r <= Duration.zero) ? null : r;
@@ -2879,12 +3302,13 @@ class PlayerController extends ChangeNotifier {
 
     switch (_sleepAction) {
       case SleepAction.shutdown:
-        OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
+        OsdBus.show('定时关闭：正在关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 先发系统命令再退程序：进程先死也不影响系统照常关闭，
-        // 15 秒内还能在命令行 `shutdown /a` 撤销
+        // 应用内倒计时已经走完，到这里就直接关机。以前发 /t 15，
+        // Windows 会弹「即将注销你的登录」蓝色通知——用户明确不要
+        // 任何系统提示。先发命令再退程序：进程先死不影响关机。
         if (isDesktop) {
-          await shutdownSystem(delaySeconds: 15);
+          await shutdownSystem();
         }
         if (isDesktop) {
           await ExitGuard.quit();
@@ -2944,6 +3368,13 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     if (_videoController == null || !_videoController!.value.isInitialized) {
+      // 卡片 ❌ 的兜底硬停会把内核整个释放（pause 在 mpv loadfile 中途
+      // 不保证生效）：回前台后按「播放」要在这里重建内核，不能再静默
+      // return（用户按了没反应）
+      final ch = _currentChannel;
+      if (ch != null && ch.streamUrls.isNotEmpty) {
+        await playChannel(ch);
+      }
       return;
     }
     if (_videoController!.value.isPlaying) {
@@ -2952,6 +3383,8 @@ class PlayerController extends ChangeNotifier {
     } else {
       await _videoController!.play();
       _state = PlayerState.playing;
+      // 用户重新开始播：允许卡片重新出现（此前按过 ❌ 收起来过）
+      _audioCardClosed = false;
     }
     notifyListeners();
   }
@@ -3057,35 +3490,60 @@ class PlayerController extends ChangeNotifier {
   }
 
   /// 切换全屏（仅桌面端）
+  /// 全屏切换进行中：窗口样式连续变更期间（mpv 渲染线程/WebView2 子
+  /// 窗口都在响应 WM_SIZE），再次切换极易把渲染端打出访问冲突
+  /// （实测：网页直播里遥控器 OK 全屏，0xc0000005 直接退进程）
+  bool _fsToggling = false;
+
   Future<void> toggleFullscreen() async {
     if (!isDesktop) return;
-    // 小窗状态下按 F/F11 或双击画面：全屏没有意义（窗口只有 420×236），
-    // 先恢复原窗口，避免 miniWindow 与全屏状态并存
-    // （否则全屏后左上角仍挂着「恢复窗口」按钮、双击又变成缩窗）
-    if (_miniWindow) {
-      await toggleMiniWindow();
-      return;
+    if (_fsToggling) return; // 切换未落地前的连按全部忽略
+    _fsToggling = true;
+    try {
+      // 先让按键回调这轮事件循环走完：在输入分发的调用栈里直接改窗口
+      // 样式，等于一边处理消息一边销毁/重建窗口结构，是崩溃的高发姿势
+      await Future<void>.delayed(Duration.zero);
+      // 小窗状态下按 F/F11 或双击画面：全屏没有意义（窗口只有 420×236），
+      // 先恢复原窗口，避免 miniWindow 与全屏状态并存
+      // （否则全屏后左上角仍挂着「恢复窗口」按钮、双击又变成缩窗）
+      if (_miniWindow) {
+        await toggleMiniWindow();
+        return;
+      }
+      _isFullscreen = !_isFullscreen;
+      await windowManager.setFullScreen(_isFullscreen);
+      // 三个原生窗口操作之间各隔一帧，让 WM_SIZE/WM_STYLECHANGED 消息
+      // 排队处理完再动下一个，不再一次性全砸进同一轮消息循环
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await _applyAlwaysOnTop();
+      if (!_isFullscreen) {
+        // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      }
+      notifyListeners();
+    } finally {
+      _fsToggling = false;
     }
-    _isFullscreen = !_isFullscreen;
-    await windowManager.setFullScreen(_isFullscreen);
-    await _applyAlwaysOnTop();
-    if (!_isFullscreen) {
-      // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
-      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-    }
-    notifyListeners();
   }
 
   /// 若当前处于全屏则退出全屏（用于返回键/ESC）
   Future<bool> exitFullscreenIfNeeded() async {
-    if (!_isFullscreen) return false;
-    _isFullscreen = false;
-    await windowManager.setFullScreen(false);
-    await _applyAlwaysOnTop();
-    // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
-    await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-    notifyListeners();
-    return true;
+    if (!_isFullscreen || _fsToggling) return false;
+    _fsToggling = true;
+    try {
+      _isFullscreen = false;
+      await windowManager.setFullScreen(false);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await _applyAlwaysOnTop();
+      // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      notifyListeners();
+      return true;
+    } finally {
+      _fsToggling = false;
+    }
   }
 
   // ==================== 锁定 / 小窗 / 重载 ====================
@@ -3119,8 +3577,19 @@ class PlayerController extends ChangeNotifier {
   bool _wasFullscreenBeforeMini = false;
   bool _wasMaximizedBeforeMini = false;
 
+  /// 切换小窗的重入保护：setSize 是异步的，连点「小窗播放/恢复窗口」
+  /// 会在上一次还没完成时再次进入，第二次 getSize() 抓到的是小窗尺寸——
+  /// 之后每次恢复都回小窗大小（用户实测「退出小窗后记住了小窗尺寸」）
+  bool _miniToggling = false;
+  static const _miniSize = Size(420, 236);
+
+  bool _isMiniLikeSize(Size s) =>
+      (s.width - _miniSize.width).abs() < 16 &&
+      (s.height - _miniSize.height).abs() < 16;
+
   Future<void> toggleMiniWindow() async {
-    if (!isDesktop) return;
+    if (!isDesktop || _miniToggling) return;
+    _miniToggling = true;
     _miniWindow = !_miniWindow;
     try {
       if (_miniWindow) {
@@ -3137,9 +3606,17 @@ class PlayerController extends ChangeNotifier {
         if (_wasMaximizedBeforeMini) {
           await windowManager.unmaximize();
         }
-        _sizeBeforeMini = await windowManager.getSize();
+        final cur = await windowManager.getSize();
+        // 极端情况下窗口已经是小窗尺寸（上一次切换被打断）：
+        // 此时不能再把它记成「原尺寸」，否则恢复永远回到小窗
+        if (!_isMiniLikeSize(cur)) {
+          _sizeBeforeMini = cur;
+        }
         await windowManager.setAlwaysOnTop(true);
-        await windowManager.setSize(const Size(420, 236));
+        // 固定尺寸：小窗 420×236 不可拖边缩放（防面板变形/文字堆叠）
+        await windowManager.setResizable(true);
+        await windowManager.setSize(_miniSize);
+        await windowManager.setResizable(false);
       } else {
         if (_wasFullscreenBeforeMini) {
           // 原来就是全屏：直接回全屏（无需再 setSize）
@@ -3149,15 +3626,20 @@ class PlayerController extends ChangeNotifier {
           await windowManager.setAlwaysOnTop(false);
           await windowManager.setFullScreen(true);
         } else {
-          await windowManager.setSize(_sizeBeforeMini);
-          if (_wasMaximizedBeforeMini) {
-            _wasMaximizedBeforeMini = false;
-            await windowManager.maximize();
+          // _sizeBeforeMini 若已被污染成小窗尺寸，退回默认窗口大小
+          if (_isMiniLikeSize(_sizeBeforeMini)) {
+            _sizeBeforeMini = const Size(1280, 720);
           }
+          await windowManager.setResizable(true);
+          await windowManager.setSize(_sizeBeforeMini);
+          // 窗口固定尺寸（不再支持最大化），原最大化状态直接还原成普通窗口
+          _wasMaximizedBeforeMini = false;
+          await windowManager.setResizable(false);
           await _applyAlwaysOnTop();
         }
       }
     } catch (_) {}
+    _miniToggling = false;
     notifyListeners();
   }
 
@@ -3170,6 +3652,26 @@ class PlayerController extends ChangeNotifier {
   int get autoReloadCount => _autoReloadCount;
 
   void markAutoReload() => _autoReloadCount++;
+
+  // ==================== 音频直播「假死」判定 ====================
+  //
+  // 电台是纯音频 HLS/ICY 流，mpv 偶尔会甩一个 hasError（解复用 EOF、
+  // 播放列表 reload 瞬间的错误），声音其实一直没断。旧逻辑一见 hasError
+  // 就进 error → 3 秒后重建播放器：用户看到的是「显示重试、后台还在响、
+  // 再等一会儿声音断掉」。
+  //
+  // 现在的判定：出错时如果播放位置还在推进，就当软错误忽略，6 秒后复检；
+  // 复检仍不推进才真正走重试（真断流位置会停在原地，兜底不会丢）。
+  bool _softErrPending = false;
+  Timer? _softErrTimer;
+
+  /// 电台第二轮复检标志：AAC 坏包偶尔扎堆出现，一轮宽限里
+  /// 「既没进度又在报错」不代表流真断了，再给一轮 4 秒复检
+  bool _softErrSecondRound = false;
+
+  /// 当前播放实例的创建时刻：判断「起播阶段」用（起播阶段的偶发解码
+  /// 报错要更宽容，见 _onVideoListener 的错误判定）
+  DateTime? _instanceBornAt;
 
   /// 重载当前频道：网页频道整页重新载入（站点脚本随后按频道名重新点台），
   /// 直播流频道从第一个源重新播放。底部面板「重载」按钮与网页卡死
@@ -3196,10 +3698,43 @@ class PlayerController extends ChangeNotifier {
   /// 重载当前频道（从第一个源重新拉流，与手动点「重载」一致）；
   /// 次数用尽仍失败则判定链接失效，停留错误页等用户手动处理。
   /// 与网页频道卡死自动重载共用同一开关与次数（autoReloadStall/retryTimes）
+  /// 误判纠正：底层其实在播（或有进度），把界面从错误态拉回来。
+  ///
+  /// 触发场景（用户实测）：电台切台/切引擎瞬间，底层抛一次解码 error，
+  /// 界面进了「重试」甚至错误页，但声音从头到尾没断。既然流是活的，
+  /// 就别让用户看着重试卡片听广播。
+  void _recoverFromSoftError() {
+    _softErrPending = false;
+    _softErrSecondRound = false;
+    _softErrTimer?.cancel();
+    _softErrTimer = null;
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+    _autoReloadCount = 0;
+    if (_state == PlayerState.error) {
+      _state = PlayerState.playing;
+      _lastError = null;
+      OsdBus.show('已恢复播放', icon: Icons.play_circle_fill);
+      notifyListeners();
+    }
+  }
+
   void _enterErrorOrRetry() {
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     final total = _settings.retryTimes;
+    // 后台（通知卡片在操作）不重试。
+    //
+    // 后台没有界面可看，重试只会让卡片在「播放/暂停」之间反复闪、声音
+    // 断断续续，三五个来回之后用户只会觉得「它一直在重试、退不出去」
+    // （实测）。停到暂停态，卡片上的按钮会变成「播放」——用户想再试
+    // 自己点一下即可，比自动转圈可控。
+    if (_isBackgroundNow && !_isCasting) {
+      _state = PlayerState.paused;
+      _lastError = null;
+      notifyListeners();
+      return;
+    }
     if (_settings.autoReloadStall &&
         total > 0 &&
         _autoReloadCount < total &&
@@ -3207,16 +3742,17 @@ class PlayerController extends ChangeNotifier {
         !_isCasting) {
       _autoReloadCount++;
       final n = _autoReloadCount;
-      _state = PlayerState.error;
-      _lastError = '3 秒后自动重试（第 $n/$total 次）…';
+      // 自动重试期间不再整屏进错误页：启动恢复/网络抖动时错误卡片会闪现
+      // 一下又自己恢复（用户实测重进 App 闪「重试」后正常）。保持当前
+      // 状态 + OSD 轻提示即可，次数用尽才进错误页等用户手动处理。
+      _lastError = null;
+      OsdBus.show('连接失败，正在自动重试（第 $n/$total 次）…', icon: Icons.refresh);
       notifyListeners();
       final ch = _currentChannel;
       _autoRetryTimer = Timer(const Duration(seconds: 3), () {
         _autoRetryTimer = null;
         // 期间用户已切台/手动重试/开始投屏：放弃本次自动重试
-        if (!identical(_currentChannel, ch) ||
-            _state != PlayerState.error ||
-            _isCasting) {
+        if (!identical(_currentChannel, ch) || _isCasting) {
           return;
         }
         _sourceIndex = 0;
@@ -3236,6 +3772,7 @@ class PlayerController extends ChangeNotifier {
   static const _kAutoPlayNext = 'settings_auto_play_next';
   static const _kSensitivity = 'settings_sensitivity';
   static const _kAutoHide = 'settings_auto_hide';
+  static const _kTuneDwell = 'settings_tune_dwell_ms';
   static const _kLaunchAtStartup = 'settings_launch_at_startup';
   static const _kStartFullscreen = 'settings_start_fullscreen';
   static const _kShowClock = 'settings_show_clock';
@@ -3255,6 +3792,12 @@ class PlayerController extends ChangeNotifier {
   static const _kSleepAction = 'settings_sleep_action';
   static const _kSleepAt = 'settings_sleep_at_ms';
   static const _kResumeLastChannel = 'settings_resume_last_channel';
+  // 托盘三兄弟以前只同步给运行时、**从来没有落盘**：重启后
+  // closeToTray 又变回 false，✕ 直接退——用户报的「开了托盘开关
+  // 点 ✕ 还是退出」就是这么来的
+  static const _kCloseToTray = 'settings_close_to_tray';
+  static const _kTrayMute = 'settings_tray_mute';
+  static const _kFishHotkey = 'settings_fish_hotkey';
   static const _kAudioPreset = 'settings_audio_preset';
   static const _kAudioEqGains = 'settings_audio_eq_gains';
   static const _kSpectrumTexture = 'settings_spectrum_texture';
@@ -3280,6 +3823,7 @@ class PlayerController extends ChangeNotifier {
         autoPlayNext: p.getBool(_kAutoPlayNext) ?? true,
         gestureSensitivity: p.getDouble(_kSensitivity) ?? 1.0,
         autoHideDelay: p.getInt(_kAutoHide) ?? 3000,
+        tuneDwellMs: p.getInt(_kTuneDwell) ?? 2500,
         launchAtStartup: p.getBool(_kLaunchAtStartup) ?? false,
         startFullscreen: p.getBool(_kStartFullscreen) ?? false,
         showClock: p.getBool(_kShowClock) ?? false,
@@ -3300,6 +3844,9 @@ class PlayerController extends ChangeNotifier {
         sleepActionKey: p.getString(_kSleepAction) ?? 'pause',
         sleepAtMs: p.getInt(_kSleepAt) ?? 0,
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
+        closeToTray: p.getBool(_kCloseToTray) ?? false,
+        trayMute: p.getBool(_kTrayMute) ?? true,
+        fishHotkey: p.getBool(_kFishHotkey) ?? true,
         audioPreset: p.getString(_kAudioPreset) ?? '',
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
         spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
@@ -3314,9 +3861,10 @@ class PlayerController extends ChangeNotifier {
       // ✕ 最小化到托盘：读回设置并同步给关闭拦截（Windows）
       if (isDesktop && kIsWindowsDesktop) {
         TrayService.closeToTray = _settings.closeToTray;
-        if (_settings.closeToTray) {
-          unawaited(windowManager.setPreventClose(true));
-        }
+        // 关闭拦截常开，由 Dart 侧裁决 hide 还是退出（见 main.dart 的
+        // _OmiWindowListener）。原来只在开关为 true 时才 setPreventClose，
+        // 一旦开关同步晚一拍/失败，✕ 就直接销毁窗口。
+        unawaited(windowManager.setPreventClose(true));
       }
       // 定时关闭跨启动续上（过期则直接清掉）
       _restoreSleepTimer();
@@ -3391,14 +3939,14 @@ class PlayerController extends ChangeNotifier {
       }
 
       await putString(_kAudioPreset, _settings.audioPreset);
-      await putString(
-          _kAudioEqGains, jsonEncode(_settings.audioEqGains));
+      await putString(_kAudioEqGains, jsonEncode(_settings.audioEqGains));
       await putBool(_kSpectrumTexture, _settings.spectrumTexture);
       await putBool(_kRadioMeter, _settings.radioMeter);
       await putString(_kPlayEngine, _settings.playEngine);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
+      await putInt(_kTuneDwell, _settings.tuneDwellMs);
       await putBool(_kLaunchAtStartup, _settings.launchAtStartup);
       await putBool(_kStartFullscreen, _settings.startFullscreen);
       await putBool(_kShowClock, _settings.showClock);
@@ -3418,6 +3966,9 @@ class PlayerController extends ChangeNotifier {
       await putString(_kSleepAction, _settings.sleepActionKey);
       await putInt(_kSleepAt, _settings.sleepAtMs);
       await putBool(_kResumeLastChannel, _settings.resumeLastChannel);
+      await putBool(_kCloseToTray, _settings.closeToTray);
+      await putBool(_kTrayMute, _settings.trayMute);
+      await putBool(_kFishHotkey, _settings.fishHotkey);
     } catch (_) {}
   }
 
@@ -3449,8 +4000,7 @@ class PlayerController extends ChangeNotifier {
   void updateSettings(PlayerSettings settings) {
     final launchChanged = settings.launchAtStartup != _settings.launchAtStartup;
     final topChanged = settings.alwaysOnTop != _settings.alwaysOnTop;
-    final closeToTrayChanged =
-        settings.closeToTray != _settings.closeToTray;
+    final closeToTrayChanged = settings.closeToTray != _settings.closeToTray;
     final dlnaChanged = settings.dlnaEnabled != _settings.dlnaEnabled;
     final qualityChanged =
         settings.preferredQuality != _settings.preferredQuality;
@@ -3467,9 +4017,11 @@ class PlayerController extends ChangeNotifier {
       _applyAlwaysOnTop();
     }
     if (closeToTrayChanged && kIsWindowsDesktop) {
-      // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播
+      // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播。
+      // 拦截本身不随开关关掉：开关只决定「✕ 之后 hide 还是 quit」，
+      // 关掉拦截等于把裁决权交回 runner，任何同步延迟都会变成直接退出。
       TrayService.closeToTray = settings.closeToTray;
-      unawaited(windowManager.setPreventClose(settings.closeToTray));
+      unawaited(windowManager.setPreventClose(true));
     }
     if (dlnaChanged) {
       if (settings.dlnaEnabled) {
@@ -3529,8 +4081,18 @@ class PlayerController extends ChangeNotifier {
   // ==================== 后台播放 / 摸鱼模式（桌面端） ====================
 
   /// 摸鱼模式：窗口隐藏 + 静音，托盘图标是唯一入口（方案：后台播放场景矩阵）
-  bool get fishMode => TrayService.instance.fishMode;
+  ///
+  /// 真值放在 controller 侧：托盘服务的 _fishMode 只是菜单文案的镜像，
+  /// 两条状态各记各的必然错位（曾出现「菜单写退出，点下去还在摸鱼」）。
+  bool get fishMode => _fishActive;
+  bool _fishActive = false;
   bool? _mutedBeforeFish;
+
+  /// 进托盘前的静音状态（后台播放用，与摸鱼分开记：摸鱼恢复时按它还原）
+  bool? _mutedBeforeTray;
+
+  /// 当前会话是否开着「缩到托盘静音」并且确实是我们静的音
+  bool get _trayMutedByUs => _mutedBeforeTray != null;
 
   /// 注入托盘回调：托盘菜单/左键如何驱动窗口与播放状态（启动时调用一次）
   Future<void> bindTrayHandlers() async {
@@ -3540,6 +4102,13 @@ class PlayerController extends ChangeNotifier {
         await windowManager.show();
         await windowManager.focus();
       } catch (_) {}
+      // 从托盘恢复：把我们为「缩托盘静音」压下去的静音还原。
+      // 只还原自己改过的状态，用户本来手动静音的不会被打开。
+      if (_trayMutedByUs) {
+        final wasMuted = _mutedBeforeTray == true;
+        _mutedBeforeTray = null;
+        if (!wasMuted && _isMuted) await setMuted(false);
+      }
     };
     TrayService.onEnterFish = () => enterFishMode();
     TrayService.onExitFish = () => exitFishMode();
@@ -3560,16 +4129,25 @@ class PlayerController extends ChangeNotifier {
   Future<void> enterBackgroundAudio() async {
     if (!kIsWindowsDesktop) return;
     await TrayService.ensure();
+    // 「缩到托盘时静音」开关：默认开（后台播放就是只听声的场景，
+    // 但办公室/家里有人时恰恰要没声）。先记原状态，恢复时还原。
+    if (_settings.trayMute && _mutedBeforeTray == null) {
+      _mutedBeforeTray = _isMuted;
+      if (!_isMuted) await setMuted(true);
+    }
     try {
       await windowManager.hide();
     } catch (_) {}
   }
 
   /// 摸鱼模式：静音 + 隐藏窗口（音量状态先记住）
+  ///
+  /// 摸鱼**永远静音**，不受「缩托盘静音」开关影响：老板键的意义就是
+  /// 一键没声，留个开关等于留个坑。
   Future<void> enterFishMode() async {
-    if (!kIsWindowsDesktop || fishMode) return;
+    if (!kIsWindowsDesktop || _fishActive) return;
     await TrayService.ensure();
-    await TrayService.updateMenu(fishMode: true);
+    _fishActive = true;
     _mutedBeforeFish = _isMuted;
     if (!_isMuted) await setMuted(true);
     try {
@@ -3580,8 +4158,8 @@ class PlayerController extends ChangeNotifier {
 
   /// 退出摸鱼：显示窗口 + 还原音量状态
   Future<void> exitFishMode() async {
-    if (!kIsWindowsDesktop || !fishMode) return;
-    await TrayService.updateMenu(fishMode: false);
+    if (!kIsWindowsDesktop || !_fishActive) return;
+    _fishActive = false;
     if (_mutedBeforeFish == false) await setMuted(false);
     _mutedBeforeFish = null;
     try {
@@ -3589,6 +4167,15 @@ class PlayerController extends ChangeNotifier {
       await windowManager.focus();
     } catch (_) {}
     notifyListeners();
+  }
+
+  /// F9 老板键 / 托盘菜单 / 托盘左键的共同入口：进或出摸鱼。
+  /// 状态下沉到 TrayService.toggleFish 一处翻转，菜单文案与真实状态
+  /// 不会再各走各的。
+  Future<void> toggleFishMode() async {
+    if (!kIsWindowsDesktop) return;
+    await TrayService.ensure();
+    await TrayService.instance.toggleFish();
   }
 
   // ==================== 声音实验室（方案 12.3 第二档） ====================
@@ -3660,10 +4247,28 @@ class PlayerController extends ChangeNotifier {
 
   /// 均衡器 10 段中心频率（Hz）
   static const List<int> kEqBands = [
-    31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000,
+    31,
+    62,
+    125,
+    250,
+    500,
+    1000,
+    2000,
+    4000,
+    8000,
+    16000,
   ];
   static const List<String> kEqBandLabels = [
-    '31', '62', '125', '250', '500', '1k', '2k', '4k', '8k', '16k',
+    '31',
+    '62',
+    '125',
+    '250',
+    '500',
+    '1k',
+    '2k',
+    '4k',
+    '8k',
+    '16k',
   ];
 
   List<double> get audioEqGains {
@@ -3717,9 +4322,8 @@ class PlayerController extends ChangeNotifier {
       return List<double>.filled(kEqBands.length, 0);
     }
     try {
-      final list = (jsonDecode(raw) as List)
-          .map((e) => (e as num).toDouble())
-          .toList();
+      final list =
+          (jsonDecode(raw) as List).map((e) => (e as num).toDouble()).toList();
       if (list.length != kEqBands.length) {
         return List<double>.filled(kEqBands.length, 0);
       }
@@ -3779,8 +4383,9 @@ class PlayerController extends ChangeNotifier {
   }
 
   /// 当前频道台标（M3U tvg-logo 或 EPG icon），无则空串
-  String get currentLogo =>
-      _currentChannel == null ? '' : sourceManager.getLogoForChannel(_currentChannel!);
+  String get currentLogo => _currentChannel == null
+      ? ''
+      : sourceManager.getLogoForChannel(_currentChannel!);
 
   /// 视频分辨率文字，如 "1280 × 720"
   String get resolutionText {
@@ -3835,15 +4440,15 @@ class PlayerController extends ChangeNotifier {
     // 周期性下发 Seek 做进度同步，对 HTTP-FLV/HLS 直播执行 seek 会把
     // 播放内核挂起（画面永久卡死），直接忽略
     final rawDur = _videoController?.value.duration ?? Duration.zero;
-    if (_isCasting &&
-        (rawDur <= Duration.zero || _isLiveDuration(rawDur))) {
+    if (_isCasting && (rawDur <= Duration.zero || _isLiveDuration(rawDur))) {
       CastLog.write(
           'seekTo(${position.inSeconds}s) IGNORED rawDur=${rawDur.inSeconds}s (live/unknown)');
       return;
     }
     CastLog.write('seekTo(${position.inSeconds}s) dur=${rawDur.inSeconds}s');
     await _videoController?.seekTo(position);
-    CastLog.write('seekTo(${position.inSeconds}s) done pos=${_videoController?.value.position.inSeconds}s');
+    CastLog.write(
+        'seekTo(${position.inSeconds}s) done pos=${_videoController?.value.position.inSeconds}s');
     // seek 后位置会立即变化，重置看门狗观察计时，避免误判为卡顿
     _watchPosMs = -1;
     _watchAdvanceAt = null;
@@ -3887,8 +4492,8 @@ class PlayerController extends ChangeNotifier {
     final vh = v.size.height.toInt();
     // 电台流没有视频轨，尺寸恒为 0：不能走「有声无画」恢复，
     // 否则会每 8 秒重建一次连接、电台永远起不来
-    final noVideo = !(_currentChannel?.isRadio ?? false) &&
-        (vw <= 0 || vh <= 0);
+    final noVideo =
+        !(_currentChannel?.isRadio ?? false) && (vw <= 0 || vh <= 0);
 
     // buffering 持续计时。两条豁免规则：
     // 1. 已缓冲末尾仍在增长 = 下载在推进只是慢（长视频远距 seek 后 CDN
@@ -4020,7 +4625,8 @@ class PlayerController extends ChangeNotifier {
       CastLog.write('cast RECOVERY aborted: superseded by new play');
       return;
     }
-    bool stale() => !_isCasting ||
+    bool stale() =>
+        !_isCasting ||
         _currentChannel != ch ||
         !identical(_videoController, mine);
     if (!isLive && savedPos > const Duration(seconds: 2)) {
@@ -4046,8 +4652,7 @@ class PlayerController extends ChangeNotifier {
       }
       if (ready) {
         if (stale()) return; // seek 前最后确认，等待期间被新播放取代则放弃
-        CastLog.write(
-            'cast RECOVERY resume seek ${savedPos.inSeconds}s');
+        CastLog.write('cast RECOVERY resume seek ${savedPos.inSeconds}s');
         try {
           await mine.seekTo(savedPos);
           CastLog.write(
@@ -4156,8 +4761,7 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
     switch (err) {
       case null:
-        OsdBus.show('开始录音（原始流直存，不转码）',
-            icon: Icons.fiber_manual_record);
+        OsdBus.show('开始录音（原始流直存，不转码）', icon: Icons.fiber_manual_record);
       case 'busy':
         break;
       case 'hls':
@@ -4229,8 +4833,7 @@ class PlayerController extends ChangeNotifier {
     // 2) tvg-name 精确匹配
     for (final cat in _categories) {
       for (final ch in cat.channels) {
-        if (ch.tvgName.isNotEmpty &&
-            ch.tvgName.toLowerCase() == lowerId) {
+        if (ch.tvgName.isNotEmpty && ch.tvgName.toLowerCase() == lowerId) {
           return ch;
         }
       }
@@ -4269,13 +4872,16 @@ class PlayerController extends ChangeNotifier {
   Future<bool> startRecording() async {
     if (_webPageActive) return _startWebRecording();
     final vc = _videoController;
-    if (_currentChannel == null || vc == null || !vc.value.isInitialized ||
-        !isDesktop || _isRecording) {
+    if (_currentChannel == null ||
+        vc == null ||
+        !vc.value.isInitialized ||
+        !isDesktop ||
+        _isRecording) {
       return false;
     }
     try {
-      _recordPath =
-          await captureService.buildFilePath('recordings', _currentChannel!.name, 'mp4');
+      _recordPath = await captureService.buildFilePath(
+          'recordings', _currentChannel!.name, 'mp4');
       // libmpv 的 stream-record 直接落盘原始流（TS/MP4 容器由流本身决定）
       final ok = await vc.startRecord(_recordPath!);
       if (!ok) {
@@ -4432,9 +5038,7 @@ class PlayerController extends ChangeNotifier {
       final r = await eval(_webRecStartJs);
       final rs = r?.toString() ?? '';
       if (!rs.startsWith('ok')) {
-        _lastError = rs == 'novideo'
-            ? '网页中未找到可录制的视频'
-            : '网页不支持视频录制';
+        _lastError = rs == 'novideo' ? '网页中未找到可录制的视频' : '网页不支持视频录制';
         return false;
       }
       // JS 返回实际容器格式（mp4 优先，回退 webm）
@@ -4459,8 +5063,7 @@ class PlayerController extends ChangeNotifier {
     try {
       await eval?.call(_webRecStopJs);
       if (done != null) {
-        await done.future.timeout(const Duration(seconds: 5),
-            onTimeout: () {});
+        await done.future.timeout(const Duration(seconds: 5), onTimeout: () {});
       }
     } catch (_) {}
     final path = _webRecBytes > 0 ? _recordPath : null;
@@ -4517,7 +5120,8 @@ class PlayerController extends ChangeNotifier {
       final png = await vc.snapshotPng();
       if (png == null || png.isEmpty) return null;
       final name = _currentChannel?.name ?? 'screenshot';
-      final path = await captureService.buildFilePath('screenshots', name, 'png');
+      final path =
+          await captureService.buildFilePath('screenshots', name, 'png');
       await captureService.saveBytes(path, png);
       return path;
     } catch (e) {
@@ -4565,8 +5169,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> ensureRadioCatalog() async {
     if (_radioCatalogLoaded) return;
     try {
-      _radioCategories =
-          await RadioCatalog.all(tvChannels: _tvSourceChannels);
+      _radioCategories = await RadioCatalog.all(tvChannels: _tvSourceChannels);
       _radioCatalogLoaded = true;
     } catch (e) {
       debugPrint('[RadioCatalog] load failed: $e');
@@ -4577,10 +5180,16 @@ class PlayerController extends ChangeNotifier {
 
   /// 「我的电台」增删后只重建自己那一段，不重读安装包
   void _refreshRadioCatalog() {
-    final rebuilt =
-        RadioCatalog.rebuildIfLoaded(tvChannels: _tvSourceChannels);
+    final rebuilt = RadioCatalog.rebuildIfLoaded(tvChannels: _tvSourceChannels);
     if (rebuilt == null) return;
     _radioCategories = rebuilt;
+  }
+
+  /// 整表重读电台目录（内置清单更新 / 设置页「刷新」）：
+  /// 与电视当前源完全无关，不碰 _categories
+  Future<void> reloadRadioCatalog() async {
+    _radioCatalogLoaded = false;
+    await ensureRadioCatalog();
   }
 
   bool isStationSaved(String stationId) => RadioLibrary.contains(stationId);
@@ -4599,42 +5208,27 @@ class PlayerController extends ChangeNotifier {
     await _afterRadioLibraryChanged();
   }
 
-  /// 库变化后：补源条目、必要时重载频道列表
+  /// 库变化后：补源条目、必要时重载电台目录
+  ///
+  /// 只动电台域：电台目录与电视当前源互不相干，这里绝不 refreshChannels
   Future<void> _afterRadioLibraryChanged() async {
     // 最后一个台被删：把「我的电台」源一并收回，源列表里不留空条目
     if (RadioLibrary.isEmpty) {
-      final wasCurrent =
-          sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId;
       await sourceManager.removePlaylist(PlaylistSource.radioLibraryId);
-      if (wasCurrent) {
-        // 当前源没了就落回内置精选；正在响的这台不被掐断
-        if (!sourceManager.builtinRadioRemoved) {
-          await sourceManager.selectPlaylist(PlaylistSource.builtinRadioId);
-        }
-        await refreshChannels();
-      } else {
-        _refreshRadioCatalog();
-        notifyListeners();
-      }
+      _refreshRadioCatalog();
+      notifyListeners();
       return;
     }
     await sourceManager.ensureRadioLibrarySource();
     _refreshRadioCatalog();
-    if (sourceManager.currentPlaylistId == PlaylistSource.radioLibraryId) {
-      await refreshChannels();
-    } else {
-      notifyListeners();
-    }
+    notifyListeners();
   }
 
-  /// 恢复被删除的内置电台源
+  /// 恢复被删除的内置电台源（只重建电台目录，不碰电视当前源）
   Future<void> restoreBuiltinRadio() async {
     await sourceManager.restoreBuiltinRadio();
-    if (sourceManager.currentPlaylistId == null) {
-      await selectPlaylist(PlaylistSource.builtinRadioId);
-    } else {
-      notifyListeners();
-    }
+    RadioCatalog.invalidate();
+    await reloadRadioCatalog();
   }
 
   bool get builtinRadioRemoved => sourceManager.builtinRadioRemoved;
@@ -4649,8 +5243,7 @@ class PlayerController extends ChangeNotifier {
 
   /// 编辑播放列表（名称/地址/类型）；当前源地址变化时重新加载频道
   Future<void> editPlaylist(PlaylistSource source) async {
-    final idx =
-        sourceManager.playlists.indexWhere((p) => p.id == source.id);
+    final idx = sourceManager.playlists.indexWhere((p) => p.id == source.id);
     final urlChanged =
         idx >= 0 && sourceManager.playlists[idx].url != source.url;
     await sourceManager.updatePlaylist(source);
@@ -4662,6 +5255,13 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> selectPlaylist(String? id) async {
+    // 电台源不是「电视当前源」的一种：电台页签里点它只刷电台目录，
+    // 不许动电视清单（以前这里会 refreshChannels，电视那栏直接清空）
+    if (PlaylistSource.isRadioSourceId(id)) {
+      await reloadRadioCatalog();
+      notifyListeners();
+      return;
+    }
     await sourceManager.selectPlaylist(id);
     if (id != null) {
       await refreshChannels();
@@ -4689,8 +5289,7 @@ class PlayerController extends ChangeNotifier {
   /// 编辑 EPG（名称/地址）；当前源地址变化时重新加载节目单
   Future<void> editEpg(EpgSource source) async {
     final idx = sourceManager.epgs.indexWhere((e) => e.id == source.id);
-    final urlChanged =
-        idx >= 0 && sourceManager.epgs[idx].url != source.url;
+    final urlChanged = idx >= 0 && sourceManager.epgs[idx].url != source.url;
     await sourceManager.updateEpg(source);
     if (urlChanged && sourceManager.currentEpgId == source.id) {
       await refreshEpg();
@@ -4739,7 +5338,11 @@ class PlayerController extends ChangeNotifier {
   // CI 构建时由 .github/workflows/build.yml 向 windows/runner/main.cpp
   // 注入「启动保存状态 + 15 秒定时器恢复」代码，见 Patch Windows runner 步骤。
 
-  Future<void> _disposeVideoController() async {
+  /// [detachUi] 为 true 时先通知界面摘掉视频层、等合成器交完最后一帧，
+  /// 再释放原生资源（切台/切网页必需，见下方注释）。
+  /// 退出路径（dispose / shutdownForExit）传 false：界面马上要消失，
+  /// 不必再等帧，省掉这 200ms 让 mpv 尽快释放。
+  Future<void> _disposeVideoController({bool detachUi = true}) async {
     // 先尝试释放上一轮 dispose 挂起的孤儿实例
     _retryOrphanDispose();
     final c = _videoController;
@@ -4751,6 +5354,24 @@ class PlayerController extends ChangeNotifier {
         try {
           c.removeListener(closure);
         } catch (_) {}
+      }
+      // ---- 顺序是关键（0xc0000005 闪退的根因）---------------------------
+      // 以前这里直接 release，界面到 600ms 后（_webPageActive=true）才
+      // 重建、把视频层换掉。这 600ms 里 VideoPlayerWidget 手里还攥着
+      // 旧控制器，每帧继续贴**已释放的纹理**——Windows/MPV 上就是
+      // 「Exception Processing Message 0xc0000005」系统错误框，点确定
+      // 进程直接死（用户 2.1.47 实测：普通直播切网页直播）。
+      // 正确顺序：置空 → 通知界面摘掉视频层 → 等合成器交完最后一帧
+      // → 再释放原生渲染资源（mpv 的 D3D 设备）。
+      if (detachUi) {
+        notifyListeners();
+        // 等两帧左右：endOfFrame 在没有帧调度时（最小化/锁屏）可能不返回，
+        // 加超时兜底，绝不能把切台流程卡死
+        try {
+          await WidgetsBinding.instance.endOfFrame
+              .timeout(const Duration(milliseconds: 120));
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(milliseconds: 90));
       }
       // 先摘监听再释放：media_kit 的 release 串行 cancel 订阅并 dispose
       // player，自身幂等；超时仅意味着底层仍在释放，绝不重复调用
@@ -4774,13 +5395,84 @@ class PlayerController extends ChangeNotifier {
     final list = List<OmiVideoBackend>.from(_orphanControllers);
     _orphanControllers.clear();
     for (final c in list) {
-      c.release().timeout(const Duration(seconds: 8)).then((_) {},
-          onError: (_) {});
+      c
+          .release()
+          .timeout(const Duration(seconds: 8))
+          .then((_) {}, onError: (_) {});
     }
   }
 
-  @override
+  // ==================== 换台预读（↑/↓ 停留期间提前握手） ====================
+  // 用户语义：按 ↑/↓ 只是「把下一个台的地址读进来」，画面仍是当前台；
+  // 停顿超过换台停留时间才真正切流。
+  //
+  // 【重要】这里**只做 DNS + TCP 连接**，绝不向流地址发 HTTP 请求：
+  // 上一版用 GET 预读，很多直播服务器是单会话/带 token 的，同一地址
+  // 被第二次请求会踢掉当前这条连接 —— 用户实测「一按上下键当前台就
+  // 断流卡住」，看着像立刻换台。只连端口不请求 URL，既能预热 DNS/TCP，
+  // 又完全不影响正在播的流。同一地址只预读一次，长按连刷不重复建连。
+
+  String? _preconnectUrl;
+
+  Future<void> preconnectChannel(Channel channel) async {
+    if (channel.isWebPage || channel.streamUrls.isEmpty) return;
+    final url = channel.streamUrls.first;
+    if (url == _preconnectUrl) return;
+    _preconnectUrl = url;
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) return;
+    final secure = uri.scheme == 'https' || uri.scheme == 'wss';
+    final port = uri.hasPort
+        ? uri.port
+        : (secure ? 443 : (uri.scheme == 'rtsp' ? 554 : 80));
+    unawaited(warmHost(uri.host, port));
+  }
+
+  /// App 是否在后台（安卓电台后台切台时关视频输出的判定，
+  /// 见 _playCurrentSource 内的 setVideoOutputDisabled）
+  bool _appBackgrounded = false;
+
+  /// 现在是否处于后台。
+  ///
+  /// 不只看 AppLifecycleListener 标记：某些系统/通知栏交互下 onHide
+  /// 不一定及时到，直接问 WidgetsBinding 的当前生命周期兜底，
+  /// 免得该关视频轨的时候没关（电台后台起播就会卡住等 Surface）
+  bool get _isBackgroundNow {
+    if (_appBackgrounded) return true;
+    final s = WidgetsBinding.instance.lifecycleState;
+    return s == AppLifecycleState.paused || s == AppLifecycleState.hidden;
+  }
+
+  AppLifecycleListener? _lifecycleListener;
+
+  /// 切后台/回前台时的视频轨策略——**只有电台**关。
+  ///
+  /// 两个域在后台走的是两条完全不同的路：
+  /// - 电台：没有画面，后台就是纯音频。安卓后台拿不到 Surface，视频管线
+  ///   挂着会让 open 卡在等纹理上（表现：通知栏切台后声音停住，回到界面
+  ///   才接着放），所以把视频轨摘掉。
+  /// - 视频：后台是画中画小窗，画面还得显示。这里绝不能关视频轨，
+  ///   否则小窗里只有一块黑布。
+  void _onAppHidden() {
+    _appBackgrounded = true;
+    if (_currentChannel?.isRadio ?? false) {
+      unawaited(_videoController?.setVideoOutputDisabled(true));
+    }
+  }
+
+  void _onAppShown() {
+    _appBackgrounded = false;
+    // 回前台一律恢复视频轨：电台可能要用真波形纹理，
+    // 视频台更要画面
+    unawaited(_videoController?.setVideoOutputDisabled(false));
+    // 立刻刷一次：后台切台改的是 Dart 侧状态，回前台第一帧就该是新台
+    // （不刷的话个别机型会先贴一帧旧界面再跳）
+    notifyListeners();
+  }
+
   void dispose() {
+    _lifecycleListener?.dispose();
+    _lifecycleListener = null;
     _tickTimer?.cancel();
     _epgDayTimer?.cancel();
     _bootMinTimer?.cancel();
@@ -4788,13 +5480,14 @@ class PlayerController extends ChangeNotifier {
     _castEndedTimer?.cancel();
     _castWaitTimer?.cancel();
     _autoRetryTimer?.cancel();
+    _softErrTimer?.cancel();
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
     _resetWebRecording();
     if (_isRecording && _videoController != null) {
       unawaited(_videoController!.stopRecord());
     }
-    _disposeVideoController();
+    _disposeVideoController(detachUi: false);
     WakelockPlus.disable();
     dlnaService.stop();
     remoteAdminService.stop();

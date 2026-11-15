@@ -1,165 +1,51 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 import '../core/theme/app_colors.dart';
 import '../services/player_controller.dart';
 
-/// 定时关闭设置弹窗（底部面板与设置面板共用一套 UI）。
+/// 定时关闭卡片 —— **纯视觉组件**。
 ///
-/// 三段：
-/// 1. 到点动作：暂停播放 / 退出应用 / 退出并关机（桌面端独有）
-/// 2. 倒计时：30 / 60 / 90 / 120 分钟
-/// 3. 固定时刻：显示一个时刻（默认 23:30）+「设置」，点开系统时间选择器
-Future<void> showSleepTimerDialog(BuildContext context) async {
-  final c = context.read<PlayerController>();
-  final remain = c.sleepRemain;
-  final setAt = c.sleepAt;
-  var action = c.sleepAction;
-  // 移动端没有关机语义，界面也不显示；历史值兜底成退出
-  if (action == SleepAction.shutdown && !c.isDesktop) {
-    action = SleepAction.exit;
-  }
+/// 按键一个都不处理！这是与退出卡片（`_handleExitDialogKey`）/ 关机确认
+/// 卡片（`_handleShutdownDialogKey`）完全相同的模式：按键逻辑全部写在
+/// 播放页（player_screen 的 `_handleSleepCardKey`），行列焦点、选中动作
+/// 都是播放页的成员变量，卡片只负责把数据画出来。
+///
+/// 之所以推倒重做：以前把按键处理挂在弹窗自己身上（HardwareKeyboard
+/// 注册、根部 Focus.onKeyEvent、播放页 sink 转发——三条通道轮换着试了
+/// 三个版本），用户实测这台机器上遥控器/键盘始终一个键都收不到。而
+/// 退出卡片、关机卡片（按键在播放页处理）一直是好的。
+///
+/// [rows] 的行结构（与 `_handleSleepCardKey` 一一对应）：
+/// 0 = 到点动作（左右即改选中） / 1 = 倒计时（OK 生效并关闭） /
+/// 2 = 固定时刻（OK 进时间选择器） / 3 = 取消定时（可省略）
+class SleepCardItem {
+  final String label;
 
-  Widget chip(String label, bool on, VoidCallback onTap) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 6, bottom: 6),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-          decoration: BoxDecoration(
-            color:
-                on ? AppColors.accent.withValues(alpha: 0.18) : Colors.transparent,
-            border:
-                Border.all(color: on ? AppColors.accent : AppColors.stroke),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(label,
-              style: TextStyle(
-                  color: on ? AppColors.accent : AppColors.textPrimary,
-                  fontSize: 13)),
-        ),
-      ),
-    );
-  }
+  /// 常亮高亮（当前选中的动作）；焦点白框由播放页的 row/col 决定
+  final bool selected;
+  const SleepCardItem(this.label, {this.selected = false});
+}
 
-  final picked = await showDialog<_SleepPick>(
-    context: context,
-    barrierColor: AppColors.scrim,
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setLocal) => AlertDialog(
-        backgroundColor: AppColors.overlay,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: const BorderSide(color: AppColors.stroke),
-        ),
-        title: const Text('定时关闭',
-            style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
-        content: SizedBox(
-          width: 320,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  remain == null
-                      ? '到点自动执行下方动作'
-                      : '${setAt == null ? '剩余' : '${_hhmm(setAt)} 关闭 · 剩余'}'
-                          ' ${_fmtRemain(remain)}',
-                  style: const TextStyle(
-                      color: AppColors.textSecondary, fontSize: 12.5),
-                ),
-                const SizedBox(height: 12),
-                const Text('到点做什么',
-                    style: TextStyle(
-                        color: AppColors.textSecondary, fontSize: 11.5)),
-                const SizedBox(height: 6),
-                Wrap(children: [
-                  chip('暂停播放', action == SleepAction.pause,
-                      () => setLocal(() => action = SleepAction.pause)),
-                  chip('退出应用', action == SleepAction.exit,
-                      () => setLocal(() => action = SleepAction.exit)),
-                  if (c.isDesktop)
-                    chip('退出并关机', action == SleepAction.shutdown,
-                        () => setLocal(() => action = SleepAction.shutdown)),
-                ]),
-                const SizedBox(height: 10),
-                const Text('倒计时',
-                    style: TextStyle(
-                        color: AppColors.textSecondary, fontSize: 11.5)),
-                const SizedBox(height: 6),
-                Wrap(children: [
-                  for (final m in const [30, 60, 90, 120])
-                    chip('$m 分钟', false, () {
-                      Navigator.pop(
-                          ctx,
-                          _SleepPick(
-                              DateTime.now().add(Duration(minutes: m)), action));
-                    }),
-                ]),
-                const SizedBox(height: 10),
-                const Text('固定时刻（点「设置」选几点，今天已过算明天）',
-                    style: TextStyle(
-                        color: AppColors.textSecondary, fontSize: 11.5)),
-                const SizedBox(height: 6),
-                Row(children: [
-                  Text(setAt != null ? _hhmm(setAt) : '23:30',
-                      style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600)),
-                  const SizedBox(width: 12),
-                  chip('设置…', false, () async {
-                    final t = await showTimePicker(
-                      context: ctx,
-                      initialTime: setAt != null
-                          ? TimeOfDay(hour: setAt.hour, minute: setAt.minute)
-                          : const TimeOfDay(hour: 23, minute: 30),
-                    );
-                    if (t == null || !ctx.mounted) return;
-                    Navigator.pop(
-                        ctx, _SleepPick(_nextAt(t.hour, t.minute), action));
-                  }),
-                ]),
-                if (remain != null || setAt != null) ...[
-                  const SizedBox(height: 6),
-                  TextButton.icon(
-                    onPressed: () =>
-                        Navigator.pop(ctx, _SleepPick(null, action)),
-                    icon: const Icon(Icons.close, size: 16),
-                    label: const Text('取消定时'),
-                    style: TextButton.styleFrom(
-                      foregroundColor: AppColors.live,
-                      padding: EdgeInsets.zero,
-                      minimumSize: const Size(0, 32),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  if (picked == null || !context.mounted) return;
-  await c.setSleepAt(picked.at, action: picked.action);
+/// 一次定时设置的结果：[at] 为 null 表示取消定时。
+class SleepPick {
+  const SleepPick(this.at, this.action);
+
+  final DateTime? at;
+  final SleepAction action;
 }
 
 /// 今天/明天最近的那个 HH:mm（凌晨选 23:30 就是明晚）
-DateTime _nextAt(int hour, int minute) {
+DateTime nextSleepAt(int hour, int minute) {
   final now = DateTime.now();
   var t = DateTime(now.year, now.month, now.day, hour, minute);
   if (!t.isAfter(now)) t = t.add(const Duration(days: 1));
   return t;
 }
 
-String _hhmm(DateTime t) =>
+String sleepHhmm(DateTime t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-String _fmtRemain(Duration d) {
+String sleepFmtRemain(Duration d) {
   final h = d.inHours;
   final m = d.inMinutes % 60;
   final sec = d.inSeconds % 60;
@@ -169,10 +55,139 @@ String _fmtRemain(Duration d) {
   return '$m:${sec.toString().padLeft(2, '0')}';
 }
 
-/// 弹窗选择结果：[at] 为 null 表示取消定时。
-class _SleepPick {
-  const _SleepPick(this.at, this.action);
+Widget buildSleepTimerCard({
+  required List<List<SleepCardItem>> rows,
+  required int row,
+  required int col,
+  String? remainText,
+  required String atText,
+  /// 鼠标点击（Windows/Linux 桌面）：点哪一项就把它当成「选中 + OK」，
+  /// 语义与遥控器完全一致（动作行只改选中、倒计时立即生效、设置…进时间
+  /// 选择器、取消定时直接清除）。传 null 时整张卡片不可点。
+  void Function(int row, int col)? onTap,
+}) {
+  Widget chip(SleepCardItem item, bool focused, int r, int c) {
+    final selected = item.selected;
+    final body = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+      decoration: BoxDecoration(
+        color: focused
+            ? AppColors.accent.withValues(alpha: 0.22)
+            : selected
+                ? AppColors.accent.withValues(alpha: 0.18)
+                : Colors.transparent,
+        border: Border.all(
+          color: focused
+              ? Colors.white
+              : (selected ? AppColors.accent : AppColors.stroke),
+          width: focused ? 2 : 1,
+        ),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(item.label,
+          style: TextStyle(
+              color: selected || focused
+                  ? AppColors.accent
+                  : AppColors.textPrimary,
+              fontSize: 13,
+              fontWeight: focused ? FontWeight.w600 : FontWeight.normal)),
+    );
+    if (onTap == null) return body;
+    // 点击区域用 opaque，卡片底色是透明的，不加这一条点到文字间隙会漏
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => onTap(r, c),
+        child: body,
+      ),
+    );
+  }
 
-  final DateTime? at;
-  final SleepAction action;
+  // 行与视觉区块的对应关系见类注释；行数可变（关机项/取消行可省略）
+  final actionRow = rows.isNotEmpty ? rows[0] : const <SleepCardItem>[];
+  final timerRow = rows.length > 1 ? rows[1] : const <SleepCardItem>[];
+  final atRow = rows.length > 2 ? rows[2] : const <SleepCardItem>[];
+
+  return AlertDialog(
+    backgroundColor: AppColors.overlay,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(14),
+      side: const BorderSide(color: AppColors.stroke),
+    ),
+    title: const Text('定时关闭',
+        style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+    content: SizedBox(
+      width: 340,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (remainText != null)
+              Text(remainText,
+                  style: const TextStyle(
+                      color: AppColors.textSecondary, fontSize: 12.5)),
+            const SizedBox(height: 10),
+            Wrap(
+                spacing: 6,
+                runSpacing: 5,
+                children: [
+                  for (var i = 0; i < actionRow.length; i++)
+                    chip(actionRow[i], row == 0 && col == i, 0, i),
+                ]),
+            // 三趟之间留出明显段落：以前标签贴着上一排 chip，看着像
+            // 同一组；用户要求「倒计时 / 23:30 那行 / 底部说明」都拉开
+            const SizedBox(height: 16),
+            const Text('倒计时',
+                style:
+                    TextStyle(color: AppColors.textSecondary, fontSize: 11.5)),
+            const SizedBox(height: 7),
+            Wrap(
+                spacing: 6,
+                runSpacing: 5,
+                children: [
+                  for (var i = 0; i < timerRow.length; i++)
+                    chip(timerRow[i], row == 1 && col == i, 1, i),
+                ]),
+            const SizedBox(height: 16),
+            const Text('固定时刻（点「设置」选几点，今天已过算明天）',
+                style:
+                    TextStyle(color: AppColors.textSecondary, fontSize: 11.5)),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                // 大号时间本身也可点：鼠标用户的直觉是「点时间改时间」
+                MouseRegion(
+                  cursor: onTap == null
+                      ? MouseCursor.defer
+                      : SystemMouseCursors.click,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onTap == null ? null : () => onTap(2, 0),
+                    child: Text(atText,
+                        style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                for (var i = 0; i < atRow.length; i++)
+                  chip(atRow[i], row == 2 && col == i, 2, i),
+              ],
+            ),
+            if (rows.length > 3) ...[
+              const SizedBox(height: 10),
+              chip(rows[3][0], row == 3 && col == 0, 3, 0),
+            ],
+            const SizedBox(height: 14),
+            const Text('上下换一行 · 左右换一项 · OK 确定 · 返回退出',
+                style:
+                    TextStyle(color: AppColors.textTertiary, fontSize: 11)),
+          ],
+        ),
+      ),
+    ),
+  );
 }

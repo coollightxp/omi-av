@@ -14,8 +14,7 @@ import 'omi_video_value.dart';
 /// - 与旧 video_player/fvp 栈保持同构 API，业务层零改动迁移；
 /// - libmpv 自带 HLS/DASH/RTSP 与断点续传，不再需要 fvp 注册与 MDK SDK；
 /// - 事件全部转成 [OmiVideoValue]，上层只依赖值对象。
-class OmiVideoController extends ChangeNotifier
-    implements OmiVideoBackend {
+class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
     Map<String, String>? headers,
@@ -23,11 +22,11 @@ class OmiVideoController extends ChangeNotifier
     int bufferSeconds = 5,
     bool radioSpectrum = false,
     bool audioMeter = false,
-  }) : _url = url,
-       _headers = headers,
-       _radioSpectrum = radioSpectrum,
-       _audioMeter = audioMeter,
-       _meterActive = audioMeter {
+  })  : _url = url,
+        _headers = headers,
+        _radioSpectrum = radioSpectrum,
+        _audioMeter = audioMeter,
+        _meterActive = audioMeter {
     MediaKit.ensureInitialized();
     final bytes = (bufferSeconds.clamp(3, 120)) * 1024 * 1024;
     _player = Player(
@@ -42,14 +41,16 @@ class OmiVideoController extends ChangeNotifier
     _observeMediaTitle();
   }
 
-  final Uri _url;
-  final Map<String, String>? _headers;
+  /// 当前流地址/HTTP 头：原地换源（[openInPlace]）会就地改写
+  Uri _url;
+  Map<String, String>? _headers;
   final bool _radioSpectrum;
 
   /// 是否挂音频电平表（电台「会动的波形」用）。
   /// 走 mpv 的 af-metadata 读 astats 的 RMS，是**真实电平**，
   /// 不依赖 vo/showwaves，纯音频流也能拿到。
   final bool _audioMeter;
+
   /// 电平表当前是否真的挂在链上（取不到数据后置 false 并摘掉滤镜）
   bool _meterActive = false;
 
@@ -82,13 +83,20 @@ class OmiVideoController extends ChangeNotifier
 
   /// 电台流的曲目元数据：libmpv 把 ICY `StreamTitle` 映射到 `media-title`，
   /// 属性变化事件比轮询省事也更及时。Web 端没有 mpv，不参与。
+  ///
+  /// 部分电台（实测 AsiaFM 系列）的 Icecast 转码端有毛病：UTF-8 文本每
+  /// 三个字节序列的尾字节被替换成 `?`（「叶蒨文 - 曾经心痛」发出来就成
+  /// 了缺尾字节的残流），libmpv 对有效序列正常解码、对残字节按 latin1
+  /// 吐出 `æ`/`å` 一类残渣。字节在服务器端已经丢了，客户端无法还原，
+  /// 这里只做显示清理：删掉替换符、控制符与夹在中文/标点旁的残渣字符
+  /// 和孤立 `?`，让「正在播放」至少可读。
   void _observeMediaTitle() {
     final platform = _player.platform;
     if (platform is! NativePlayer) return;
     unawaited(() async {
       try {
         await platform.observeProperty('media-title', (value) async {
-          final t = value.trim();
+          final t = sanitizeIcyTitle(value.trim());
           if (t.isEmpty || t == _value.mediaTitle) return;
           _set(_value.copyWith(mediaTitle: t));
         });
@@ -97,6 +105,24 @@ class OmiVideoController extends ChangeNotifier
         debugPrint('[OmiVideo] observe media-title failed: $e');
       }
     }());
+  }
+
+  /// 清理 ICY 曲目元数据里的转码残渣（见 [_observeMediaTitle] 注释）。
+  /// 只在文本里确实有中文时才动 `?` 和 latin1 残渣，纯英文歌名原样放行。
+  static String sanitizeIcyTitle(String raw) {
+    var s = raw.replaceAll('\uFFFD', '');
+    // C1 控制区残渣（latin1 视角下的不可打印字节）
+    s = s.replaceAll(RegExp('[\u0080-\u009F]'), '');
+    if (!s.contains(RegExp('[\u4e00-\u9fff]'))) return s;
+    // latin1 扩展残渣：紧邻中文/全角标点的 æ å ç 一类字符
+    const ctx = '[\u4e00-\u9fff\u3000-\u303F\uFF00-\uFFEF（）()\\[\\]·，。：]';
+    s = s.replaceAll(RegExp('(?<=$ctx)'), '');
+    s = s.replaceAll(RegExp('(?=$ctx)'), '');
+    // 服务器替换尾字节产生的孤立 ?（夹在中文/标点之间或行尾）
+    s = s.replaceAll(RegExp('\\?(?=$ctx|[-—–\\s]|\$)'), '');
+    // 残渣清掉后可能留下 "中文 -  (x)" 之类的空洞，压掉多余空格
+    s = s.replaceAll(RegExp(' {2,}'), ' ').replaceAll(RegExp(' ([)）])'), ')');
+    return s.trim();
   }
 
   void _bindStreams() {
@@ -148,11 +174,43 @@ class OmiVideoController extends ChangeNotifier
   }
 
   Future<void> initialize() async {
+    // 必须在 open 之前设：这是 demuxer 的 AVOption，open 时读一次
+    await _applyFaultTolerance();
     if (_radioSpectrum) await _applySpectrumFilter();
-    await _player.open(
+    // 后台起播（安卓通知栏切台）：尽量把视频管线摘掉。
+    //
+    // 注意 mpv 的 `vid` 是「每文件选项」：open 之前设的会被新文件重置，
+    // 所以光靠下面这一次不够（v2.1.26 就是这么做的，用户实测后台切台
+    // 仍然停住）。这里再加一刀：open 发起后 200ms 再补设一次，抢在
+    // 首帧解码之前把视频轨关掉——后台没有 Surface，只要视频管线还在，
+    // open 就会一直卡着不返回，声音自然也不出。
+    if (_videoDisabled) {
+      try {
+        await _player.setVideoTrack(VideoTrack.no());
+      } catch (_) {}
+    }
+    final opening = _player.open(
       Media(_url.toString(), httpHeaders: _headers),
       play: false,
     );
+    if (_videoDisabled) {
+      Timer(const Duration(milliseconds: 200), () async {
+        if (_disposed) return;
+        try {
+          await _player.setVideoTrack(VideoTrack.no());
+        } catch (_) {}
+      });
+    }
+    try {
+      // 后台给 open 加个上限：万一视频管线还是没跳过，也不能让整个
+      // 起播流程挂死在 await 上（回前台才恢复 = 用户看到的现象）
+      await (_videoDisabled
+          ? opening.timeout(const Duration(seconds: 6))
+          : opening);
+    } on TimeoutException {
+      debugPrint('[OmiVideo] 后台 open 超时：按已起播继续（音频优先）');
+    }
+    _playerOpened = true;
     // open 返回即 demuxer 就绪；画面尺寸可能稍后才上报，
     // 这里用当前已知值兜底，后续由 stream 持续修正。
     final w = _player.state.width ?? 0;
@@ -175,8 +233,7 @@ class OmiVideoController extends ChangeNotifier
     }
     // 电平表要等 mpv 起来才能挂（af 在 _create 之前设大概率丢）；
     // 同理，均衡器预设也在这里补挂一次，避免首个滤镜调用打在空内核上
-    if (_audioMeter ||
-        (_lastAudioFilter ?? '').trim().isNotEmpty) {
+    if (_audioMeter || (_lastAudioFilter ?? '').trim().isNotEmpty) {
       await applyAudioFilter(_lastAudioFilter);
       if (_audioMeter) _startMeter();
     }
@@ -286,6 +343,28 @@ class OmiVideoController extends ChangeNotifier
     }
   }
 
+  /// 解封装容错：`err_detect=ignore_err`。
+  ///
+  /// 部分 Icecast 电台（实测 AsiaFM 亚洲粤语台 `yyt.asiafm.net:8000/asiafm`，
+  /// Content-Type: audio/aacp）的 AAC 流里混着结构损坏的包——PCE 采样率索引
+  /// 与容器配置不符、保留了保留位、声道元素未分配。ffmpeg 默认把这类包判成
+  /// corrupt 后整段解码失败，libmpv 抛 `Error decoding audio`，上层就显示
+  /// 「播放失败」。而损坏包是随机出现的，所以表现成「有时候切过去就报错、
+  /// 有时候又正常」。
+  ///
+  /// 让 demuxer 直接丢掉坏包（不送进解码器）即可：实测该台连续解码 8 秒，
+  /// astats 电平正常、无 NaN/Inf、听感无感。对正常流没有副作用——它只是把
+  /// 「碰到轻微损坏就整段失败」改成「跳过损坏继续播」。
+  Future<void> _applyFaultTolerance() async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    try {
+      await platform.setProperty('demuxer-lavf-o', 'err_detect=ignore_err');
+    } catch (e) {
+      debugPrint('[OmiVideo] err_detect failed: $e');
+    }
+  }
+
   bool _spectrumApplied = false;
   Timer? _spectrumGuard;
 
@@ -305,6 +384,54 @@ class OmiVideoController extends ChangeNotifier
     } catch (e) {
       debugPrint('[OmiVideo] drop spectrum failed: $e');
     }
+  }
+
+  /// 原地换源：不新建 Player/VideoController，只让现有 mpv 换一路流。
+  ///
+  /// 专治「安卓通知栏切台后不出声」：后台没有 Surface，新建内核的
+  /// texture 管线拿不到画布，open 会卡在等纹理；而原地 open 复用已有
+  /// 音频输出，后台立刻换台出声。
+  @override
+  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
+    if (_disposed) throw StateError('controller released');
+    _url = url;
+    _headers = headers;
+    _videoDisabled = true;
+    await _applyFaultTolerance();
+    _setAudioDisplay(false);
+    try {
+      // 后台没有 Surface：先把视频轨摘掉，open 才不会停在等纹理上
+      await _player.setVideoTrack(VideoTrack.no());
+    } catch (_) {}
+    final opening = _player.open(
+      Media(url.toString(), httpHeaders: headers),
+      play: false,
+    );
+    // mpv 的 `vid` 是每文件选项：open 之后会被新文件重置，抢在首帧
+    // 解码前再补一刀（与 initialize 里的处理一致）
+    Timer(const Duration(milliseconds: 200), () async {
+      if (_disposed) return;
+      try {
+        await _player.setVideoTrack(VideoTrack.no());
+      } catch (_) {}
+    });
+    try {
+      await opening.timeout(const Duration(seconds: 6));
+    } on TimeoutException {
+      debugPrint('[OmiVideo] 后台原地换台 open 超时：按已起播继续');
+    }
+    _playerOpened = true;
+    _set(
+      _value.copyWith(
+        isInitialized: true,
+        hasError: false,
+        isCompleted: false,
+        mediaTitle: '',
+        position: Duration.zero,
+        duration: Duration.zero,
+        bufferedEnd: Duration.zero,
+      ),
+    );
   }
 
   Future<void> play() async {
@@ -376,6 +503,39 @@ class OmiVideoController extends ChangeNotifier
   /// 电台还挂在电平表（[_audioMeter]）时，astats 会串在**同一条链**上：
   /// `@omi_lv:lavfi=[<用户预设>,astats=…]`。mpv 的 af-metadata 只认带
   /// label 的滤镜，所以整条链打一个 label。
+  @override
+  Future<void> setVideoOutputDisabled(bool disabled) async {
+    // 先同步记下标记：可能还没 initialize（后台切台 = 新建实例后立刻
+    // 调这个方法），交给 open 前统一生效
+    _videoDisabled = disabled;
+    _setAudioDisplay(!disabled);
+    if (!_playerOpened) return;
+    try {
+      await _player
+          .setVideoTrack(disabled ? VideoTrack.no() : VideoTrack.auto());
+    } catch (_) {
+      // 轨道切换失败不影响音频播放
+    }
+  }
+
+  /// mpv 的 `audio-display`：带内嵌封面的音频流（很多电台 MP3 的
+  /// ID3 APIC）默认会被 mpv 当成一路视频去建 vo。后台没有 Surface，
+  /// 这一路建不起来，open 就卡在那里——表现为「切了台不出声，回界面
+  /// 才接着放」。后台一律关掉，回前台再打开。
+  void _setAudioDisplay(bool on) {
+    final p = _player.platform;
+    if (p is! NativePlayer) return;
+    try {
+      unawaited(p.setProperty('audio-display', on ? 'auto' : 'no'));
+    } catch (_) {}
+  }
+
+  /// 视频输出是否被关闭（后台起播时 open 前要跳过视频轨）
+  bool _videoDisabled = false;
+
+  /// 播放器是否已经 open 过（open 之前的轨道设置要在 initialize 里做）
+  bool _playerOpened = false;
+
   Future<void> applyAudioFilter(String? lavfi) async {
     _lastAudioFilter = lavfi;
     final user = (lavfi ?? '').trim();

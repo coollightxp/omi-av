@@ -1,8 +1,11 @@
+import 'package:flutter/gestures.dart' show kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../services/exit_guard.dart';
 import '../services/player_controller.dart';
+import '../services/tray_service.dart';
 import '../services/window_drag.dart';
 
 /// 顶部悬停标题栏：平时隐藏，鼠标移到顶部出现。
@@ -34,9 +37,18 @@ class TopTitleBar extends StatelessWidget {
             child: Container(
               height: 44,
               color: Colors.black.withOpacity(0.72),
-              child: GestureDetector(
+              child: Listener(
                 behavior: HitTestBehavior.opaque,
-                onPanStart: (_) => startWindowDrag(),
+                // 拖动改 Listener 原始指针 + Win32 GetCursorPos 屏幕坐标，
+                // 见 window_drag_io 注释（pan 手势与 startDragging 都不可靠）
+                onPointerDown: (d) => beginWindowDrag(
+                    enabled: d.buttons == kPrimaryButton,
+                    local: d.localPosition),
+                onPointerMove: (d) => updateWindowDrag(local: d.localPosition),
+                onPointerUp: (_) => endWindowDrag(),
+                onPointerCancel: (_) => endWindowDrag(),
+                child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
                 onDoubleTap: () async {
                   // 全屏状态下双击标题栏先退出全屏（同步控制器状态）
                   if (context.mounted &&
@@ -45,11 +57,7 @@ class TopTitleBar extends StatelessWidget {
                           .exitFullscreenIfNeeded()) {
                     return;
                   }
-                  if (await windowManager.isMaximized()) {
-                    await windowManager.unmaximize();
-                  } else {
-                    await windowManager.maximize();
-                  }
+                  // 窗口固定尺寸（防拖变形/文字堆叠），不再最大化
                 },
                 child: Row(
                   children: [
@@ -57,7 +65,7 @@ class TopTitleBar extends StatelessWidget {
                     const Icon(Icons.live_tv, color: Colors.white70, size: 18),
                     const SizedBox(width: 8),
                     const Text(
-                      'Omi',
+                      '欧米视听',
                       style: TextStyle(color: Colors.white70, fontSize: 13),
                     ),
                     const Spacer(),
@@ -97,32 +105,25 @@ class TopTitleBar extends StatelessWidget {
                     ),
                     _winButton(
                         Icons.minimize, '最小化', () => windowManager.minimize()),
-                    _winButton(Icons.crop_square, '最大化/还原', () async {
-                      // 小窗状态下先恢复原窗口：420×236 直接最大化会留下
-                      // miniWindow 标记与置顶状态，再次缩窗尺寸就乱了
-                      final pc = context.read<PlayerController>();
-                      if (pc.miniWindow) {
-                        await pc.toggleMiniWindow();
-                        return;
-                      }
-                      // 全屏状态下先退出全屏（同步控制器状态），否则在
-                      // 系统全屏层上做 maximize 视觉无变化，像按钮坏了
-                      if (await pc.exitFullscreenIfNeeded()) {
-                        return;
-                      }
-                      if (await windowManager.isMaximized()) {
-                        await windowManager.unmaximize();
+                    // 「最大化/还原」按钮已移除：窗口固定尺寸（用户要求，
+                    // 防止拖拽缩放导致面板变形、文字堆叠）。小窗/全屏入口不变
+                    // ✕ 的裁决放在 Dart 侧：开着「最小化到托盘」就隐藏窗口
+                    // 继续播，否则走有序退出。以前只依赖 windowManager 的
+                    // preventClose 事件链，链没接上（设置刚开、拦截还没生效）
+                    // 就直接销毁窗口——用户实测「开了托盘开关点 ✕ 还是退出」。
+                    _winButton(Icons.close, '关闭', () async {
+                      if (TrayService.closeToTray) {
+                        await windowManager.hide();
                       } else {
-                        await windowManager.maximize();
+                        await ExitGuard.quit();
                       }
-                    }),
-                    _winButton(Icons.close, '关闭', () => windowManager.close(),
-                        hoverColor: Colors.red),
+                    }, hoverColor: Colors.red),
                     const SizedBox(width: 6),
                   ],
                 ),
               ),
-            ),
+              ), // GestureDetector
+            ), // Listener
           ),
         ),
       ),

@@ -204,7 +204,57 @@ class BuiltinCatalog {
     if (total < 40) {
       return (false, '新清单只有 $total 个台，疑似抓取残缺，已放弃', null);
     }
-    return (true, '已从央视网同步 ${slugs.length} 个央视频道（共 $total 个台）', text);
+    // 和当前清单逐条对比，没变化就如实说「无变化」——
+    // 央视网直播页的频道集几乎不动，每次都报「同步 16 个」会让用户
+    // 误以为清单被改过（实际只是重新生成了一遍）
+    final newEntries = _groupEntries(text, groupCctv);
+    final oldEntries = _groupEntries(current, groupCctv);
+    if (newEntries.length == oldEntries.length &&
+        _sameEntries(newEntries, oldEntries)) {
+      return (true, '清单已是最新，无变化（共 $total 个台）', text);
+    }
+    final added = newEntries.where((e) => !oldEntries.contains(e)).length;
+    final removed = oldEntries.where((e) => !newEntries.contains(e)).length;
+    return (
+      true,
+      '清单有更新：新增 $added、调整 $removed，已同步（共 $total 个台）',
+      text
+    );
+  }
+
+  /// 提取某一分组的条目指纹（EXTINF 行 + 紧跟的地址行），
+  /// 用于判断这次抓取相对上次有没有实际变化
+  static List<String> _groupEntries(String text, String group) {
+    final lines = text.split('\n');
+    final out = <String>[];
+    var i = 0;
+    while (i < lines.length) {
+      final line = lines[i].trimRight();
+      if (!line.startsWith('#EXTINF')) {
+        i++;
+        continue;
+      }
+      var j = i + 1;
+      while (j < lines.length && lines[j].trim().isEmpty) {
+        j++;
+      }
+      final url = j < lines.length ? lines[j].trim() : '';
+      if (line.contains('group-title="$group"') &&
+          url.isNotEmpty &&
+          !url.startsWith('#')) {
+        out.add('$line\n$url');
+      }
+      i = j + 1;
+    }
+    return out;
+  }
+
+  /// 顺序无关的条目对比：央视网页面上台的前后顺序偶尔会变，
+  /// 顺序变化不算「更新」，内容一样就报无变化
+  static bool _sameEntries(List<String> a, List<String> b) {
+    final setA = a.toSet();
+    final setB = b.toSet();
+    return setA.length == setB.length && setA.containsAll(setB);
   }
 
   /// 抓取并补充内置电台清单。

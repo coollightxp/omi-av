@@ -19,5 +19,8 @@ class TrayService {
 
   static Future<void> updateMenu({required bool fishMode}) async {}
 
+  /// 翻转摸鱼模式（占位平台无托盘，直接忽略）
+  Future<void> toggleFish() async {}
+
   static Future<void> dispose() async {}
 }

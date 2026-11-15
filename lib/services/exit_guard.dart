@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'tray_service.dart';
+import 'win_error_mode.dart';
 import 'win_hotkeys.dart';
 
 /// 统一退出流程（Windows 桌面端）。
@@ -32,10 +34,16 @@ class ExitGuard {
   /// 是否已在退出流程中（防重入：连点 ✕ / 托盘与快捷键同时触发）
   static bool get exiting => _exiting;
 
+  /// 退出提示可见性：进入退出流程立即点亮。
+  /// 首屏（空闲待选台画面）监听它，把「请选择频道开始观看」
+  /// 换成「正在退出…」，避免退出瞬间闪回选台文案让人以为没退掉
+  static final ValueNotifier<bool> exitVisible = ValueNotifier(false);
+
   /// 执行一次完整的有序退出。
   static Future<void> quit() async {
     if (_exiting) return;
     _exiting = true;
+    exitVisible.value = true;
     try {
       final p = prepare;
       if (p != null) {
@@ -53,6 +61,17 @@ class ExitGuard {
     unawaited(WinHotkeys.quitApp());
     // 给 WebView2 子进程与 mpv 线程一点收尾时间（实测 <500ms 够用）
     await Future<void>.delayed(const Duration(milliseconds: 500));
+    // Windows：到这里一切该保存的都已落盘，直接 ExitProcess 结束进程。
+    // 不再走 destroy + 引擎/CRT 拆解——用户实测退出时仍会偶发
+    // 「omi.exe - 快速异常检测失败」弹框（某个原生收尾线程在析构
+    // 中途 abort，SetErrorMode 压不住），优雅关闭治不了随机性，
+    // 只能跳过析构链。窗口随进程一起消失，托盘图标上面已摘掉。
+    if (Platform.isWindows) {
+      try {
+        hardExitProcess();
+        // hardExit 正常不返回；走到这里说明调用失败，落回 destroy
+      } catch (_) {}
+    }
     try {
       await windowManager.setPreventClose(false);
       await windowManager.destroy();

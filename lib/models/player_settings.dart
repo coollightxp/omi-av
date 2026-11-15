@@ -18,6 +18,10 @@ class PlayerSettings {
   /// 面板自动隐藏延迟（毫秒）
   final int autoHideDelay;
 
+  /// 换台停留（毫秒）：↑/↓ 连续按键时只更新左上角预览、继续播当前台，
+  /// 停顿超过该时间才真正切到预览的台。500 快切 / 800 / 1200 / 2000 / 2500（默认）/ 3000。
+  final int tuneDwellMs;
+
   /// 开机自启动
   final bool launchAtStartup;
 
@@ -90,6 +94,17 @@ class PlayerSettings {
   /// 「后台播放」随时可用：底部面板「后台」按钮把窗口缩到托盘只听声。
   final bool closeToTray;
 
+  /// 缩到托盘时自动静音（默认开）。
+  ///
+  /// 「后台播放」本意是只听声，但很多场景（上班、家里有人、老板路过）
+  /// 恰恰相反：窗口一收就得没声。开着时，进入后台播放/摸鱼模式
+  /// 会先静音并记住原状态，恢复窗口时再还原——不会把用户的音量改坏。
+  final bool trayMute;
+
+  /// F9 一键摸鱼（默认开）：窗口立刻隐藏 + 静音，再按一次（或点托盘）
+  /// 恢复。老板来了不用找鼠标，一个键缩没。
+  final bool fishHotkey;
+
   /// 声音实验室预设（方案 12.3 第二档）：'' = 标准；key 见 kAudioPresets。
   /// 走 mpv lavfi 音频滤镜，仅内置播放器生效（网页播放器不支持）。
   /// 'custom' = 自定义 10 段均衡器，增益见 [audioEqGains]
@@ -133,6 +148,7 @@ class PlayerSettings {
     this.preferredQuality = VideoQuality.auto,
     this.gestureSensitivity = 1.0,
     this.autoHideDelay = 3000,
+    this.tuneDwellMs = 2500,
     this.launchAtStartup = false,
     this.startFullscreen = false,
     this.showClock = false,
@@ -151,6 +167,8 @@ class PlayerSettings {
     this.sleepAtMs = 0,
     this.resumeLastChannel = true,
     this.closeToTray = false,
+    this.trayMute = true,
+    this.fishHotkey = true,
     this.audioPreset = '',
     this.audioEqGains = const <double>[],
     this.spectrumTexture = false,
@@ -165,6 +183,7 @@ class PlayerSettings {
     VideoQuality? preferredQuality,
     double? gestureSensitivity,
     int? autoHideDelay,
+    int? tuneDwellMs,
     bool? launchAtStartup,
     bool? startFullscreen,
     bool? showClock,
@@ -183,6 +202,8 @@ class PlayerSettings {
     int? sleepAtMs,
     bool? resumeLastChannel,
     bool? closeToTray,
+    bool? trayMute,
+    bool? fishHotkey,
     String? audioPreset,
     List<double>? audioEqGains,
     bool? spectrumTexture,
@@ -196,6 +217,7 @@ class PlayerSettings {
       preferredQuality: preferredQuality ?? this.preferredQuality,
       gestureSensitivity: gestureSensitivity ?? this.gestureSensitivity,
       autoHideDelay: autoHideDelay ?? this.autoHideDelay,
+      tuneDwellMs: tuneDwellMs ?? this.tuneDwellMs,
       launchAtStartup: launchAtStartup ?? this.launchAtStartup,
       startFullscreen: startFullscreen ?? this.startFullscreen,
       showClock: showClock ?? this.showClock,
@@ -215,6 +237,8 @@ class PlayerSettings {
       sleepAtMs: sleepAtMs ?? this.sleepAtMs,
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
       closeToTray: closeToTray ?? this.closeToTray,
+      trayMute: trayMute ?? this.trayMute,
+      fishHotkey: fishHotkey ?? this.fishHotkey,
       audioPreset: audioPreset ?? this.audioPreset,
       audioEqGains: audioEqGains ?? this.audioEqGains,
       spectrumTexture: spectrumTexture ?? this.spectrumTexture,

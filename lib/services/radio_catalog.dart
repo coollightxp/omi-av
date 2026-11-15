@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/channel.dart';
 import '../models/playlist_source.dart';
@@ -20,12 +21,26 @@ class RadioCatalog {
 
   static List<ChannelCategory>? get cachedBuiltin => _builtin;
 
+  /// 丢掉已解析的内置目录（清单更新后重读用）
+  static void invalidate() => _builtin = null;
+
   static Future<List<ChannelCategory>> builtinCategories() async {
     final cached = _builtin;
     if (cached != null) return cached;
     try {
-      final raw =
-          await rootBundle.loadString(PlaylistSource.builtinRadioAsset);
+      // 优先读「内置电台清单更新」落下的缓存（与 SourceManager 同一 key），
+      // 没有才回落到安装包资源——否则设置里点了「更新电台清单」，
+      // 左侧电台列表永远还是出厂那一份
+      String? raw;
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        raw = prefs.getString('builtin_radio_cache');
+      } catch (_) {
+        // prefs 不可用：直接走资源
+      }
+      if (raw == null || raw.trim().isEmpty) {
+        raw = await rootBundle.loadString(PlaylistSource.builtinRadioAsset);
+      }
       final cats = PlaylistParser.parse(raw, PlaylistFormat.m3u);
       // 分组顺序按 m3u 里出现顺序（电视伴音 → 央广 → 省市 → 音乐 → 故事）
       _builtin = cats;

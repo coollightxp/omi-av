@@ -14,7 +14,18 @@ permissions:
 jobs:
   # ==================== Android APK ====================
   build-android:
-    name: Build Android APK
+    # 两个 ABI 组并行：arm 组（arm64-v8a + armeabi-v7a）和 x86_64 组各占一个
+    # 作业。合在一个作业里编三个 ABI 会因 mpv 原生库逐个跑 NDK+CMake 冲到
+    # 10 分钟以上，踩免费 runner 的回收线（exit 143）；拆开后每组仍 ~6 分钟。
+    name: Build Android APK (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: arm
+            targets: android-arm64,android-arm
+          - label: x64
+            targets: android-x64
     # 通知栏/锁屏 MediaService 为 CI 注入的 Kotlin，从未被真正编译过——
     # 临时放开 push 构建以便验证并产出可安装 APK；验证通过后可改回省额度
     if: github.event_name != 'push' || true
@@ -111,6 +122,7 @@ jobs:
           import android.os.Build
           import android.provider.Settings
           import android.util.Rational
+          import android.view.View
           import androidx.core.app.NotificationManagerCompat
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
@@ -161,6 +173,19 @@ jobs:
                               else -> result.notImplemented()
                           }
                       }
+              }
+
+              // 系统焦点高亮：遥控器一按键，安卓给拿到焦点的 View 画一圈
+              // 默认高亮，FlutterView 全屏时表现是**整屏包一圈绿框**
+              // （2.1.35 修过；后来重写本文件加画中画时丢了，2.1.46 找回）
+              override fun onFlutterUiDisplayed() {
+                  super.onFlutterUiDisplayed()
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      try {
+                          findViewById<View>(FlutterActivity.FLUTTER_VIEW_ID)
+                              .defaultFocusHighlightEnabled = false
+                      } catch (e: Exception) {}
+                  }
               }
 
               // Android 13+：POST_NOTIFICATIONS 是运行时权限，不申请的话
@@ -625,14 +650,13 @@ jobs:
 
       - name: Build APK
         run: |
-          # 只编两个真机 ABI（arm64-v8a + armeabi-v7a）。x86_64 只有模拟器
-          # 需要，但 mpv 的原生库每个 ABI 都要单独跑一遍 NDK + CMake，
-          # 多一个 ABI 就把作业从 ~6 分钟拖到 10 分钟以上；免费 runner 在
-          # 9~10 分钟处会被回收（runner shutdown / exit 143），此前几次
-          # 安卓红叉全是这个原因，不是代码问题。
+          # 每路作业只编自己那组 ABI（见 matrix）：arm 组出两个真机包，
+          # x64 组出 Intel/模拟器包。mpv 原生库每个 ABI 都要单独跑一遍
+          # NDK + CMake，三个 ABI 挤一个作业会到 10 分钟以上，被免费 runner
+          # 回收（runner shutdown / exit 143）——此前几次安卓红叉都这原因。
           for attempt in 1 2; do
             if flutter build apk --release --split-per-abi \
-                 --target-platform android-arm64,android-arm; then
+                 --target-platform ${{ matrix.targets }}; then
               exit 0
             fi
             echo "::warning::APK 第 $attempt 次构建失败，缓存已热，重试一次"
@@ -657,8 +681,9 @@ jobs:
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null \
             | sort -V | tail -1)
           if [ -n "$APKSIGNER" ]; then
-            "$APKSIGNER" verify --print-certs \
-              build/app/outputs/flutter-apk/Omi-android-arm64-v8a.apk \
+            APK=$(ls build/app/outputs/flutter-apk/Omi-android-*.apk | head -1)
+            echo "verify $APK"
+            "$APKSIGNER" verify --print-certs "$APK" \
               | grep -E 'signer|Certificate' | head -5
           else
             echo "apksigner not found, skipped"
@@ -667,7 +692,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk
+          name: android-apk-${{ matrix.label }}
           path: build/app/outputs/flutter-apk/*.apk
 
       - name: Upload to Release
@@ -992,6 +1017,9 @@ jobs:
             '        case 0x43: action = "c"; break;',
             '        case 0x45: action = "e"; break;',
             '        case 0x53: action = "s"; break;',
+            '        // F9：老板键（缩托盘 + 静音，再按恢复）。无修饰键，
+            '// 正好走 g_om_capture 的吞键-转发通道，网页前台也好使。',
+            '        case VK_F9: action = "fish"; break;',
             '        default: break;',
             '      }',
             '    }',

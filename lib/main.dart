@@ -11,23 +11,38 @@ import 'services/exit_guard.dart';
 import 'services/media_capture_service.dart';
 import 'services/tray_service.dart';
 import 'services/web_env.dart';
+import 'services/win_error_mode.dart';
 
 /// 窗口关闭拦截：设置开了「✕ 最小化到托盘」时隐藏窗口继续播放，
 /// 托盘图标左键恢复；否则交给 [ExitGuard] 走统一的有序退出
 /// （先销毁网页控件/WebView2 环境，再快速结束进程）。
 class _OmiWindowListener extends WindowListener {
+  /// 持有实例：window_manager 内部用 Set 保存监听者，临时对象虽然
+  /// 不会被立刻回收，但显式留一个引用能避免任何版本把它按弱引用处理
+  static final _OmiWindowListener instance = _OmiWindowListener._();
+  _OmiWindowListener._();
+
   @override
   void onWindowClose() async {
     if (TrayService.closeToTray) {
-      await windowManager.hide();
-    } else {
-      await ExitGuard.quit();
+      try {
+        await windowManager.hide();
+      } catch (e) {
+        debugPrint('hide to tray failed: $e');
+      }
+      return;
     }
+    await ExitGuard.quit();
   }
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Windows：先压掉系统级崩溃弹窗（Exception Processing Message
+  // 0xc0000005 随机弹出，要点「确定」才消失）。必须尽早执行，
+  // 抢在 mpv/WebView2 原生线程起来之前
+  suppressWindowsCrashDialogs();
 
   // 注意：不能让 SharedPreferences 失败阻塞 runApp——平台通道一失败
   // main 直接死掉就是永久白屏（安卓实测 NoSuchMethodError 时整机白屏
@@ -68,7 +83,7 @@ void main() async {
   if (desktop) {
     await windowManager.ensureInitialized();
     // 关闭拦截统一在这处理（托盘设置见 设置→系统）
-    windowManager.addListener(_OmiWindowListener());
+    windowManager.addListener(_OmiWindowListener.instance);
 
     final launchAtStartupSynced = launchAtStartup;
     if (prefsOk) {
@@ -81,13 +96,16 @@ void main() async {
 
     await windowManager.waitUntilReadyToShow(
       const WindowOptions(
-        title: 'Omi',
+        title: '欧米视听',
         center: true,
         titleBarStyle: TitleBarStyle.hidden,
         // 原生窗口背景刷成黑色：默认白底会在启动全屏的一瞬间闪白框
         backgroundColor: Colors.black,
       ),
       () async {
+        // 窗口固定尺寸（1280×720）：不响应拖边缩放/最大化，
+        // 防止面板变形、文字堆叠（小窗模式在控制器里同样锁死尺寸）
+        await windowManager.setResizable(false);
         await windowManager.show();
         await windowManager.focus();
         // 窗口置顶（默认开）：避免被其它窗口抢焦点导致快捷键失灵；

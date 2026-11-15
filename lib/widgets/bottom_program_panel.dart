@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -143,66 +142,79 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     final scale = panelScaleOf(context) < 1.0 ? 0.72 : 1.0;
     // 用户多次反馈手机面板要尽量宽：窄屏完全贴边（0 边距）
     final hPad = screenW > 1200 ? 72.0 : (screenW > 900 ? 40.0 : 0.0);
-    // 始终返回 Positioned（Stack 的 child 类型保持稳定），显隐只换内容。
-    //
-    // 旧写法是「收起时返回 SizedBox.shrink()、展开时返回 AnimatedPositioned」，
-    // 同一个 child 在「带 ParentData / 不带 ParentData」之间反复切换，再叠加
-    // 250ms 位移动画，部分 Windows 机器上会让这一整帧的布局结果丢失——
-    // 表现出来就是「点一下画面，整个窗口变成一整块白，底部面板内容完全
-    // 看不见」，3 秒后随面板自动隐藏又恢复正常。这里把结构固定下来，
-    // 不做位移/透明度动画，也不用投影（模糊层同样会放大这个问题）。
-    final double bottomPad = screenW > 900 ? 16 : 8;
-    return Positioned(
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOutCubic,
       left: hPad,
       right: hPad,
-      bottom: bottomPad,
-      child: !widget.isVisible
-          ? const SizedBox.shrink()
-          : IgnorePointer(
-              ignoring: false,
-              child: MouseRegion(
-                onEnter: (_) => widget.onHoverEnter?.call(),
-                onExit: (_) => widget.onHoverExit?.call(),
-                onHover: (_) => widget.onHoverMove?.call(),
-                child: ScaledPanel(
-                  alignment: Alignment.bottomCenter,
-                  scale: 1.0,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      // 纯不透明表面色，不带任何透明度/投影
-                      color: AppColors.overlaySolid,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: AppColors.stroke),
-                    ),
-                    child: SafeArea(
-                  top: false,
-                  child: Padding(
-                    // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
-                    padding: scale < 1
-                        ? const EdgeInsets.fromLTRB(6, 16, 4, 14)
-                        : const EdgeInsets.fromLTRB(22, 16, 18, 10),
-                    child: Consumer<PlayerController>(
-                      builder: (context, c, _) => Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (c.isSeekable) _buildSeekBar(c),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              _buildLogo(c, scale),
-                              SizedBox(width: AppDensity.of(context).logoGap),
-                              Expanded(child: _buildInfo(c, scale)),
-                              Flexible(
-                                flex: 0,
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerRight,
-                                  child: _buildButtons(c),
+      bottom: widget.isVisible ? (screenW > 900 ? 16 : 8) : -320,
+      child: IgnorePointer(
+        ignoring: !widget.isVisible,
+        // 永久退出焦点树：底部面板的交互全由 PlayerScreen 按 _kbId 分发
+        // （左右选按钮、OK 激活），从不依赖键盘焦点。留在焦点树里的后果
+        // 是方向键会被 FocusManager 先吃掉、把焦点挪到看不见的按钮/「线路」
+        // 标签上，一按 OK 就弹出线路/分辨率菜单（安卓实测：切台时突然
+        // 冒出「线路 1/3 1080P」选单）。
+        child: ExcludeFocus(
+          excluding: true,
+          child: MouseRegion(
+            onEnter: (_) => widget.onHoverEnter?.call(),
+            onExit: (_) => widget.onHoverExit?.call(),
+            onHover: (_) => widget.onHoverMove?.call(),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: widget.isVisible ? 1.0 : 0.0,
+              child: ScaledPanel(
+                alignment: Alignment.bottomCenter,
+                // 手机保持铺满宽度（scale=1 由上方 padding 逻辑控制），
+                // 桌面窗口变小时整体等比缩，卡片不变形
+                scale: panelScaleOf(context) < 1.0
+                    ? 1.0
+                    : windowFitScaleOf(context),
+                child: Container(
+                  decoration: BoxDecoration(
+                    // 与设置面板 / 左右抽屉同一套表面色：深蓝灰 + 细描边
+                    color: AppColors.overlay,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppColors.stroke),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: SafeArea(
+                    top: false,
+                    child: Padding(
+                      // 贴近屏幕左右两端（横向拉长），上下略加高保持比例
+                      padding: scale < 1
+                          ? const EdgeInsets.fromLTRB(6, 12, 4, 10)
+                          : const EdgeInsets.fromLTRB(22, 12, 18, 8),
+                      child: Consumer<PlayerController>(
+                        builder: (context, c, _) => Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (c.isSeekable) _buildSeekBar(c),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                _buildLogo(c, scale),
+                                SizedBox(width: AppDensity.of(context).logoGap),
+                                Expanded(child: _buildInfo(c, scale)),
+                                Flexible(
+                                  flex: 0,
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    alignment: Alignment.centerRight,
+                                    child: _buildButtons(c),
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ],
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -211,6 +223,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             ),
           ),
         ),
+      ),
     );
   }
 
@@ -244,7 +257,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       // 不够宽，台标是残缺的」）。横向给足空间后整张图能铺开
       width: size * 1.6,
       circular: false,
-      background: Colors.white10,
+      // 不加底衬：台标图自带底色/透明底，再叠一层 8% 白会在 logo 外围
+      // 多出一圈「框」，直接透明贴在面板上更干净（用户反馈）
+      background: Colors.transparent,
       extraLogoUrls: [c.currentLogo],
     );
   }
@@ -476,6 +491,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     }
     // 电台变体（方案 13.3）：音频没有画面，截图/旋转/小窗都不出现
     final isRadio = c.currentChannel?.isRadio ?? false;
+    // 【顺序红线】这里必须与下方 children 的拼装顺序逐项一致——
+    // 遥控器 ←/→ 按本列表的声明顺序走高亮，声明和显示不一致时
+    // 焦点会"跳到最后一个又跳回来"（电台录音按钮实测踩过）。
     // 可用动作：禁用按钮不进列表，遥控器只会高亮能点的按钮
     final actions = <_KbAction>[
       // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
@@ -495,18 +513,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isPlaying ? Icons.pause : Icons.play_arrow,
           c.isPlaying ? '暂停' : '播放',
           hasChannel ? widget.onTogglePlayPause : null),
-      if (isRadio) ...[
-        // 电台录音（方案 12.3）：边听边录，流内直抓不转码
-        _KbAction(
-          'radioRec',
-          c.isRadioRecording ? Icons.stop_rounded : Icons.fiber_manual_record,
-          c.isRadioRecording ? '停止录音' : '录音',
-          hasChannel ? c.toggleRadioRecord : null,
-        ),
-      ],
-      // 定时关闭不在这里：它和「退出/关机」是同一类操作，统一收到退出
-      // 卡片里（退出卡片全局可用，不随频道类型变化），见 player_screen
-      // 的 _exitOptions / showSleepTimerDialog
       if (c.isDesktop && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
@@ -516,8 +522,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             c.isRecording ? '停止录制' : '开始录制',
             hasVideo ? widget.onToggleRecord : null),
       ],
-      // 顺序必须与界面从左到右一致：旋转在小窗/静音/全屏之前，
-      // 否则遥控器 ←/→ 会在「全屏 ↔ 旋转 ↔ 小窗」之间来回跳
+      // 旋转在小窗/静音/全屏之前，与界面一致
       if (!isRadio)
         _KbAction(
             'rotate',
@@ -554,12 +559,17 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.webPageActive ? '内置播放器播放' : '网页播放器播放',
           c.canToggleWebNative ? widget.onSwitchWebNative : null,
         ),
-      // 后台播放（桌面端）：窗口缩到托盘只听声，托盘图标恢复
-      if (c.isDesktop)
-        _KbAction(
-            'background', Icons.dock, '后台播放（缩到托盘只听声）', c.enterBackgroundAudio),
       if (c.isCasting)
         _KbAction('cast', Icons.cast_connected, '断开投屏', c.stopCastAndRestore),
+      // 电台录音（电台专属）：边听边录，流内直抓不转码——
+      // 显示在面板最尾部，声明也必须放在最后
+      if (isRadio)
+        _KbAction(
+          'radioRec',
+          c.isRadioRecording ? Icons.stop_rounded : Icons.fiber_manual_record,
+          c.isRadioRecording ? '停止录音' : '录音',
+          hasChannel ? c.toggleRadioRecord : null,
+        ),
     ];
     _actions = actions;
     // 当前高亮的动作若已消失（如断开投屏），清除高亮，等下次方向键重选
@@ -629,12 +639,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       children.add(_btn(byId('radioRec')));
     }
 
-    // 定时关闭独占最末位（电台专属）：跟换台/播放这些高频操作隔开，
-    // 睡前设一次就不容易被误碰
-    if (isRadio) {
-      children.add(_groupDivider(d));
-      children.add(_btn(byId('sleep')));
-    }
+    // 定时关闭入口统一收进退出卡片（长按返回/退出键），底部面板不再
+    // 放第二个入口：两处并存时遥控器焦点容易落到低频按钮上
 
     return Row(mainAxisSize: MainAxisSize.min, children: children);
   }

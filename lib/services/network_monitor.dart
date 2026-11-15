@@ -60,8 +60,16 @@ class NetworkMonitor {
     return false;
   }
 
+  /// 立即重新检测一次网络（不走 5 秒轮询缓存）。
+  ///
+  /// 缓存值会滞后：刚连上 Wi-Fi、后台切回前台、系统刚解除息屏限制时，
+  /// `hasNetwork` 可能还是 false。调用方（如换台前的等网判断）应该用
+  /// 实时结果，否则会把「其实有网」误判成断网，白等 30 秒。
+  Future<bool> checkNow() => _checkOnce();
+
   /// 等待网络可用（阻塞直到有网或超时）
-  Future<bool> waitForNetwork({Duration timeout = const Duration(minutes: 5)}) async {
+  Future<bool> waitForNetwork(
+      {Duration timeout = const Duration(minutes: 5)}) async {
     final start = DateTime.now();
     while (DateTime.now().difference(start) < timeout) {
       if (await _checkOnce()) return true;

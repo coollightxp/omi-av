@@ -47,17 +47,6 @@ class LeftChannelDrawer extends StatefulWidget {
 }
 
 class LeftChannelDrawerState extends State<LeftChannelDrawer> {
-  /// 关闭后是否还留在控件树里（opacity 层在老显卡上会合成出白块，
-  /// 并且收起后仍参与命中测试，等于一块透明挡板压在画面上）
-  bool _render = false;
-  Timer? _unmountTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _render = widget.isOpen;
-  }
-
   /// 收藏场景虚拟分类 ID 前缀（不与真实源分类冲突）：
   /// 场景制收藏（方案 12.3）后每个场景一个 L1 条目，id = 前缀 + 场景名
   static const String _favCatPrefix = '::fav::';
@@ -83,9 +72,22 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   int _kbCategoryIndex = 0;
   int _kbChannelIndex = 0;
 
+  /// 焦点是否停在顶部「电视 / 电台」胶囊上。
+  /// 分类列表按到最顶再按上即跳到这里；此时左/右/OK 切换两个标签，
+  /// 按下回到分类列表（用户反馈：想切电台却上不去、跳不到顶上）
+  bool _kbTabFocused = false;
+
   /// OK 长按收藏：按下边沿启动计时，800ms 内抬起=播放，超时=收藏/取消收藏
   Timer? _okLongTimer;
   bool _okLongFired = false;
+
+  /// 第一级按 OK 进入分类后，要吃掉这一次按键的"抬起"边沿。
+  ///
+  /// 遥控器一次 OK = 按下 + 抬起两个事件。按下时还在分类列表，于是进入
+  /// 下一级；抬起时 _selectedCategory 已经非空，事件落进第二级的
+  /// 「短按抬起 = 播放」分支，结果刚进分类就把第一条频道播了
+  /// （用户反馈：框选在顶上是对的，但直接就播放第一个了）。
+  bool _swallowOkUp = false;
 
   /// 上次触发播放的时间，用于播放内核重建期间的防抖
   DateTime? _lastPlayAt;
@@ -105,7 +107,6 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
 
   @override
   void dispose() {
-    _unmountTimer?.cancel();
     _categoryScroll.dispose();
     _channelScroll.dispose();
     _okLongTimer?.cancel();
@@ -184,19 +185,6 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   @override
   void didUpdateWidget(covariant LeftChannelDrawer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 展开/收起时同步「是否留在控件树里」：收起动画走完后整块摘掉，
-    // 避免长期留着一个 opacity 层（老显卡上会合成出白块）和一块
-    // 透明的点击挡板
-    if (widget.isOpen != oldWidget.isOpen) {
-      _unmountTimer?.cancel();
-      if (widget.isOpen) {
-        _render = true;
-      } else {
-        _unmountTimer = Timer(const Duration(milliseconds: 320), () {
-          if (mounted) setState(() => _render = false);
-        });
-      }
-    }
     // 打开时直接定位到当前播放频道所在分类，并滚动到当前频道
     if (!oldWidget.isOpen && widget.isOpen) {
       // 节目可能已切换，重新取「正在播」节目名
@@ -220,6 +208,8 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
         }
       }
       _lastOpenChannelId = cur?.id;
+      // 每次打开都从分类列表开始，焦点不留在顶部标签行
+      _kbTabFocused = false;
       final favs = _favsOf(controller);
 
       // 上次停留在收藏场景：场景仍非空时保持层级，
@@ -290,11 +280,23 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     }
   }
 
+  /// 打开在线电台搜索。**先开弹窗、再把抽屉收起来**：抽屉留在弹窗
+  /// 后面时，它自己的上下键处理还活着（用户实测：从抽屉顶部图标点出来
+  /// 的搜索面板遥控器完全动不了，而设置里打开的同一个面板能操作）。
+  /// 弹窗与抽屉是同一个组件，差别只在打开时抽屉还开着。
+  void _openRadioSearch() {
+    RadioSearchDialog.show(context);
+    widget.onClose();
+  }
+
   /// 遥控器/键盘按键入口（由 PlayerScreen 统一分发，Windows 低级钩子
   /// 与 HardwareKeyboard 走同一入口）。
   /// action: up/down/left/right/ok/back；back 与 ok 在按下边沿触发。
   void handleRemoteKey(String action, {required bool isDown}) {
     if (!widget.isOpen || !mounted) return;
+    // 电台搜索弹窗盖在抽屉上时，按键归弹窗：抽屉不许在暗地里
+    // 继续吃上下键（否则弹窗看起来「遥控器完全没反应」）
+    if (RadioSearchDialog.active) return;
     if (action == 'back') {
       if (isDown) widget.onClose();
       return;
@@ -304,25 +306,67 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     final cat = _selectedCategory;
     if (cat == null) {
       // ===== 第一级：分类列表（长按收藏只作用于第二级频道行） =====
-      if (cats.isEmpty) return;
       if (!isDown) return;
+      // 焦点停在顶部「电视 / 电台」胶囊：左/右/OK/菜单 = 互换两个标签，
+      // 按下 = 回到分类列表，按上 = 已在最顶，停住
+      if (_kbTabFocused) {
+        switch (action) {
+          case 'left':
+          case 'right':
+          case 'ok':
+          case 'menu':
+            _switchTab(1 - _mediaTab);
+          case 'down':
+            setState(() {
+              _kbTabFocused = false;
+              _kbCategoryIndex = 0;
+            });
+          case 'up':
+            break;
+        }
+        return;
+      }
       switch (action) {
         case 'left':
           // 第一级按左键 = 切换 电视/电台（右键留给"进入分类"）
           _switchTab(1 - _mediaTab);
+          return;
         case 'menu':
           // 方案 12.6：列表打开时菜单键空闲，用作一键切域
           _switchTab(1 - _mediaTab);
+          return;
         case 'up':
+          // 已在分类列表最顶：再按上跳到「电视 / 电台」胶囊，
+          // 在那里按 OK 即可切换到电台（分类为空时同样可跳上去）
+          if (cats.isEmpty || _kbCategoryIndex <= 0) {
+            setState(() {
+              _kbCategoryIndex = 0;
+              _kbTabFocused = true;
+            });
+            OsdBus.show('按 OK / 左右键 切换「电视 / 电台」', icon: Icons.swap_horiz);
+            return;
+          }
           setState(() => _kbCategoryIndex =
               (_kbCategoryIndex - 1).clamp(0, cats.length - 1));
           _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+          return;
         case 'down':
+          if (cats.isEmpty) return;
           setState(() => _kbCategoryIndex =
               (_kbCategoryIndex + 1).clamp(0, cats.length - 1));
           _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+          return;
         case 'ok':
         case 'right':
+          if (cats.isEmpty) {
+            // 没有分类时 OK/右键没有落点，直接把焦点送到顶部分类胶囊，
+            // 让用户能切到另一个标签（否则死在这里）
+            setState(() => _kbTabFocused = true);
+            return;
+          }
+          // 这一次 OK 的抬起边沿会落到下一级，必须吃掉，否则"进分类"
+          // 和"播第一条"会同时发生（右键没有抬起语义，不受影响）
+          if (action == 'ok') _swallowOkUp = true;
           final next = cats[_kbCategoryIndex.clamp(0, cats.length - 1)];
           final nextChannels = _channelsOf(controller, next);
           // 进入收藏场景 = 切到该场景，此后收藏动作落到这个场景
@@ -348,6 +392,16 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       switch (action) {
         case 'up':
           if (!isDown || channels.isEmpty) break;
+          // 频道列表已到顶：再按上回分类列表（再按上就跳到
+          // 「电视 / 电台」胶囊）。比只能按左键回去更符合遥控器直觉
+          if (_kbChannelIndex <= 0) {
+            setState(() {
+              _selectedCategory = null;
+              _kbTabFocused = false;
+            });
+            _scrollKeyboardTo(_categoryKeys, _kbCategoryIndex);
+            break;
+          }
           setState(() => _kbChannelIndex =
               (_kbChannelIndex - 1).clamp(0, channels.length - 1));
           _scrollKeyboardTo(_channelKeys, _kbChannelIndex);
@@ -358,18 +412,32 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
           _scrollKeyboardTo(_channelKeys, _kbChannelIndex);
         case 'left':
           if (!isDown) break;
-          setState(() => _selectedCategory = null);
+          setState(() {
+            _selectedCategory = null;
+            _kbTabFocused = false;
+          });
         case 'ok':
           if (channels.isEmpty) break;
           if (isDown) {
+            // 新的一次按下：清掉可能残留的"吃掉抬起"标记
+            _swallowOkUp = false;
             // 长按 OK（800ms）= 收藏/取消收藏；抬起前未超时则按短按播放
+            // 蓝牙遥控器抬起事件可能迟到甚至丢失：计时器到点时抽屉可能
+            // 已经因为别的原因关掉了，绝不能在抽屉不可见时还偷偷收藏
             _okLongFired = false;
             _okLongTimer?.cancel();
             _okLongTimer = Timer(const Duration(milliseconds: 800), () {
+              if (!widget.isOpen || !mounted) return;
               _okLongFired = true;
               final idx = _kbChannelIndex.clamp(0, channels.length - 1);
               _toggleFavorite(channels[idx]);
             });
+            break;
+          }
+          // 这一次抬起是"从分类列表按 OK 进来"的那一下：只负责进级，不播放
+          if (_swallowOkUp) {
+            _swallowOkUp = false;
+            _okLongTimer?.cancel();
             break;
           }
           // 抬起边沿：长按已触发收藏，不再播放
@@ -506,7 +574,6 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     // 任何情况下不超过屏幕宽度的 92%：逻辑分辨率很小的电视盒子上
     // 面板不能宽于屏幕，否则内容会被裁掉
     final drawerW = designW.clamp(0.0, size.width * 0.92).toDouble();
-    if (!_render) return const SizedBox.shrink();
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
@@ -516,36 +583,40 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       width: drawerW,
       child: IgnorePointer(
         ignoring: !widget.isOpen,
-        child: MouseRegion(
-          onEnter: (_) => widget.onHoverEnter?.call(),
-          onExit: (_) => widget.onHoverExit?.call(),
-          onHover: (_) => widget.onHoverMove?.call(),
-          child: ScaledPanel(
-            alignment: Alignment.centerLeft,
-            scale: 1.0,
-            child: MediaQuery(
-              // 只在面板内缩小文字，不影响主界面其它区域
-              data: MediaQuery.of(context).copyWith(
-                textScaler: TextScaler.linear(
-                  MediaQuery.textScalerOf(context).scale(1.0) *
-                      (compact ? 0.78 : 1.0),
-                ),
-              ),
-              child: RepaintBoundary(
-                child: Material(
-                  // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
-                  // 不透明表面色：overlay 带 6% 透明度，Windows 老显卡
-                  // 局部重绘时会露出未绘制区域，看起来是一大块纯白
-                  color: AppColors.overlaySolid,
-                  elevation: 28,
-                  shape:
-                      const Border(right: BorderSide(color: AppColors.stroke)),
-                  child: SafeArea(
-                    child: Column(
-                      children: [
-                        _buildHeader(),
-                        Expanded(child: _buildBody()),
-                      ],
+        child: ExcludeFocus(
+          excluding: !widget.isOpen,
+          child: MouseRegion(
+            onEnter: (_) => widget.onHoverEnter?.call(),
+            onExit: (_) => widget.onHoverExit?.call(),
+            onHover: (_) => widget.onHoverMove?.call(),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: widget.isOpen ? 1.0 : 0.0,
+              child: ScaledPanel(
+                alignment: Alignment.centerLeft,
+                // 桌面窗口变小时整体等比缩，固定宽度的抽屉不被挤压变形
+                scale: windowFitScaleOf(context),
+                child: MediaQuery(
+                  // 只在面板内缩小文字，不影响主界面其它区域
+                  data: MediaQuery.of(context).copyWith(
+                    textScaler: TextScaler.linear(
+                      MediaQuery.textScalerOf(context).scale(1.0) *
+                          (compact ? 0.78 : 1.0),
+                    ),
+                  ),
+                  child: Material(
+                    // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
+                    color: AppColors.overlay,
+                    elevation: 28,
+                    shape: const Border(
+                        right: BorderSide(color: AppColors.stroke)),
+                    child: SafeArea(
+                      child: Column(
+                        children: [
+                          _buildHeader(),
+                          Expanded(child: _buildBody()),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -591,7 +662,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             IconButton(
               icon: const Icon(Icons.travel_explore, color: Colors.white70),
               tooltip: '搜索在线电台',
-              onPressed: () => RadioSearchDialog.show(context),
+              onPressed: _openRadioSearch,
             ),
           IconButton(
             icon: const Icon(Icons.close, color: Colors.white70),
@@ -648,6 +719,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               icon: Icons.live_tv,
               count: tvCount,
               selected: _mediaTab == 0,
+              focused: _kbTabFocused && _mediaTab == 0,
               onTap: () => _switchTab(0),
             ),
           ),
@@ -659,6 +731,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               count: radioCount,
               loading: !controller.radioCatalogLoaded,
               selected: _mediaTab == 1,
+              focused: _kbTabFocused && _mediaTab == 1,
               onTap: () => _switchTab(1),
             ),
           ),
@@ -733,9 +806,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               OutlinedButton.icon(
                 onPressed: radioOnlySource
                     ? () => _switchTab(1)
-                    : (isRadioTab
-                        ? () => RadioSearchDialog.show(context)
-                        : widget.onOpenSettings),
+                    : (isRadioTab ? _openRadioSearch : widget.onOpenSettings),
                 icon: Icon(
                     radioOnlySource
                         ? Icons.radio
@@ -772,7 +843,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
                   ? (isMine ? Icons.library_music : Icons.radio)
                   : Icons.category),
           iconColor: isFav ? Colors.amber : Colors.blueAccent,
-          keyboardSelected: index == _kbCategoryIndex,
+          keyboardSelected: index == _kbCategoryIndex && !_kbTabFocused,
           onTap: () => setState(() {
             // 进入收藏场景 = 切到该场景，此后收藏动作落到这个场景
             if (_isFavCat(cat.id)) {
@@ -831,6 +902,7 @@ class _TabBtn extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.loading = false,
+    this.focused = false,
   });
 
   final String label;
@@ -838,6 +910,9 @@ class _TabBtn extends StatelessWidget {
   final int count;
   final bool selected;
   final bool loading;
+
+  /// 遥控器焦点停在标签行时的白框（分类列表按到最顶再按上到这里）
+  final bool focused;
   final VoidCallback onTap;
 
   @override
@@ -855,7 +930,10 @@ class _TabBtn extends StatelessWidget {
               : Colors.white.withValues(alpha: 0.05),
           borderRadius: BorderRadius.circular(9),
           border: Border.all(
-            color: selected ? AppColors.accent : AppColors.stroke,
+            color: focused
+                ? Colors.white
+                : (selected ? AppColors.accent : AppColors.stroke),
+            width: focused ? 1.6 : 1,
           ),
         ),
         child: Row(

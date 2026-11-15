@@ -22,8 +22,7 @@ import 'omi_video_value.dart';
 /// - 没有 af-metadata → 波形退回模拟动画（[audioLevel] 恒为 -1）
 /// - 录制/截帧走 fvp 扩展（MDK 原生 `record` / `snapshot`，见 OMPlayer
 ///   同款实现），与 mpv 的 stream-record 一样可用
-class OmiVideoMdkController extends ChangeNotifier
-    implements OmiVideoBackend {
+class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoMdkController.network(
     Uri url, {
     Map<String, String>? headers,
@@ -60,7 +59,13 @@ class OmiVideoMdkController extends ChangeNotifier
     if (_registered && _bufferSecs == bufferSeconds) return;
     _registered = true;
     _bufferSecs = bufferSeconds;
-    // 上限 120 秒与 MPV 侧一致；起播预读最多 3 秒，避免大缓冲等太久
+    // 上限 120 秒与 MPV 侧一致；起播预读最多 3 秒，避免大缓冲等太久。
+    // 上限保底 10 秒（默认 5 与投屏 15 的折中）：直播是实时流，上限囤
+    // 太大延迟大、容易丢帧追（2.1.40 保底 15 秒实测直播反而卡）；但
+    // 5 秒对高码率投屏又太薄。取 10 秒两头兼顾，实测后再定
+    // 2026-11-14 用户实测：10 秒折中在 Windows 上不如 5 秒稳，回退到
+    // clamp(5,120)（2.1.41 的观感）。缓冲上限只影响直播囤积深度，
+    // 投屏的改善来自代理攒批，不靠这个参数。
     final maxMs = bufferSeconds.clamp(5, 120) * 1000;
     final startMs = maxMs < 3000 ? maxMs : 3000;
     try {
@@ -86,6 +91,10 @@ class OmiVideoMdkController extends ChangeNotifier
           'avio.rw_timeout': '15000000',
           // 起播预读 + 缓冲上限（毫秒）；不丢帧、不改帧率探测
           'buffer.range': '$startMs+$maxMs',
+          // 解封装容错：部分 Icecast 电台（AsiaFM 亚洲粤语台等）的 AAC
+          // 裸流里混着结构损坏的包，ffmpeg 默认判 corrupt 后整段解码失败，
+          // 表现为「有时切过去就报错、有时又正常」。丢掉坏包继续放
+          'avformat.err_detect': 'ignore_err',
         },
       });
     } catch (e) {
@@ -124,8 +133,7 @@ class OmiVideoMdkController extends ChangeNotifier
         size: v.size,
         position: v.position,
         duration: v.duration,
-        bufferedEnd:
-            v.buffered.isEmpty ? Duration.zero : v.buffered.last.end,
+        bufferedEnd: v.buffered.isEmpty ? Duration.zero : v.buffered.last.end,
         mediaTitle: _value.mediaTitle,
         errorDescription: v.errorDescription,
       ),
@@ -182,8 +190,8 @@ class OmiVideoMdkController extends ChangeNotifier
       final w = _pc.value.size.width.round();
       final h = _pc.value.size.height.round();
       if (w <= 0 || h <= 0) return null;
-      final rgba = await fvp.FVPControllerExtensions(_pc)
-          .snapshot(width: w, height: h);
+      final rgba =
+          await fvp.FVPControllerExtensions(_pc).snapshot(width: w, height: h);
       if (rgba == null || rgba.isEmpty) return null;
       final buf = await ui.ImmutableBuffer.fromUint8List(rgba);
       final desc = ui.ImageDescriptor.raw(
@@ -231,6 +239,14 @@ class OmiVideoMdkController extends ChangeNotifier
   /// MDK 无 af 滤镜链：均衡器预设在这里不生效（UI 已提示）
   @override
   Future<void> applyAudioFilter(String? lavfi) async {}
+
+  @override
+  Future<void> setVideoOutputDisabled(bool disabled) async {}
+
+  @override
+  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
+    throw UnsupportedError('当前内核不支持原地换源');
+  }
 
   @override
   Future<void> release() async {

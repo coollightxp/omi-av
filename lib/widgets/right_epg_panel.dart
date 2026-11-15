@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -36,17 +35,6 @@ class RightEpgPanel extends StatefulWidget {
 }
 
 class RightEpgPanelState extends State<RightEpgPanel> {
-  /// 关闭后是否还留在控件树里（opacity 层在老显卡上会合成出白块，
-  /// 并且收起后仍参与命中测试，等于一块透明挡板压在画面上）
-  bool _render = false;
-  Timer? _unmountTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _render = widget.isOpen;
-  }
-
   final ScrollController _scrollController = ScrollController();
   // 记录已定位过的节目单首项，避免每次 tick 都重复滚动
   String? _lastScrolledKey;
@@ -95,7 +83,6 @@ class RightEpgPanelState extends State<RightEpgPanel> {
 
   @override
   void dispose() {
-    _unmountTimer?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
@@ -103,19 +90,6 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   @override
   void didUpdateWidget(covariant RightEpgPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 展开/收起时同步「是否留在控件树里」：收起动画走完后整块摘掉，
-    // 避免长期留着一个 opacity 层（老显卡上会合成出白块）和一块
-    // 透明的点击挡板
-    if (widget.isOpen != oldWidget.isOpen) {
-      _unmountTimer?.cancel();
-      if (widget.isOpen) {
-        _render = true;
-      } else {
-        _unmountTimer = Timer(const Duration(milliseconds: 320), () {
-          if (mounted) setState(() => _render = false);
-        });
-      }
-    }
     // 面板由开变关时重置定位标记，下次打开重新滚动到当前节目
     if (oldWidget.isOpen && !widget.isOpen) {
       _lastScrolledKey = null;
@@ -259,7 +233,6 @@ class RightEpgPanelState extends State<RightEpgPanel> {
     final compact = shortest < 600;
     // 不超过屏幕宽度的 92%，避免小逻辑分辨率电视盒子上被裁切
     final drawerW = designW.clamp(0.0, size.width * 0.92).toDouble();
-    if (!_render) return const SizedBox.shrink();
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
@@ -269,37 +242,41 @@ class RightEpgPanelState extends State<RightEpgPanel> {
       width: drawerW,
       child: IgnorePointer(
         ignoring: !widget.isOpen,
-        child: MouseRegion(
-          onEnter: (_) => widget.onHoverEnter?.call(),
-          onExit: (_) => widget.onHoverExit?.call(),
-          onHover: (_) => widget.onHoverMove?.call(),
-          child: ScaledPanel(
-            alignment: Alignment.centerRight,
-            scale: 1.0,
-            child: MediaQuery(
-              // 只在面板内缩小文字，不影响主界面其它区域
-              data: MediaQuery.of(context).copyWith(
-                textScaler: TextScaler.linear(
-                  MediaQuery.textScalerOf(context).scale(1.0) *
-                      (compact ? 0.78 : 1.0),
-                ),
-              ),
-              child: RepaintBoundary(
-                child: Material(
-                  // 与设置面板/左侧抽屉同一套表面色 + 描边
-                  // 不透明表面色：overlay 带 6% 透明度，Windows 老显卡
-                  // 局部重绘时会露出未绘制区域，看起来是一大块纯白
-                  color: AppColors.overlaySolid,
-                  elevation: 28,
-                  shape:
-                      const Border(left: BorderSide(color: AppColors.stroke)),
-                  child: SafeArea(
-                    child: Column(
-                      children: [
-                        _buildHeader(),
-                        const Divider(height: 1, color: Colors.white12),
-                        Expanded(child: _buildEpgList()),
-                      ],
+        child: ExcludeFocus(
+          excluding: !widget.isOpen,
+          child: MouseRegion(
+            onEnter: (_) => widget.onHoverEnter?.call(),
+            onExit: (_) => widget.onHoverExit?.call(),
+            onHover: (_) => widget.onHoverMove?.call(),
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: widget.isOpen ? 1.0 : 0.0,
+              child: ScaledPanel(
+                alignment: Alignment.centerRight,
+                // 桌面窗口变小时整体等比缩，固定宽度的抽屉不被挤压变形
+                scale: windowFitScaleOf(context),
+                child: MediaQuery(
+                  // 只在面板内缩小文字，不影响主界面其它区域
+                  data: MediaQuery.of(context).copyWith(
+                    textScaler: TextScaler.linear(
+                      MediaQuery.textScalerOf(context).scale(1.0) *
+                          (compact ? 0.78 : 1.0),
+                    ),
+                  ),
+                  child: Material(
+                    // 与设置面板/左侧抽屉同一套表面色 + 描边
+                    color: AppColors.overlay,
+                    elevation: 28,
+                    shape:
+                        const Border(left: BorderSide(color: AppColors.stroke)),
+                    child: SafeArea(
+                      child: Column(
+                        children: [
+                          _buildHeader(),
+                          const Divider(height: 1, color: Colors.white12),
+                          Expanded(child: _buildEpgList()),
+                        ],
+                      ),
                     ),
                   ),
                 ),
