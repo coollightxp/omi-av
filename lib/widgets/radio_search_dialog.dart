@@ -15,6 +15,7 @@ import '../services/player_controller.dart';
 import '../services/builtin_radio_index.dart';
 import '../services/radio_directory.dart';
 import '../services/radio_library.dart';
+import '../services/web_diag.dart';
 
 /// 在线电台搜索（Radio Browser 目录）。
 ///
@@ -185,7 +186,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
       // 输入法正在组词时上下键归输入法（中文候选词选择）
       if (_imeComposing) return KeyEventResult.ignored;
-      _moveVertical(up: k == LogicalKeyboardKey.arrowUp);
+      _moveRow(k == LogicalKeyboardKey.arrowDown ? 1 : -1);
       return KeyEventResult.handled;
     }
     // 返回 / 菜单键：关弹窗（遥控器没有鼠标，必须有键盘出口）
@@ -198,42 +199,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     if (k == LogicalKeyboardKey.arrowLeft ||
         k == LogicalKeyboardKey.arrowRight) {
       if (_imeComposing) return KeyEventResult.ignored;
-      final left = k == LogicalKeyboardKey.arrowLeft;
-      // 筛选行内：左右换 chip（循环），OK 才过滤
-      if (_regionRow.hasFocus) {
-        _moveInRow(region: true, delta: left ? -1 : 1);
-        return KeyEventResult.handled;
-      }
-      if (_tagRow.hasFocus) {
-        _moveInRow(region: false, delta: left ? -1 : 1);
-        return KeyEventResult.handled;
-      }
-      // 结果列表里按右：立刻回到列表最上边（焦点回第一行、列表滚到顶）。
-      // 一屏几十条的长列表，用 ↑ 一路翻回去太累——这是用户明确要的出口
-      if (!left && _rowFocus.values.any((n) => n.hasFocus)) {
-        _jumpListTop();
-        return KeyEventResult.handled;
-      }
-      // 列表末尾「回到顶部」：往右就是出口（用户要求的"这一行往右退出"）
-      if (_topRow.hasFocus && !left) {
-        _backToTop();
-        return KeyEventResult.handled;
-      }
-      // 搜索条内：输入框 ←→ 搜索按钮 ←→ 仅中国
-      final bar = _barIndex;
-      if (bar >= 0) {
-        final next = (bar + (left ? -1 : 1)).clamp(0, 2);
-        [_queryFocus, _searchBtnFocus, _cnFocus][next].requestFocus();
-        return KeyEventResult.handled;
-      }
-      // 页签上左右切页
-      final p = FocusManager.instance.primaryFocus;
-      if (p == _tabSearchFocus || p == _tabMineFocus) {
-        _switchTab(p == _tabSearchFocus ? 1 : 0);
-        return KeyEventResult.handled;
-      }
-      // 其余控件没有横向兄弟：左右一律吞掉。以前放行会给 Flutter 默认
-      // 方向导航，焦点横向窜到别的控件上，遥控器感觉像"乱跳"
+      _moveCol(k == LogicalKeyboardKey.arrowRight ? 1 : -1);
       return KeyEventResult.handled;
     }
     // OK：**所有停靠点都在这里自己执行**，不再放行给控件。
@@ -324,88 +290,217 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     return c.isValid && !c.isCollapsed;
   }
 
-  /// 上下：按控件树顺序走一格，**到头绕回**（与设置页内容区同一套逻辑：
-  /// 上下只在本卡片里循环，永远不会掉进/掉出别的控件）
-  void _moveVertical({required bool up}) {
-    final stops = _navStops();
-    if (stops.isEmpty) return;
-    final idx = _stopIndexOf(stops, FocusManager.instance.primaryFocus);
-    if (idx < 0) {
-      stops.first.requestFocus();
-      _ensureVisible();
-      return;
-    }
-    // Dart 的 % 对负数返回非负值，绕回不用额外判断
-    final next = (idx + (up ? -1 : 1)) % stops.length;
-    stops[next].requestFocus();
-    _ensureVisible();
+  // ==================== 行 / 列模型（与设置面板同一套规律）====================
+  //
+  // 界面上就是一行一行：
+  //   0 页签行：搜索电台 / 我的电台
+  //   1 搜索行：台名(地名)输入框 / 搜索图标 / 仅中国
+  //   2 地区行：北京 上海 广东 浙江 …
+  //   3 分类行：新闻 音乐 戏曲 …
+  //   4.. 结果列表逐行；末尾一条「回到顶部 · 回搜索电台」
+  //
+  // 规则（用户定稿）：上下只走一行，进哪一行就停在这一行上；左右在本行内
+  // 循环，搜索行最右再往右才换行到地区。
+  //
+  // 以前按「焦点树 + context 过滤」推位置：列表是懒构建的，视口外的行
+  // context 为 null 被当成不存在而跳过，于是按一下跨两行（用户实测：
+  // 中国之声 ↓ 跳过怀集音乐直接到国际新闻）。现在改成**行号驱动**——
+  // 行号直接由列表下标算出来，没构建的行先滚过去再聚焦，位置关系永远是
+  // 一行一格，与焦点树怎么建节点无关。
+
+  /// 列表上方的头部行数：搜索页签有 页签/搜索/地区/分类 四行，
+  /// 「我的电台」页签只有页签一行
+  int get _headRows => _tab == 0 ? 4 : 1;
+
+  int get _resultCount =>
+      _tab == 0 ? _results.length : RadioLibrary.items.length;
+
+  /// 列表末尾「回到顶部」的行号（只有搜索结果页签有这一行）
+  int get _topRowIndex => _headRows + _results.length;
+
+  int get _rowCount =>
+      _headRows + _resultCount + (_tab == 0 && _results.isNotEmpty ? 1 : 0);
+
+  /// 一次方向键只认一格：同一次按下被派发两遍时，第二遍直接丢掉。
+  /// 遥控器/接收机连发的两个 KeyDown 间隔实测 6~15ms，人手连按最快也在
+  /// 80ms 以上，90ms 挡得住重复、不误伤连按（按住走的是 KeyRepeatEvent，
+  /// 本函数只看 KeyDown，不会一顿一顿）。
+  int _lastMoveAt = 0;
+
+  bool _moveGate() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastMoveAt < 90) return false;
+    _lastMoveAt = now;
+    return true;
   }
 
-  /// 上下导航的停靠点（**按界面自上而下的显式顺序**，不再从焦点树里
-  /// 猜）。
-  ///
-  /// 以前用 traversalDescendants 再剔除嵌套节点：列表行内部的 InkWell /
-  /// 按钮会额外建焦点节点，剔除规则一漏就会出现「一行停两次、按一下跳
-  /// 两格」，顺序也跟眼睛看到的对不上。这里直接列出每一行，一行一个
-  /// 停靠点，上下必定只走一格；到底后 % 回到页签，绝不会被困住。
-  List<FocusNode> _navStops() {
-    // 页签行、搜索行都是「同一视觉行里的几个格子」：上下只停一次，
-    // 行内用左右切换。代表节点取当前所在的那一格（不在行上时取行首），
-    // 这样 [_stopIndexOf] 能把行内任何一格都归并到这一行上。
-    //
-    // 以前把「搜索按钮」「仅中国」也各算一个上下停靠点：它们在屏幕上和
-    // 输入框是同一行，遥控器往下按却在原地绕三下才下得去（用户实测
-    // 「往下按到搜索图标、再往下是仅中国、再下才是分类」）。现在与设置
-    // 面板同一套规律：一行一个停靠点。
-    final p = FocusManager.instance.primaryFocus;
-    final tabRep =
-        (p == _tabMineFocus || p == _tabSearchFocus) ? p! : _tabSearchFocus;
-    final barRep = switch (_barIndex) {
-      1 => _searchBtnFocus,
-      2 => _cnFocus,
-      _ => _queryFocus,
-    };
-    final stops = <FocusNode>[tabRep];
-    if (_tab == 0) {
-      stops.addAll([barRep, _regionRow, _tagRow]);
-      for (final s in _results) {
-        stops.add(_rowNodeFor('search:${s.id}'));
-      }
-      // 长列表末尾的出口：「回到顶部 · 回搜索电台」
-      if (_results.isNotEmpty) stops.add(_topRow);
-    } else {
-      for (final s in RadioLibrary.items) {
-        stops.add(_rowNodeFor('mine:${s.id}'));
-      }
-    }
-    // 还没挂到树上的节点（结果刚换、列表正在重建）跳过
-    return [for (final n in stops) if (n.context != null) n];
-  }
-
-  /// 当前焦点在停靠点里的位置：焦点常落在子节点上（输入框内的
-  /// EditableText、按钮内部的 InkWell），要沿祖先链找最近的停靠点，
-  /// 否则会被当成"不在列表里"而跳到头/尾——遥控器感觉就是乱跳
-  int _stopIndexOf(List<FocusNode> stops, FocusNode? from) {
-    var cur = from;
+  /// 当前焦点在第几行（沿祖先链找，落在输入法内部节点上也能认出来）
+  int _currentRow() {
+    FocusNode? cur = FocusManager.instance.primaryFocus;
     while (cur != null) {
-      final i = stops.indexOf(cur);
-      if (i >= 0) return i;
-      // 同一视觉行里的其它格子归到该行：页签两格、搜索条三格。
-      // 不归一的话，焦点落在「仅中国」上会被判成"不在停靠点里"，
-      // 一按上下就窜到页签（遥控器上就是"按一下跳回最上面"）
-      if (cur == _tabSearchFocus || cur == _tabMineFocus) {
-        final t = stops
-            .indexWhere((n) => n == _tabSearchFocus || n == _tabMineFocus);
-        if (t >= 0) return t;
-      }
+      if (cur == _tabSearchFocus || cur == _tabMineFocus) return 0;
       if (cur == _queryFocus || cur == _searchBtnFocus || cur == _cnFocus) {
-        final b = stops.indexWhere((n) =>
-            n == _queryFocus || n == _searchBtnFocus || n == _cnFocus);
-        if (b >= 0) return b;
+        return 1;
+      }
+      if (cur == _regionRow) return 2;
+      if (cur == _tagRow) return 3;
+      if (cur == _topRow) return _topRowIndex;
+      if (_tab == 0) {
+        for (var i = 0; i < _results.length; i++) {
+          if (cur == _rowNodeFor('search:${_results[i].id}')) {
+            return _headRows + i;
+          }
+        }
+      } else {
+        final items = RadioLibrary.items;
+        for (var i = 0; i < items.length; i++) {
+          if (cur == _rowNodeFor('mine:${items[i].id}')) {
+            return _headRows + i;
+          }
+        }
       }
       cur = cur.parent;
     }
     return -1;
+  }
+
+  /// 上下走一行（循环：到底回页签，到顶回末尾，永远不会卡住）
+  void _moveRow(int delta) {
+    if (_rowCount <= 0) return;
+    if (!_moveGate()) return;
+    final cur = _currentRow();
+    if (cur < 0) {
+      _focusRow(0);
+      return;
+    }
+    var next = (cur + delta) % _rowCount;
+    if (next < 0) next += _rowCount;
+    // 留痕：上下走位出问题时能直接从诊断日志看出「从哪行到哪行」，
+    // 不用再靠猜（用户之前报「两行两行地跳」，正是缺这条）
+    WebDiag.log('radio_row $cur->$next/$_rowCount');
+    _focusRow(next);
+  }
+
+  /// 左右：只在本行内走，到头循环；搜索行最右再往右才换行
+  void _moveCol(int dir) {
+    if (!_moveGate()) return;
+    final row = _currentRow();
+    if (row < 0) return;
+    if (row == 0) {
+      // 页签行：左右就是切页
+      _switchTab(_tab == 0 ? 1 : 0);
+      return;
+    }
+    if (_tab == 0 && row == 1) {
+      final cur = _barIndex < 0 ? 0 : _barIndex;
+      final next = cur + dir;
+      if (next > 2) {
+        // 「仅中国」再往右 = 换行，落到地区行（用户要的出口）
+        _regionRow.requestFocus();
+        _ensureVisible();
+        return;
+      }
+      if (next < 0) {
+        // 输入框再往左：行内循环到「仅中国」
+        _cnFocus.requestFocus();
+        return;
+      }
+      [_queryFocus, _searchBtnFocus, _cnFocus][next].requestFocus();
+      return;
+    }
+    if (_tab == 0 && row == 2) {
+      _moveInRow(region: true, delta: dir);
+      return;
+    }
+    if (_tab == 0 && row == 3) {
+      _moveInRow(region: false, delta: dir);
+      return;
+    }
+    if (_tab == 0 && row == _topRowIndex) {
+      if (dir > 0) _backToTop();
+      return;
+    }
+    // 结果列表任意一行按右：回列表最上边（长列表不用一路按 ↑）
+    if (dir > 0) _jumpListTop();
+  }
+
+  /// 把焦点放到第 [row] 行的默认格上
+  void _focusRow(int row) {
+    if (row <= 0) {
+      (_tab == 0 ? _tabSearchFocus : _tabMineFocus).requestFocus();
+      _ensureVisible();
+      return;
+    }
+    if (_tab == 0 && row == 1) {
+      // 进搜索行一律落输入框：用户要的是「哪边上按下都到台名/地名框」，
+      // 不是回到上次停留的搜索图标
+      _queryFocus.requestFocus();
+      _ensureVisible();
+      return;
+    }
+    if (_tab == 0 && row == 2) {
+      _regionRow.requestFocus();
+      _ensureVisible();
+      return;
+    }
+    if (_tab == 0 && row == 3) {
+      _tagRow.requestFocus();
+      _ensureVisible();
+      return;
+    }
+    if (_tab == 0 && row == _topRowIndex) {
+      _scrollThenFocus(null, () {
+        _topRow.requestFocus();
+        _ensureVisible();
+      });
+      return;
+    }
+    final i = row - _headRows;
+    if (i < 0 || i >= _resultCount) return;
+    final id = _tab == 0
+        ? 'search:${_results[i].id}'
+        : 'mine:${RadioLibrary.items[i].id}';
+    final node = _rowNodeFor(id);
+    if (node.context != null) {
+      node.requestFocus();
+      _ensureVisible();
+      return;
+    }
+    // 目标行还在视口外没构建：先滚过去，下一帧再聚焦
+    _scrollThenFocus(i, () {
+      if (node.context != null) {
+        node.requestFocus();
+        _ensureVisible();
+      }
+    });
+  }
+
+  /// 列表滚到第 [index] 行附近（null = 滚到底），下一帧执行 [then]
+  void _scrollThenFocus(int? index, VoidCallback then) {
+    final sc = _tab == 0 ? _resultScroll : _mineScroll;
+    if (sc.hasClients) {
+      final h = _measuredRowHeight();
+      final target = index == null
+          ? sc.position.maxScrollExtent
+          : (index * h - 2 * h).clamp(0.0, sc.position.maxScrollExtent);
+      sc.jumpTo(target);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      then();
+    });
+  }
+
+  /// 实测一行多高（含分隔线），取前几行里能量到的那个
+  double _measuredRowHeight() {
+    final ids = _tab == 0
+        ? [for (final s in _results.take(3)) 'search:${s.id}']
+        : [for (final s in RadioLibrary.items.take(3)) 'mine:${s.id}'];
+    for (final id in ids) {
+      final ro = _rowNodeFor(id).context?.findRenderObject();
+      if (ro is RenderBox && ro.size.height > 8) return ro.size.height + 1;
+    }
+    return 56;
   }
 
   /// 筛选行内左右移动光标（循环）。focus 在行节点上，具体 chip 靠下标记录，
@@ -473,15 +568,8 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   /// 只回列表顶、不跳回页签——用户按右是为了接着从上往下挑，
   /// 要回页签用 ↑ 或末尾那条「回到顶部」。
   void _jumpListTop() {
-    if (_tab == 0) {
-      if (_results.isEmpty) return;
-      _rowNodeFor('search:${_results.first.id}').requestFocus();
-    } else {
-      final items = RadioLibrary.items;
-      if (items.isEmpty) return;
-      _rowNodeFor('mine:${items.first.id}').requestFocus();
-    }
-    _ensureVisible();
+    if (_resultCount == 0) return;
+    _focusRow(_headRows);
     final scroller = _tab == 0 ? _resultScroll : _mineScroll;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -491,9 +579,8 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
 
   /// 「我的电台」页签上按 OK：焦点进卡片，落到第一台
   void _focusMineList() {
-    final items = RadioLibrary.items;
-    if (items.isEmpty) return;
-    _rowNodeFor('mine:${items.first.id}').requestFocus();
+    if (RadioLibrary.items.isEmpty) return;
+    _focusRow(_headRows);
   }
 
   void _ensureVisible() {
@@ -517,8 +604,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
 
   /// 打开时把焦点放到第一个可选项：遥控器进来就能直接上下选
   void _focusFirstReady() {
-    final stops = _navStops();
-    if (stops.isNotEmpty) stops.first.requestFocus();
+    (_tab == 0 ? _tabSearchFocus : _tabMineFocus).requestFocus();
   }
 
   Future<void> _search({String? tag}) async {
@@ -1163,10 +1249,8 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     return ListView.separated(
       controller: _resultScroll,
       padding: const EdgeInsets.symmetric(vertical: 4),
-      // 预构建视口外上下各一大段（约 10 行）。惰性列表只构建视口附近的
-      // 行，[_navStops] 会把「还没挂到树上」的行当成不存在而跳过——紧挨着
-      // 的下一行刚好在缓存边界外时，按一下 ↓ 就落到下下行，遥控器上就是
-      // 用户说的「两行两行地跳」。缓存给足，紧邻行必定已构建。
+      // 预构建视口外上下各一大段（约 10 行）：上下移动时紧邻的那一行
+      // 必定已经在树上，_focusRow 不用先滚动就能直接聚焦，手感不卡。
       cacheExtent: 800,
       // 多一行「回到顶部」：长列表按到底后，遥控器没有别的出口回得去
       // （用户实测：按到底再往回返，返不回最顶上）
