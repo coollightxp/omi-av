@@ -189,15 +189,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   int _tpMin = 30;
   int _tpCol = 0; // 0=时 1=分 2=按钮行
   int _tpBtn = 0; // 0=确定 1=取消
-  StateSetter? _tpRefresh;
-  BuildContext? _tpDialogCtx;
 
   // 临时诊断（v2.1.37，确认后删）：两条按键通道各收到多少次、最近一个是
   // 什么，直接画在卡片底部。用户截一张图就能判断「键到底进没进程序」，
   // 不用再一轮一轮猜。
-  int _dbgHook = 0;
-  int _dbgKey = 0;
-  String _dbgLast = '无';
 
   // 两个侧边面板的状态句柄：遥控器/键盘导航由本页统一分发
   // （HardwareKeyboard 与 Windows 低级钩子走同一入口）
@@ -1139,7 +1134,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         // 遥控器友好：AlertDialog 用 StatefulBuilder 包裹，按钮高亮
         // 随 _exitDialogFocusIndex 变化；遥控器 ←/→ 在 _handleExitDialogKey
         // 里改字段后调用 _exitDialogRefresh 刷新本对话框
-        return StatefulBuilder(
+        //
+        // canPop:false：安卓系统返回不再由路由自己弹掉，先交回卡片状态机。
+        // 以前系统把路由弹掉、_exitDialogOpen 还是 true，页面以为卡片还在：
+        // 返回键像「没反应」、焦点跳到第一个按钮上，要再等一次才关得掉。
+        return PopScope(
+          canPop: false,
+          onPopInvoked: (didPop) {
+            if (didPop) return;
+            if (_exitDialogOpen) {
+              _handleExitDialogKey(LogicalKeyboardKey.escape, true, false);
+            }
+          },
+          child: StatefulBuilder(
           builder: (ctx, setDialogState) {
             _exitDialogRefresh = setDialogState;
             // 自绘退出面板：不显示程序图标，内容全部居中，
@@ -1210,6 +1217,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
               ),
             );
           },
+          ),
         );
       },
     );
@@ -1966,6 +1974,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         ? '${_sleepSetAt == null ? '剩余' : '${sleepHhmm(_sleepSetAt!)} 关闭 · 剩余'}'
             ' ${sleepFmtRemain(_sleepRemain!)}'
         : null;
+    // 时间选择不再用独立 showDialog 叠在卡片上（旧版两层路由叠着、返回时
+    // 两层一起关），改为与设置面板进下一级同构：**同一个窗口内切子页**。
+    // 打开/关闭靠 _sleepRefresh 重建本 builder，物理上不可能出现叠层
+    if (_timePickOpen) {
+      return buildRemoteTimePickerCard(
+        title: '定时关闭时间',
+        hour: _tpHour,
+        minute: _tpMin,
+        col: _tpCol,
+        btn: _tpBtn,
+        onTap: _onTimePickTap,
+      );
+    }
     return buildSleepTimerCard(
       rows: _sleepRows(),
       row: _sleepRow,
@@ -1973,7 +1994,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       remainText: remainText,
       atText: _sleepSetAt != null ? sleepHhmm(_sleepSetAt!) : '23:30',
       onTap: _onSleepChipTap,
-      debugText: '按键诊断：钩子 $_dbgHook · 键盘 $_dbgKey · 最近 $_dbgLast',
     );
   }
 
@@ -2011,10 +2031,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _popSleepCard(
             SleepPick(DateTime.now().add(Duration(minutes: m)), _sleepAction));
       case 2:
-        unawaited(_openTimePicker(TimeOfDay(
+        _openTimePicker(TimeOfDay(
           hour: _sleepSetAt?.hour ?? 23,
           minute: _sleepSetAt?.minute ?? 30,
-        )));
+        ));
       case 3:
         _popSleepCard(SleepPick(null, _sleepAction));
     }
@@ -2074,10 +2094,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                 DateTime.now().add(Duration(minutes: m)), _sleepAction));
           case 2:
             // 进时间选择器：不关本卡片，选完一起生效
-            unawaited(_openTimePicker(TimeOfDay(
+            _openTimePicker(TimeOfDay(
               hour: _sleepSetAt?.hour ?? 23,
               minute: _sleepSetAt?.minute ?? 30,
-            )));
+            ));
           case 3:
             _popSleepCard(SleepPick(null, _sleepAction));
           default:
@@ -2128,42 +2148,23 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
 
-  /// 打开时间选择卡片（纯视觉，按键在 _handleTimePickKey）。
-  /// 选完确定时：连同定时关闭卡片一起生效并关闭。
-  Future<void> _openTimePicker(TimeOfDay initial) async {
-    if (_timePickOpen) return;
+  /// 打开时间选择「子页」（同一个定时卡片窗口内切换，不开新路由）。
+  /// 选完确定时：连同定时关闭卡片一起生效并关闭（见 _popTimePicker）。
+  void _openTimePicker(TimeOfDay initial) {
+    if (!_sleepCardOpen || _timePickOpen) return;
     _tpHour = initial.hour;
     _tpMin = initial.minute;
     _tpCol = 0;
     _tpBtn = 0;
     _timePickOpen = true;
-    _syncRemoteCapture();
-    TimeOfDay? result;
-    try {
-      result = await showDialog<TimeOfDay>(
-        context: context,
-        barrierColor: AppColors.scrim,
-        builder: (_) => StatefulBuilder(
-          builder: (ctx, setD) {
-            _tpRefresh = setD;
-            _tpDialogCtx = ctx;
-            return buildRemoteTimePickerCard(
-              title: '定时关闭时间',
-              hour: _tpHour,
-              minute: _tpMin,
-              col: _tpCol,
-              btn: _tpBtn,
-              onTap: _onTimePickTap,
-            );
-          },
-        ),
-      );
-    } finally {
-      _timePickOpen = false;
-      _tpRefresh = null;
-      _tpDialogCtx = null;
-      _syncRemoteCapture();
-    }
+    _sleepRefresh?.call(() {});
+  }
+
+  /// 关闭时间选择子页。[result] 非空 = 确定：连同定时卡片一起生效并关闭；
+  /// 空 = 取消：只切回定时卡片主页。
+  void _popTimePicker(TimeOfDay? result) {
+    _timePickOpen = false;
+    _sleepRefresh?.call(() {});
     if (result != null && _sleepCardOpen) {
       _popSleepCard(
           SleepPick(nextSleepAt(result.hour, result.minute), _sleepAction));
@@ -2189,7 +2190,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             _tpMin = (_tpMin + (up ? 1 : -1) + 60) % 60;
           }
         }
-        _tpRefresh?.call(() {});
+        _sleepRefresh?.call(() {});
         return true;
       case 'left':
         if (_tpCol == 2) {
@@ -2197,7 +2198,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else if (_tpCol == 1) {
           _tpCol = 0;
         }
-        _tpRefresh?.call(() {});
+        _sleepRefresh?.call(() {});
         return true;
       case 'right':
         if (_tpCol == 0) {
@@ -2208,21 +2209,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else {
           _tpBtn = 1;
         }
-        _tpRefresh?.call(() {});
+        _sleepRefresh?.call(() {});
         return true;
       case 'ok':
-        final ctx = _tpDialogCtx;
         if (_tpCol == 2 && _tpBtn == 1) {
-          if (ctx != null && ctx.mounted) Navigator.of(ctx).pop(); // 取消
-        } else if (ctx != null && ctx.mounted) {
-          Navigator.of(ctx).pop(TimeOfDay(hour: _tpHour, minute: _tpMin));
+          _popTimePicker(null); // 取消：只切回定时卡片
+        } else {
+          _popTimePicker(TimeOfDay(hour: _tpHour, minute: _tpMin));
         }
         return true;
       case 'back':
       case 'esc':
       case 'menu':
-        final ctx = _tpDialogCtx;
-        if (ctx != null && ctx.mounted) Navigator.of(ctx).pop();
+        _popTimePicker(null); // 只切回定时卡片，不再连底层一起关
         return true;
       default:
         return true; // 其余键吞掉
@@ -2250,19 +2249,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'minute':
         _tpCol = 1;
       case 'ok':
-        final ctx = _tpDialogCtx;
-        if (ctx != null && ctx.mounted) {
-          Navigator.of(ctx).pop(TimeOfDay(hour: _tpHour, minute: _tpMin));
-        }
+        _popTimePicker(TimeOfDay(hour: _tpHour, minute: _tpMin));
         return;
       case 'cancel':
-        final ctx = _tpDialogCtx;
-        if (ctx != null && ctx.mounted) Navigator.of(ctx).pop();
+        _popTimePicker(null);
         return;
       default:
         return;
     }
-    _tpRefresh?.call(() {});
+    _sleepRefresh?.call(() {});
   }
 
   /// 硬件键盘路径：翻译成语义动作后交给 _handleTimePickAction
@@ -2300,11 +2295,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final k = event.logicalKey;
     final isDown = event is KeyDownEvent;
     final isUp = event is KeyUpEvent;
-    _dbgKey++;
-    _dbgLast = '键盘 ${k.debugName ?? '?'}'
-        '${isDown ? '↓' : isUp ? '↑' : '↻'}';
-    if (_sleepCardOpen) _sleepRefresh?.call(() {});
-    if (_timePickOpen) _tpRefresh?.call(() {});
 
     // 键盘/遥控器一有动作就隐藏鼠标指针（鼠标一移动原生侧自动恢复）
     if (isDown) _hidePointerForRemote();
@@ -3456,10 +3446,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// isDown=true 按下边沿、false 抬起边沿，与 Flutter 路径共用
   /// 同一套短按/长按/面板导航逻辑。
   void _onNativeAction(String action, bool isDown) {
-    _dbgHook++;
-    _dbgLast = '钩子 $action${isDown ? '↓' : '↑'}';
-    if (_sleepCardOpen) _sleepRefresh?.call(() {});
-    if (_timePickOpen) _tpRefresh?.call(() {});
     if (!mounted) return;
     if (isDown) _hidePointerForRemote();
     if (isDown) {

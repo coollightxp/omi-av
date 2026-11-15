@@ -913,6 +913,10 @@ class _TabBtn extends StatelessWidget {
     final t = AppTypography.of(context);
     return InkWell(
       onTap: onTap,
+      // 不参与焦点遍历：遥控器上下由 _kbChannelIndex 驱动并自绘白框，
+      // 若控件自己也吃焦点，焦点框(灰)与选中框(蓝)会各走各的，
+      // 表现为按一下跳两行、播的台和选框对不上
+      canRequestFocus: false,
       borderRadius: BorderRadius.circular(9),
       child: Container(
         height: 38,
@@ -983,6 +987,8 @@ class _CategoryTile extends StatelessWidget {
     final t = AppTypography.of(context);
     return InkWell(
       onTap: onTap,
+      // 同频道行：焦点只由 handleRemoteKey 的索引驱动，控件不参与遍历
+      canRequestFocus: false,
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 8),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
@@ -1077,6 +1083,8 @@ class _ChannelTile extends StatelessWidget {
     final t = AppTypography.of(context);
     return InkWell(
       onTap: onTap,
+      // 同频道行：焦点只由 handleRemoteKey 的索引驱动，控件不参与遍历
+      canRequestFocus: false,
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 8),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
