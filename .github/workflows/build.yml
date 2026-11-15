@@ -954,6 +954,945 @@ jobs:
             echo "upload retry $i / 5"; sleep 15
           done
 
+  build-android-x64:
+    name: Build Android APK (x86_64)
+    # 通知栏/锁屏 MediaService 为 CI 注入的 Kotlin，从未被真正编译过——
+    # 临时放开 push 构建以便验证并产出可安装 APK；验证通过后可改回省额度
+    if: github.event_name != 'push' || true
+    runs-on: ubuntu-latest
+    env:
+      OMI_KEYSTORE: /home/runner/.android/omi.keystore
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Android project files
+        run: flutter create . --platforms=android --project-name omi
+
+      - name: Apply app icon (视频取景框)
+        run: |
+          cp branding/android/mipmap-mdpi/ic_launcher.png    android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          cp branding/android/mipmap-hdpi/ic_launcher.png    android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          cp branding/android/mipmap-xhdpi/ic_launcher.png   android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          cp branding/android/mipmap-xxhdpi/ic_launcher.png  android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          cp branding/android/mipmap-xxxhdpi/ic_launcher.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+
+      - name: Patch Android config (cleartext HTTP / cutout fullscreen / PiP / notification)
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          # IPTV 源多为 http:// 明文地址，必须允许明文流量
+          sed -i 's|<application|<application android:usesCleartextTraffic="true"|' $MANIFEST
+          # 单实例：从图标再次启动时回到已有任务而不是新开进程
+          sed -i 's|<activity |<activity android:launchMode="singleTask" |' $MANIFEST
+          # 桌面图标/应用列表显示名：欧米视听（flutter create 默认用工程名 omi）
+          sed -i 's|android:label="omi"|android:label="欧米视听"|' $MANIFEST
+          grep -q 'android:label="欧米视听"' $MANIFEST \
+            || echo "::warning::Android app label patch failed, launcher name may stay omi"
+          # 显式声明网络权限（video_player 会合并，但显式更稳）
+          grep -q "android.permission.INTERNET" $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' $MANIFEST
+          # 画中画：给 MainActivity 声明 supportsPictureInPicture
+          # （默认 manifest 的 <activity 后面直接换行，不能用 '<activity ' 匹配；
+          #  configChanges 系统已自带，重复添加会导致 aapt 报属性冲突）
+          grep -q "supportsPictureInPicture" $MANIFEST \
+            || sed -i 's#android:name=".MainActivity"#android:name=".MainActivity"\n            android:supportsPictureInPicture="true"#' $MANIFEST
+          grep -q "supportsPictureInPicture" $MANIFEST \
+            || echo "::warning::PictureInPicture manifest patch failed"
+          # 画中画 + 前台服务 + 通知权限
+          grep -q "FOREGROUND_SERVICE_MEDIA_PLAYBACK" $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application|' $MANIFEST
+          # 通知栏/锁屏卡片的前台服务必须在 manifest 里注册，否则
+          # startForegroundService 直接抛「not found」——表现就是电台播放
+          # 完全没有通知栏/锁屏卡片（v2.0.4 的漏项）
+          grep -q 'android:name=".MediaService"' $MANIFEST || sed -i 's|</application>|<service android:name=".MediaService"\n            android:exported="false"\n            android:foregroundServiceType="mediaPlayback" />\n    </application>|' $MANIFEST
+          grep -q 'android:name=".MediaService"' $MANIFEST \
+            || echo "::warning::MediaService manifest patch failed"
+          # TV 盒子可装可用：不强制触摸屏；声明 leanback 非必需          grep -q "android.software.leanback" $MANIFEST || sed -i 's|<application|<uses-feature android:name="android.hardware.touchscreen" android:required="false" />\n    <uses-feature android:name="android.software.leanback" android:required="false" />\n    <uses-feature android:name="android.hardware.type.television" android:required="false" />\n    <application|' $MANIFEST
+          # 挖孔/刘海屏全屏不留黑边
+          mkdir -p android/app/src/main/res/values-v28
+          cat > android/app/src/main/res/values-v28/styles.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+                  <item name="android:windowBackground">@drawable/launch_background</item>
+                  <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+              </style>
+              <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+                  <item name="android:windowBackground">?android:colorBackground</item>
+                  <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+              </style>
+          </resources>
+          XML
+
+          # 画中画原生桥：直接覆盖 flutter create 生成的 MainActivity.kt。
+          # 该文件默认只有包名 + 一行 class，整体重写最稳（正则 patch
+          # Kotlin 源码在 CI 上不可靠）。包名从原文件读取，保持与工程一致。
+          ACTIVITY=$(find android/app/src/main -name "MainActivity.kt" | head -n1)
+          if [ -n "$ACTIVITY" ]; then
+            PKG=$(grep -m1 '^package ' "$ACTIVITY" | sed 's/package //' | tr -d '\r')
+            cat > "$ACTIVITY" <<KOTLIN
+          package $PKG
+
+          import android.Manifest
+          import android.app.PictureInPictureParams
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.content.res.Configuration
+          import android.os.Build
+          import android.provider.Settings
+          import android.util.Rational
+          import android.view.View
+          import androidx.core.app.NotificationManagerCompat
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private val channelName = "omi/pip"
+              // Dart 侧通道（configureFlutterEngine 里赋值）：返回键上报要用
+              private var ch: MethodChannel? = null
+              // Dart 侧注册好返回回调之前，返回键仍走系统默认通路
+              private var backReady = false
+
+              // 外接遥控器/键盘时，安卓会给拿到焦点的 View 画一圈系统焦点
+              // 高亮；FlutterView 全屏，按一下 OK 整个画面就被绿框包住
+              // （2026-11-14 实测）。Flutter 首帧显示后按官方常量找到
+              // FlutterView，关掉它的系统焦点高亮，焦点提示交给 Flutter
+              // 内部（面板行高亮等）负责
+              // 遥控器「静音」键：先让 Flutter 收到（播放器自己静音，
+              // UI 会显示静音图标），然后 return true 阻止 AudioService
+              // 再静音系统。否则一次按键两处静音，取消时只解除一处
+              override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+                  // 首键保险：FlutterView 没拿焦点时先把焦点交给它。安卓
+                  // 冷启动后窗口焦点常停在 DecorView / 系统启动层上，
+                  // 遥控器/键盘的第一下被拿去「移焦」，按键本身进不了
+                  // Flutter——用户实测「开机第一下 OK 没反应，按过一下
+                  // 之后返回键才跟着正常」
+                  ensureFlutterFocus()
+                  if (event.keyCode == android.view.KeyEvent.KEYCODE_VOLUME_MUTE) {
+                      super.dispatchKeyEvent(event)
+                      return true
+                  }
+                  // 返回键：直接上报 Dart，由播放页状态机决定关哪一层
+                  // （抽屉/EPG/底栏/设置/定时/退出卡）还是弹退出卡。
+                  // 以前靠 Flutter 的 popRoute → PopScope.onPopInvoked，
+                  // 部分 ROM 冷启动后不回调，用户看到「按多少次返回都不
+                  // 出退出卡」；这里绕开路由，键一定进 Dart
+                  if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+                      if (!backReady) return super.dispatchKeyEvent(event)
+                      if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+                          ch?.invokeMethod("onBackKey", null)
+                      }
+                      // 抬起也吃掉：否则 ACTION_UP 会再触发一次默认返回
+                      return true
+                  }
+                  return super.dispatchKeyEvent(event)
+              }
+
+              override fun onFlutterUiDisplayed() {
+                  super.onFlutterUiDisplayed()
+                  val v = findViewById<View>(FlutterActivity.FLUTTER_VIEW_ID)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      v.defaultFocusHighlightEnabled = false
+                  }
+                  // 冷启动后 FlutterView 不一定拿到窗口焦点：遥控器/键盘的
+                  // 「第一下」被系统用来把焦点移过去，按键本身不进 Flutter
+                  // （实测「进程序后按一下 OK 没反应，第二下才弹左侧面板」）。
+                  // 首帧显示后主动抢一次焦点，第一下按键就生效
+                  ensureFlutterFocus()
+              }
+
+              // 把输入焦点钉在 FlutterView 上（重复调用安全）
+              private fun ensureFlutterFocus() {
+                  try {
+                      val v = findViewById<View>(FlutterActivity.FLUTTER_VIEW_ID)
+                      if (v == null) return
+                      if (v.hasFocus()) return
+                      v.isFocusable = true
+                      v.isFocusableInTouchMode = true
+                      v.requestFocus()
+                  } catch (e: Exception) {}
+              }
+
+              // 窗口每次拿到焦点（启动、从后台回来、权限框关闭）都再钉一次
+              override fun onWindowFocusChanged(hasFocus: Boolean) {
+                  super.onWindowFocusChanged(hasFocus)
+                  if (hasFocus) ensureFlutterFocus()
+              }
+              // 切后台自动画中画：Dart 侧播放状态变化时同步（见 setAutoPip）
+              private var autoPipArmed = false
+              // requestNotif 的系统弹窗是异步的：把 result 挂起，等用户
+              // 在权限框上点完再回给 Dart（否则 Dart 立刻查一定还是 false）
+              private var notifResult: MethodChannel.Result? = null
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+                  this.ch = ch
+                  // 通知栏/锁屏卡片（MediaService）经同一通道向 Dart 发按钮命令
+                  MediaService.dart = ch
+                  ch.setMethodCallHandler { call, result ->
+                          when (call.method) {
+                              // Dart 已装好返回回调：此后返回键由 Dart 接管
+                              "backReady" -> {
+                                  backReady = true
+                                  result.success(true)
+                              }
+                              "enter" -> result.success(enterPip())
+                              "exit" -> result.success(true)
+                              "isTv" -> result.success(isTv())
+                              // 通知权限 + 本应用「电台播放」渠道都要开着：
+                              // 渠道被用户手动关掉时 areNotificationsEnabled()
+                              // 仍是 true，但卡片一样不出现（用户实测：
+                              // 电台播着，通知栏什么都没有）
+                              "notifGranted" -> {
+                                  var ok = NotificationManagerCompat.from(this)
+                                      .areNotificationsEnabled()
+                                  if (ok && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                      try {
+                                          val nm = getSystemService(NOTIFICATION_SERVICE)
+                                              as android.app.NotificationManager
+                                          val c = nm.getNotificationChannel(MediaService.CH_ID)
+                                          if (c != null && c.importance ==
+                                              android.app.NotificationManager.IMPORTANCE_NONE) {
+                                              ok = false
+                                          }
+                                      } catch (e: Exception) {}
+                                  }
+                                  result.success(ok)
+                              }
+                              "requestNotif" -> askNotifPermission(result)
+                              "openNotifSettings" -> result.success(openNotifSettings())
+                              // 听电视：整任务退到后台但不杀进程，音频继续
+                              "background" -> result.success(moveTaskToBack(true))
+                              "setAutoPip" -> {
+                                  autoPipArmed = call.argument<Boolean>("armed") == true
+                                  setAutoEnterEnabled(autoPipArmed)
+                                  result.success(true)
+                              }
+                              "audioUpdate" -> {
+                                  MediaService.update(
+                                      this,
+                                      call.argument<String>("name") ?: "",
+                                      call.argument<String>("program") ?: "",
+                                      call.argument<Boolean>("playing") == true,
+                                      call.argument<String>("logo") ?: "")
+                                  result.success(true)
+                              }
+                              "audioStop" -> {
+                                  MediaService.stop(this)
+                                  result.success(true)
+                              }
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+
+              // Android 13+：POST_NOTIFICATIONS 是运行时权限，不申请的话
+              // 前台服务的卡片会被系统吞掉（电台看不到通知栏/锁屏控件）
+              /** 申请通知权限，并把「用户到底点没点允许」回给 Dart。
+               *  系统窗只在首次真正弹出；用户拒绝过之后这里会立刻回调 false。 */
+              private fun askNotifPermission(result: MethodChannel.Result) {
+                  if (Build.VERSION.SDK_INT < 33 || isTv()) {
+                      result.success(
+                          NotificationManagerCompat.from(this).areNotificationsEnabled())
+                      return
+                  }
+                  if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                          == PackageManager.PERMISSION_GRANTED) {
+                      result.success(true)
+                      return
+                  }
+                  try {
+                      notifResult = result
+                      requestPermissions(
+                          arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+                  } catch (e: Exception) {
+                      notifResult = null
+                      result.success(false)
+                  }
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int,
+                  permissions: Array<out String>,
+                  grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode != 1001) return
+                  val ok = grantResults.isNotEmpty() &&
+                      grantResults[0] == PackageManager.PERMISSION_GRANTED
+                  notifResult?.success(ok)
+                  notifResult = null
+              }
+
+              private fun openNotifSettings(): Boolean {                  return try {
+                      val i = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                      i.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(i)
+                      true
+                  } catch (e: Exception) {
+                      try {
+                          val j = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                          j.setData(android.net.Uri.fromParts("package", packageName, null))
+                          j.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                          startActivity(j)
+                          true
+                      } catch (e2: Exception) { false }
+                  }
+              }
+
+              private fun enterPip(): Boolean {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+                  if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return false
+                  return try {
+                      val params = PictureInPictureParams.Builder()
+                          .setAspectRatio(Rational(16, 9))
+                          .build()
+                      enterPictureInPictureMode(params)
+                  } catch (e: Exception) {
+                      false
+                  }
+              }
+
+              // Android 12+：armed 时按 Home/切任务由系统自动进入画中画
+              private fun setAutoEnterEnabled(armed: Boolean) {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      try {
+                          val params = PictureInPictureParams.Builder()
+                              .setAspectRatio(Rational(16, 9))
+                              .setAutoEnterEnabled(armed)
+                              .build()
+                          setPictureInPictureParams(params)
+                      } catch (e: Exception) {}
+                  }
+              }
+
+              // Android 8–11：没有 autoEnter，切后台时在 onUserLeaveHint 手动进
+              override fun onUserLeaveHint() {
+                  if (autoPipArmed &&
+                      Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                      Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                      try { enterPictureInPictureMode() } catch (e: Exception) {}
+                  }
+                  super.onUserLeaveHint()
+              }
+
+              // 是否电视/盒子：决定「小窗播放」与「信息栏/锁屏卡片」是否启用。
+              // 除了标准的 Leanback / TELEVISION 特性，再补两条国产盒子上
+              // 常见的判定——很多盒子（当贝、部分定制系统）既没声明 leanback，
+              // 也没声明 television，只靠前两条会被当成手机，于是给遥控器
+              // 用户弹出一堆没用的通知栏按钮：
+              //   · UiModeManager 的当前模式是 TELEVISION
+              //   · 既没有触摸屏、也没有通话能力（手机/平板必有一项）
+              private fun isTv(): Boolean {
+                  val pm = packageManager
+                  if (pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+                      pm.hasSystemFeature(PackageManager.FEATURE_TELEVISION) ||
+                      pm.hasSystemFeature("android.hardware.type.television")) {
+                      return true
+                  }
+                  try {
+                      val um = getSystemService(UI_MODE_SERVICE) as android.app.UiModeManager
+                      if (um.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION) return true
+                  } catch (e: Exception) {}
+                  val noTouch = !pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+                  val noTelephony = !pm.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
+                  return noTouch && noTelephony
+              }
+
+              override fun onPictureInPictureModeChanged(
+                  isInPictureInPictureMode: Boolean,
+                  newConfig: Configuration
+              ) {
+                  super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+                  flutterEngine?.dartExecutor?.binaryMessenger?.let {
+                      MethodChannel(it, channelName).invokeMethod("pip", isInPictureInPictureMode)
+                  }
+              }
+          }
+          KOTLIN
+            echo "MainActivity patched: $ACTIVITY (package=$PKG)"
+          else
+            echo "::warning::MainActivity.kt not found, PiP entry will be unavailable"
+          fi
+
+          # 通知栏/锁屏音频卡片（MediaService）：前台服务持有 MediaSession，
+          # 下拉栏与锁屏显示 台标+台名+曲目+按钮（上一台/播放暂停/下一台/关闭），
+          # 按钮命令经 omi/pip 通道回 Dart。LXFM 同款电台体验。
+          if [ -n "$ACTIVITY" ]; then
+            ACTDIR=$(dirname "$ACTIVITY")
+            cat > "$ACTDIR/MediaService.kt" <<KOTLIN
+          package $PKG
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.os.Build
+          import android.os.IBinder
+          import android.os.PowerManager
+          import android.os.SystemClock
+          import android.support.v4.media.MediaMetadataCompat
+          import android.support.v4.media.session.MediaSessionCompat
+          import android.support.v4.media.session.PlaybackStateCompat
+          import androidx.core.app.NotificationCompat
+          import androidx.media.app.NotificationCompat as MediaNotificationCompat
+          import io.flutter.plugin.common.MethodChannel
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          /**
+           * 电台通知栏/锁屏卡片（前台服务 + MediaSession）。
+           *
+           * 与早期实现的四处关键差异（对照 OMTV 的 AudioPlaybackService 逐条搬过来）：
+           *  1. 服务已在前台时用 startService，而不是每次 startForegroundService。
+           *     Android 12+ 在后台硬起前台服务会抛 ForegroundServiceStartNotAllowed，
+           *     异常被吞掉后卡片就静默消失、台名也不刷新。
+           *  2. 通知按钮走广播（getBroadcast + 动态注册的 receiver），不走
+           *     PendingIntent.getService——后台 startService 有硬限制，命令会丢。
+           *  3. 持一把 PARTIAL_WAKE_LOCK：前台服务不阻止 CPU 休眠，息屏后
+           *     Dart 的定时器与网络回调会停，表现为「切了台不出声」。
+           *  4. session.setSessionActivity：没有它，部分系统锁屏卡片点了没反应，
+           *     甚至整条媒体控制条都不显示。
+           */
+          class MediaService : Service() {
+              companion object {
+                  const val NOTIF_ID = 20260101
+                  const val CH_ID = "omi_audio"
+
+                  // 通知按钮命令：全部走广播（见 broadcastPi）
+                  const val ACT_PREV = "omi.audio.CMD_PREV"
+                  const val ACT_NEXT = "omi.audio.CMD_NEXT"
+                  const val ACT_PLAY_PAUSE = "omi.audio.CMD_PLAY_PAUSE"
+                  const val ACT_STOP = "omi.audio.CMD_STOP"
+
+                  // Dart 命令通道（MainActivity.configureFlutterEngine 时赋值）
+                  @Volatile var dart: MethodChannel? = null
+                  @Volatile private var live: MediaService? = null
+
+                  /** 服务是否已经是「前台服务」。
+                   *  是 → 用 startService（前台状态豁免后台启动限制）；
+                   *  否 → 才用 startForegroundService。 */
+                  @Volatile private var running = false
+
+                  fun update(ctx: Context, name: String, program: String,
+                             playing: Boolean, logoUrl: String): Boolean {
+                      val i = Intent(ctx, MediaService::class.java)
+                          .setAction("omi.audio.UPDATE")
+                          .putExtra("name", name)
+                          .putExtra("program", program)
+                          .putExtra("playing", playing)
+                          .putExtra("logo", logoUrl)
+                      return try {
+                          if (running) {
+                              ctx.startService(i)
+                          } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              ctx.startForegroundService(i)
+                          } else {
+                              ctx.startService(i)
+                          }
+                          true
+                      } catch (e: Exception) {
+                          // 后台限制拒绝前台服务时退回普通 startService：
+                          // 服务还活着就照样能刷卡片
+                          try {
+                              ctx.startService(i)
+                              true
+                          } catch (e2: Exception) {
+                              false
+                          }
+                      }
+                  }
+
+                  fun stop(ctx: Context) {
+                      // 服务没活着 = 本来就没有卡片，直接返回（避免为了关卡片又把
+                      // 服务拉起来、新实例再激活一次 MediaSession）
+                      val s = live ?: return
+                      s.stopCard()
+                  }
+
+                  @Volatile private var lastCmd = ""
+                  @Volatile private var lastCmdAt = 0L
+
+                  /** 通知按钮 → Dart。
+                   *  去重 400ms：有的 ROM 点一次按钮会同时走「广播」和
+                   *  MediaSession 两条回调，同一条 next 派发两次 → Dart 侧
+                   *  并发换两次台，最快时能留下两个内核同时出声。 */
+                  private fun send(cmd: String) {
+                      val now = SystemClock.elapsedRealtime()
+                      if (cmd == lastCmd && now - lastCmdAt < 400) return
+                      lastCmd = cmd
+                      lastCmdAt = now
+                      try { dart?.invokeMethod("audio", cmd) } catch (e: Exception) {}
+                  }
+              }
+
+              private var session: MediaSessionCompat? = null
+              private var wakeLock: PowerManager.WakeLock? = null
+              private var logoBitmap: Bitmap? = null
+              private var logoLoaded = ""
+
+              /** 通知按钮 → 命令广播的接收器（onCreate 注册，onDestroy 注销） */
+              private val actionReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      when (intent?.action) {
+                          ACT_PREV -> send("prev")
+                          ACT_NEXT -> send("next")
+                          ACT_PLAY_PAUSE -> send("playpause")
+                          ACT_STOP -> {
+                              send("stop")
+                              stopCard()
+                          }
+                      }
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  live = this
+                  running = true
+                  createChannel()
+                  // 退后台/息屏后要一直出声：前台服务本身不阻止 CPU 休眠，
+                  // 必须自己持一把 PARTIAL_WAKE_LOCK（6 小时自动释放，防止忘记）
+                  try {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "omi:audio")
+                      wakeLock?.setReferenceCounted(false)
+                      wakeLock?.acquire(6 * 60 * 60 * 1000L)
+                  } catch (e: Exception) {}
+                  val s = MediaSessionCompat(this, "omi")
+                  s.setCallback(object : MediaSessionCompat.Callback() {
+                      override fun onPlay() { send("playpause") }
+                      override fun onPause() { send("playpause") }
+                      override fun onSkipToNext() { send("next") }
+                      override fun onSkipToPrevious() { send("prev") }
+                      override fun onStop() { send("stop") }
+                  })
+                  // 锁屏卡片点两下要能拉回 App（部分系统缺这个就不显示控制条）
+                  try { s.setSessionActivity(openPi()) } catch (e: Exception) {}
+                  s.isActive = true
+                  session = s
+                  val f = IntentFilter().apply {
+                      addAction(ACT_PREV)
+                      addAction(ACT_NEXT)
+                      addAction(ACT_PLAY_PAUSE)
+                      addAction(ACT_STOP)
+                  }
+                  try {
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          registerReceiver(actionReceiver, f, Context.RECEIVER_NOT_EXPORTED)
+                      } else {
+                          registerReceiver(actionReceiver, f)
+                      }
+                  } catch (e: Exception) {}
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  when (intent?.action) {
+                      "omi.audio.UPDATE" -> showCard(
+                          intent.getStringExtra("name") ?: "",
+                          intent.getStringExtra("program") ?: "",
+                          intent.getBooleanExtra("playing", true),
+                          intent.getStringExtra("logo") ?: "")
+                      "omi.audio.STOP" -> stopCard()
+                      // 兼容旧路径：命令直接当 action 起服务
+                      ACT_PREV, "prev" -> send("prev")
+                      ACT_NEXT, "next" -> send("next")
+                      ACT_PLAY_PAUSE, "playpause" -> send("playpause")
+                      ACT_STOP, "stop" -> {
+                          send("stop")
+                          stopCard()
+                      }
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun createChannel() {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+                  try {
+                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                      // 每次都写一遍：老版本建过的同 id 渠道也能补上锁屏可见配置。
+                      // 用户手动关掉过渠道时系统不会允许改回来，Dart 侧用
+                      // notifGranted 检查（含渠道 importance）并引导去设置
+                      nm.createNotificationChannel(
+                          NotificationChannel(CH_ID, "电台播放",
+                              NotificationManager.IMPORTANCE_LOW).apply {
+                              description = "电台后台播放控制"
+                              setShowBadge(false)
+                              lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                              setSound(null, null)
+                              enableVibration(false)
+                          })
+                  } catch (e: Exception) {}
+              }
+
+              private fun showCard(name: String, program: String, playing: Boolean, logoUrl: String) {
+                  val s = session ?: return
+                  if (logoUrl.isNotEmpty() && logoUrl != logoLoaded) {
+                      // 先用现有封面立即出卡片（保证 startForeground 5 秒时限），
+                      // 台标下载完成后再刷一次
+                      post(s, name, program, playing, logoBitmap)
+                      Thread {
+                          val b = fetchBitmap(logoUrl)
+                          if (b != null) {
+                              logoBitmap = b
+                              logoLoaded = logoUrl
+                              post(s, name, program, playing, b)
+                          }
+                      }.start()
+                  } else {
+                      post(s, name, program, playing, logoBitmap)
+                  }
+              }
+
+              private fun post(s: MediaSessionCompat, name: String, program: String,
+                               playing: Boolean, logo: Bitmap?) {
+                  val md = MediaMetadataCompat.Builder()
+                      .putString(MediaMetadataCompat.METADATA_KEY_TITLE, name)
+                      .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, program)
+                  if (logo != null) {
+                      md.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, logo)
+                      md.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, logo)
+                  }
+                  try { s.setMetadata(md.build()) } catch (e: Exception) {}
+                  val state = if (playing) PlaybackStateCompat.STATE_PLAYING
+                              else PlaybackStateCompat.STATE_PAUSED
+                  try {
+                      s.setPlaybackState(PlaybackStateCompat.Builder()
+                          .setActions(PlaybackStateCompat.ACTION_PLAY
+                              or PlaybackStateCompat.ACTION_PAUSE
+                              or PlaybackStateCompat.ACTION_PLAY_PAUSE
+                              or PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+                              or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                              or PlaybackStateCompat.ACTION_STOP)
+                          .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 0f)
+                          .build())
+                  } catch (e: Exception) {}
+                  s.isActive = true
+
+                  val b = NotificationCompat.Builder(this, CH_ID)
+                      // 小图标必须能画成纯 alpha：直接给应用的自适应图标
+                      // （mipmap-anydpi-v26）在部分 ROM 上画不出来，整条通知不显示
+                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      .setContentTitle(name)
+                      .setContentText(program)
+                      .setLargeIcon(logo)
+                      .setContentIntent(openPi())
+                      .setDeleteIntent(broadcastPi(ACT_STOP, 5))
+                      .setOnlyAlertOnce(true)
+                      .setShowWhen(false)
+                      .setOngoing(playing)
+                      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                      // 传输控制类：锁屏/媒体控制区才会把它当播放器卡片
+                      .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+                      .addAction(android.R.drawable.ic_media_previous, "上一台", broadcastPi(ACT_PREV, 2))
+                      .addAction(if (playing) android.R.drawable.ic_media_pause
+                                 else android.R.drawable.ic_media_play,
+                                 if (playing) "暂停" else "播放", broadcastPi(ACT_PLAY_PAUSE, 3))
+                      .addAction(android.R.drawable.ic_media_next, "下一台", broadcastPi(ACT_NEXT, 4))
+                      .addAction(android.R.drawable.ic_menu_close_clear_cancel, "关闭", broadcastPi(ACT_STOP, 6))
+                      .setStyle(MediaNotificationCompat.MediaStyle()
+                          .setMediaSession(s.sessionToken)
+                          .setShowActionsInCompactView(0, 1, 2))
+                  val n = b.build()
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          startForeground(NOTIF_ID, n,
+                              android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                      } else {
+                          startForeground(NOTIF_ID, n)
+                      }
+                  } catch (e: Exception) {}
+              }
+
+              /** 通知按钮：走广播而不是 startService。
+               *  Android 12+ 对后台 startService 有硬限制，getService 的 PendingIntent
+               *  在应用退后台后可能被系统直接丢弃——表现就是「按了下一台没反应」。 */
+              private fun broadcastPi(action: String, code: Int): PendingIntent {
+                  val i = Intent(action).setPackage(packageName)
+                  var f = PendingIntent.FLAG_UPDATE_CURRENT
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      f = f or PendingIntent.FLAG_IMMUTABLE
+                  }
+                  return PendingIntent.getBroadcast(this, code, i, f)
+              }
+
+              private fun openPi(): PendingIntent {
+                  val i = packageManager.getLaunchIntentForPackage(packageName)
+                  if (i != null) {
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                  }
+                  var f = PendingIntent.FLAG_UPDATE_CURRENT
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      f = f or PendingIntent.FLAG_IMMUTABLE
+                  }
+                  return PendingIntent.getActivity(this, 1, i, f)
+              }
+
+              private fun fetchBitmap(url: String): Bitmap? {
+                  return try {
+                      val conn = URL(url).openConnection() as HttpURLConnection
+                      conn.connectTimeout = 5000
+                      conn.readTimeout = 5000
+                      conn.instanceFollowRedirects = true
+                      if (conn.responseCode != 200) {
+                          conn.disconnect()
+                          null
+                      } else {
+                          BitmapFactory.decodeStream(conn.inputStream)
+                      }
+                  } catch (e: Exception) { null }
+              }
+
+              fun stopCard() {
+                  // 锁屏和下拉栏的媒体控件是 MediaSession 驱动的：只 cancel 通知不够，
+                  // session 还 active、播放态还停在 PLAYING 时，系统的媒体面板与锁屏
+                  // 封面会继续挂着上一张卡片。先把会话置 STATE_NONE 再反激活。
+                  try {
+                      session?.setPlaybackState(
+                          PlaybackStateCompat.Builder()
+                              .setState(PlaybackStateCompat.STATE_NONE, 0, 0f)
+                              .build())
+                  } catch (e: Exception) {}
+                  try { session?.isActive = false } catch (e: Exception) {}
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                          stopForeground(STOP_FOREGROUND_REMOVE)
+                      } else {
+                          stopForeground(true)
+                      }
+                  } catch (e: Exception) {}
+                  try {
+                      (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_ID)
+                  } catch (e: Exception) {}
+                  live = null
+                  stopSelf()
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  live = null
+                  try { unregisterReceiver(actionReceiver) } catch (e: Exception) {}
+                  try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (e: Exception) {}
+                  wakeLock = null
+                  try { session?.release() } catch (e: Exception) {}
+                  session = null
+                  super.onDestroy()
+              }
+          }
+          KOTLIN
+            echo "MediaService patched: $ACTDIR/MediaService.kt"
+
+            # androidx.media（MediaSessionCompat / MediaStyle）。
+            # 新版 flutter create 可能生成 Kotlin DSL（build.gradle.kts），
+            # 两种格式都兼容，追加重复 dependencies 块是合法的
+            if ls android/app/build.gradle.kts >/dev/null 2>&1; then
+              grep -q "androidx.media:media" android/app/build.gradle.kts || cat >> android/app/build.gradle.kts <<GRADLE2
+
+          dependencies {
+              implementation("androidx.media:media:1.7.0")
+          }
+          GRADLE2
+            else
+              grep -q "androidx.media:media" android/app/build.gradle || cat >> android/app/build.gradle <<GRADLE
+
+          dependencies {
+              implementation 'androidx.media:media:1.7.0'
+          }
+          GRADLE
+            fi
+
+            # 前台服务声明（mediaPlayback 类型）
+            MANIFEST=android/app/src/main/AndroidManifest.xml
+            grep -q ".MediaService" $MANIFEST || sed -i 's#</application>#    <service android:name=".MediaService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>#' $MANIFEST
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # flutter_inappwebview_android 1.1.x 自身 build.gradle 仍引用已被新版
+      # AGP 拒绝的 proguard-android.txt，pub get 后就地替换
+      - name: Patch flutter_inappwebview proguard file
+        run: |
+          find "$HOME/.pub-cache" -path "*flutter_inappwebview_android-*/android/build.gradle" -print0 \
+            | xargs -0 -r sed -i "s/proguard-android\.txt/proguard-android-optimize.txt/g"
+
+      - name: Cache Android keystore
+        id: ks-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.android/omi.keystore
+          key: omi-keystore-v4-${{ runner.os }}
+
+      - name: Ensure stable keystore (validate secret; regenerate when corrupt)
+        run: |
+          set -e
+          KS="$HOME/.android/omi.keystore"
+          mkdir -p "$HOME/.android"
+          validate_ks() {
+            keytool -list -keystore "$KS" -storepass android \
+              -alias androiddebugkey >/dev/null 2>&1
+          }
+          SECRET_B64="${{ secrets.DEBUG_KEYSTORE_BASE64 }}"
+          if [ -n "$SECRET_B64" ]; then
+            printf '%s' "$SECRET_B64" | base64 -d > "$KS" || true
+            if validate_ks; then
+              echo "Using keystore from repository secret (stable signature)"
+            else
+              echo "::warning::Secret DEBUG_KEYSTORE_BASE64 已损坏（无法用 android/androiddebugkey 打开），将重新生成；请用本次日志末尾的新值更新 Secret"
+              SECRET_B64=""
+            fi
+          fi
+          if [ -z "$SECRET_B64" ]; then
+            if [ "${{ steps.ks-cache.outputs.cache-hit }}" = "true" ] && validate_ks; then
+              echo "Using cached keystore"
+            else
+              echo "Generating new stable keystore (签名与手机上现有版本不同，仍需卸载一次)"
+              rm -f "$KS"
+              keytool -genkey -v \
+                -keystore "$KS" \
+                -storepass android -alias androiddebugkey -keypass android \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Omi,O=Omi,C=CN"
+              # 输出新 base64：请更新 GitHub Secret，之后所有版本签名固定
+              echo "=== DEBUG_KEYSTORE_BASE64 (用此整行更新 GitHub Secret) ==="
+              base64 -w 0 "$KS"
+              echo ""
+              echo "=== END ==="
+            fi
+          fi
+          echo "Keystore 证书指纹（构建后 APK 必须与此一致）:"
+          keytool -list -v -keystore "$KS" -storepass android \
+            -alias androiddebugkey 2>/dev/null | grep -E 'SHA256:' | head -1
+
+      # android/ 目录由 flutter create 现场生成，无法在仓库里写死
+      # signingConfig。通过 Gradle init 脚本强制 release 变体使用上面
+      # 经验证的 keystore：文件损坏/口令不符时构建直接失败，
+      # 杜绝 AGP 静默生成随机 CN=Android Debug 证书导致签名漂移。
+      - name: Install Gradle init script (explicit release signing)
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/omi-signing.gradle" <<'GRADLE'
+          allprojects {
+              afterEvaluate { p ->
+                  if (p.plugins.hasPlugin('com.android.application')) {
+                      def ksPath = System.getenv('OMI_KEYSTORE')
+                      if (ksPath == null) {
+                          throw new GradleException('OMI_KEYSTORE env is not set')
+                      }
+                      def ksFile = new File(ksPath)
+                      if (!ksFile.isFile()) {
+                          throw new GradleException("keystore not found: ${ksPath}")
+                      }
+                      def android = p.extensions.getByName('android')
+                      def scs = android.signingConfigs
+                      def sc = scs.findByName('omiStable') ?: scs.create('omiStable')
+                      sc.storeFile = ksFile
+                      sc.storePassword = 'android'
+                      sc.keyAlias = 'androiddebugkey'
+                      sc.keyPassword = 'android'
+                      android.buildTypes.getByName('release').signingConfig = sc
+                  }
+              }
+          }
+          GRADLE
+
+      # Gradle 缓存：mpv 原生库（4 个 jar + NDK/CMake 产物）每次冷编都要
+      # 全部重来，缓存后的第二个 ABI 与重试都能省下数分钟
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-x64-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Build APK
+        run: |
+          # 单独编 x86_64（模拟器 / x86 盒子用）：与真机 ABI 拆成两个并行作业。
+          # 三个 ABI 挤一个作业会把时长从 ~6 分钟拖过 10 分钟，免费 runner
+          # 在 9~10 分钟处被回收（runner shutdown / exit 143），此前几次
+          # 安卓红叉全是这个原因；拆开后每个作业都在安全线内。
+          for attempt in 1 2; do
+            if flutter build apk --release --split-per-abi \
+                 --target-platform android-x64; then
+              exit 0
+            fi
+            echo "::warning::APK 第 $attempt 次构建失败，缓存已热，重试一次"
+            sleep 5
+          done
+          echo "::error::APK 构建两次均失败"
+          exit 1
+
+      - name: Rename APKs for release
+        run: |
+          cd build/app/outputs/flutter-apk
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            if [ -f "app-$abi-release.apk" ]; then
+              mv "app-$abi-release.apk" "Omi-android-$abi.apk"
+            fi
+          done
+
+      # 构建后核对：APK 实际证书必须与构建前 keystore 指纹一致，
+      # 一旦再次出现 CN=Android Debug 随机证书可立即发现
+      - name: Verify APK signing certificate
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null \
+            | sort -V | tail -1)
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs \
+              build/app/outputs/flutter-apk/Omi-android-x86_64.apk \
+              | grep -E 'signer|Certificate' | head -5
+          else
+            echo "apksigner not found, skipped"
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-x64
+          path: build/app/outputs/flutter-apk/*.apk
+
+      # 上传改走 gh CLI：softprops/action-gh-release 找到已有 Release 后
+      # 会先 PATCH 一次元数据（实测 2026-11-13 v2.1.14 三平台齐挂
+      # 「Resource not accessible by integration」），gh release upload
+      # 只传资产不动元数据，GITHUB_TOKEN 的 contents:write 足够。
+      # 命令必须单行：Windows runner 默认 pwsh，反斜杠续行会被当成一元运算符报错（v2.1.15 实测）
+      - name: Upload to Release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3 4 5; do
+            gh release upload "$GITHUB_REF_NAME" build/app/outputs/flutter-apk/Omi-android-x86_64.apk --clobber --repo "$GITHUB_REPOSITORY" && break
+            echo "upload retry $i / 5"; sleep 15
+          done
+
+
   # ==================== Web ====================
   build-web:
     name: Build Web
