@@ -4414,6 +4414,9 @@ class PlayerController extends ChangeNotifier {
         return '车载座舱';
       case 'night':
         return '夜间模式';
+      case 'custom':
+        // 设置里调过 10 段 EQ 后停在的档，底部按钮/弹窗同步叫这个名
+        return '自定义均衡器';
       default:
         return '标准';
     }

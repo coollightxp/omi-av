@@ -735,10 +735,29 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       'live': '现场 LIVE',
       'car': '车载座舱',
       'night': '夜间模式',
+      // 自定义 = 设置里 10 段均衡器调出来的那档，末尾一行可直接选回
+      'custom': '自定义均衡器',
     };
+    // 自定义 EQ 概要：列出调过（|增益|≥0.5dB）的段，如「62 +3 · 1k -2」
+    String eqSummary() {
+      final gains = c.audioEqGains;
+      final parts = <String>[];
+      for (var i = 0;
+          i < gains.length && i < PlayerController.kEqBandLabels.length;
+          i++) {
+        final g = gains[i];
+        if (g.abs() >= 0.5) {
+          parts.add('${PlayerController.kEqBandLabels[i]} '
+              '${g > 0 ? '+' : ''}${g.toStringAsFixed(0)}');
+        }
+      }
+      return parts.isEmpty ? '未调整（直通）' : parts.join(' · ');
+    }
+
     final rowH = d.listRowHeight * 0.8;
     const width = 230.0;
-    final menuH = order.length * rowH + 16;
+    // 8 个固定档 + 自定义均衡器，共 9 行
+    final menuH = (order.length + 1) * rowH + 16;
     final chosen = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -752,7 +771,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         borderRadius: BorderRadius.circular(d.modalRadius),
       ),
       items: [
-        for (final key in order)
+        for (final key in [...order, 'custom'])
           PopupMenuItem<String>(
             value: key,
             height: rowH,
@@ -773,6 +792,11 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                   ),
                 ),
                 const Spacer(),
+                // 自定义档：行尾带上当前 EQ 各段概要
+                if (key == 'custom')
+                  Text(eqSummary(),
+                      style:
+                          TextStyle(color: Colors.white38, fontSize: t.caption)),
                 if (key == current)
                   Text('当前',
                       style:
