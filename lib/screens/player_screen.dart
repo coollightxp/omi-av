@@ -22,6 +22,7 @@ import '../services/osd_bus.dart';
 import '../services/pip.dart';
 import '../services/player_controller.dart';
 import '../services/system_power.dart';
+import '../services/tray_service.dart';
 import '../services/web_diag.dart';
 import '../services/web_env.dart';
 import '../services/web_launch.dart';
@@ -84,6 +85,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   PlayerState _prevState = PlayerState.idle;
   String? _prevChannelId;
   bool _prevWebActive = false;
+  /// 上一次见到的播放会话代数（控制器每起播/换源/换台 +1）
+  int _prevPlayGen = 0;
   /// 启动动画是否已经退场（上一帧值）：退场那一刻把焦点收回根节点
   bool _prevBootReady = false;
 
@@ -122,6 +125,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   // （注意：布尔状态名不能与边沿回调方法 _okDown() 同名）
   Timer? _okLongTimer;
   bool _okHeld = false;
+  /// 本次 OK「按下」的时刻：用来识别卡死的按住状态（抬起边沿在
+  /// 切源/重建里丢了，[_okHeld] 会一直停在 true，之后的按下全被当成
+  /// 重复事件丢掉 —— 用户看到的正是「切完线路第一下 OK 没反应」）
+  DateTime? _okHeldAt;
 
   // 跨通道去重（Windows）：按键有两条到达路径——Flutter 键盘事件，和
   // 网页前台时原生低级钩子经 omi/win_hotkeys 转发的动作。切到/切离网页
@@ -288,6 +295,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       await windowManager.destroy();
       return;
     }
+    // 「✕ 最小化到托盘」：隐藏窗口继续播，托盘左键恢复。
+    // 以前这里**无条件退出**——main.dart 里那份监听虽然会 hide，
+    // 但两份监听都会收到关窗事件，这份随后照样把进程结束掉，
+    // 于是开关打开也「点 ✕ 直接退出」（用户实测复现）。
+    if (TrayService.closeToTray) {
+      await TrayService.ensure();
+      if (TrayService.ready) {
+        WebDiag.log('win_close tray=1 hide');
+        await windowManager.hide();
+        return;
+      }
+      WebDiag.log('win_close tray=1 not_ready');
+    }
+    WebDiag.log('win_close tray=0 quit');
     await ExitGuard.quit();
   }
 
@@ -337,6 +358,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final becamePlaying =
         c.state == PlayerState.playing && _prevState != PlayerState.playing;
     _prevState = c.state;
+
+    // 播放会话重建（起播/换源/换台/重载）：这一刻原生控件或 WebView2 会
+    // 抢窗口焦点，按键序列常被截断——按下收到了、抬起丢了，[_okHeld]
+    // 就卡在 true，之后第一下 OK 被当成「重复按下」吞掉（用户实测
+    // 「切换线路后第一次 OK 呼不出左侧列表，第二次才行」）。
+    // 代数一变就把配对状态清零、焦点收回，下一次按键从头算。
+    if (c.playGeneration != _prevPlayGen) {
+      _prevPlayGen = c.playGeneration;
+      _resetKeyPairState();
+      _restoreFocusSoon();
+      WebDiag.log('play_gen gen=${c.playGeneration} src=${c.sourceIndex}');
+    }
 
     // 启动动画退场立刻把键盘焦点收回根节点。安卓冷启动时焦点可能还挂在
     // 系统视图/启动层上，遥控器/键盘前几下没有去处（实测「进程序后马上
@@ -604,9 +637,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// [key] 形如 `ok:d` / `ok:u` / `left:d`；[channel] 为 `flutter` / `native`。
   bool _dropDupKey(String key, String channel) {
     final now = DateTime.now();
+    // 窗口 320ms：实测同一次按键两条通道的间隔在 94~151ms 之间，
+    // 原来取 150ms 正好卡在边缘（151ms 的那次没被丢掉，一次按键执行
+    // 两遍）。同一条通道连按不受影响，这里只丢「另一条通道」的重复边沿
     final dup = _lastProcKey == key &&
         _lastProcCh != channel &&
-        now.difference(_lastProcAt) < const Duration(milliseconds: 150);
+        now.difference(_lastProcAt) < const Duration(milliseconds: 320);
     if (!dup) {
       _lastProcKey = key;
       _lastProcAt = now;
@@ -623,6 +659,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 「切换完直播源，第一次按 OK 呼不出左侧列表，第二次才行」。
   void _resetKeyPairState() {
     _okHeld = false;
+    _okHeldAt = null;
     _okDownInPanel = false;
     _okLongFired = false;
     _okLongTimer?.cancel();
@@ -2748,10 +2785,25 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 面板打开：转发面板；否则启动 500ms 长按计时。
   void _okDown() {
     if (_okHeld) {
-      WebDiag.log('ok_eaten reason=held');
-      return;
+      // 按住状态自愈：正常长按会不断收到重复按下，间隔远小于 1.2 秒。
+      // 超过这个时长还停在 true，只能是「抬起事件丢了」（切源/重建/
+      // 焦点被抢时常见）——继续吞键就会变成「怎么按都不响应」，
+      // 这里当作新的一次按下处理，不再等一个永远不来的抬起
+      final age = _okHeldAt == null
+          ? 99999
+          : DateTime.now().difference(_okHeldAt!).inMilliseconds;
+      if (age < 1200) {
+        WebDiag.log('ok_eaten reason=held age=${age}ms');
+        return;
+      }
+      WebDiag.log('ok_held_stale age=${age}ms');
+      _okHeld = false;
+      _okLongFired = false;
+      _okDownInPanel = false;
+      _okLongTimer?.cancel();
     }
     _okHeld = true;
+    _okHeldAt = DateTime.now();
     _okLongFired = false;
     // 待选台：OK 打开频道列表，不再触发长按面板
     if (_standbyListIntercept()) {
@@ -2786,13 +2838,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// OK 抬起边沿：面板打开时转发；否则长按不触发、短按按播放状态处理
   void _okUp() {
-    if (!_okHeld) return;
+    if (!_okHeld) {
+      // 只有抬起、没有按下：说明按下边沿在切源/重建里被丢了
+      // （或被子线程去重误杀），留痕便于定位「按了没反应」
+      WebDiag.log('ok_up_orphan panel=$_okDownInPanel');
+      return;
+    }
     _okHeld = false;
+    _okHeldAt = null;
     _okLongTimer?.cancel();
     // 按下时面板是打开的（选台/按钮操作可能在按下边沿已关闭面板），
     // 这次抬起仍属于面板内操作，绝不能落到短按逻辑里——否则频道列表
     // 选台后松手会触发「面板外短按」= 播放/暂停切换或重开列表（串台感）
     if (_okDownInPanel) {
+      WebDiag.log('ok_up_swallowed branch=panel nav=$_navPanelOpen '
+          'bottom=$_bottomPanelActive');
       _okDownInPanel = false;
       if (_navPanelOpen) {
         _panelKey('ok', false);

@@ -10,7 +10,7 @@ import 'package:path_provider/path_provider.dart';
 class WebDiag {
   WebDiag._();
 
-  static const int _maxEntries = 600;
+  static const int _maxEntries = 1500;
   static final List<String> _entries = [];
   static int _t0 = 0;
   static bool _active = false;
@@ -41,9 +41,16 @@ class WebDiag {
     if (_sessions == 0) _active = false;
   }
 
-  /// 追加一条事件（仅网页频道激活期间；自动加相对毫秒时间戳）
+  /// 追加一条事件（自动加相对毫秒时间戳）。
+  ///
+  /// **全时段记录**：原来只在网页频道激活期间写，普通直播/电台上的
+  /// 返回、OK、关窗等行为一条都不留——用户导出日志后只有网页那一段，
+  /// 「切线路后第一下 OK 没反应」这类问题等于没法查（实测导出日志里
+  /// 连一条 ok_* 都没有，因为当时在普通直播上按的）。现在常开：
+  /// 网页会话仍用 open/close 标记界定，probe 之类高频事件只在网页
+  /// 会话内产生，不会把缓冲冲掉。
   static void log(String event, [String detail = '']) {
-    if (!_active || _t0 == 0) return;
+    if (_t0 == 0) _t0 = DateTime.now().millisecondsSinceEpoch;
     try {
       final rel = DateTime.now().millisecondsSinceEpoch - _t0;
       var d = detail.replaceAll('\n', ' ').replaceAll('\r', ' ');
@@ -63,8 +70,9 @@ class WebDiag {
       final dir = await getApplicationSupportDirectory();
       final p = '${dir.path}${Platform.pathSeparator}omi_web_diag.log';
       final sink = File(p).openWrite(mode: FileMode.write);
-      sink.writeln('# Omi 网页诊断日志  ${DateTime.now().toIso8601String()}');
-      sink.writeln('# app=$appVersion entries=${_entries.length}');
+      sink.writeln('# Omi 运行诊断日志  ${DateTime.now().toIso8601String()}');
+      sink.writeln('# app=$appVersion entries=${_entries.length} '
+          'web_active=$_active');
       for (final e in _entries) {
         sink.writeln(e);
       }

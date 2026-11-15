@@ -162,6 +162,12 @@ class PlayerController extends ChangeNotifier {
   // 必须静默丢弃，不能覆盖当前播放器（否则会出现直播流覆盖点播、进度条消失、
   // 假 error 覆盖层 + 旧音频仍在响等问题）
   int _playGeneration = 0;
+
+  /// 播放会话代数（对外只读）：每次起播/换源/换台 +1。
+  /// UI 侧据此在「会话刚刚重建」的那一帧清掉按键按下-抬起配对状态、
+  /// 把键盘焦点收回根节点——切源瞬间原生控件/WebView2 会抢一次窗口
+  /// 焦点，按键序列常在这一刻断掉，表现为「切完线路第一下 OK 没反应」。
+  int get playGeneration => _playGeneration;
   // 绑定到当前 controller 的事件监听闭包（dispose 时精确移除）
   VoidCallback? _videoListenerClosure;
 
