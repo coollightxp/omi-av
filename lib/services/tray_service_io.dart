@@ -89,13 +89,15 @@ class TrayService {
       await _tray.setContextMenu(_menu);
       _tray.registerSystemTrayEventHandler((eventName) {
         if (eventName == kSystemTrayEventClick) {
-          // 左键：后台播放恢复（摸鱼中也恢复：托盘是唯一入口）
+          // 左键：摸鱼中就退出摸鱼（含还原静音、显示窗口），否则只显示窗口。
+          // 状态一律由 controller 改，这里不能提前翻 _fishMode ——
+          // controller 的 exitFishMode/enterFishMode 都以 fishMode 做重入
+          // 守卫，先翻会让守卫直接 return，静音还原/隐藏动作整段跳过
           if (_fishMode) {
-            _fishMode = false;
-            updateMenu(fishMode: false);
             onExitFish?.call();
+          } else {
+            onShowWindow?.call();
           }
-          onShowWindow?.call();
         } else if (eventName == kSystemTrayEventRightClick) {
           _tray.popUpContextMenu();
         }
@@ -112,14 +114,14 @@ class TrayService {
       MenuSeparator(),
       MenuItemLabel(
         label: _fishMode ? '退出摸鱼模式（恢复画面声音）' : '摸鱼模式（静音并隐藏窗口）',
-        onClicked: (_) async {
-          _fishMode = !_fishMode;
-          await updateMenu(fishMode: _fishMode);
+        onClicked: (_) {
+          // 同左键：只发意图，_fishMode 与菜单文案由 controller 写回
+          // （它做完静音/隐藏动作后调 updateMenu）。这里先翻状态的话，
+          // controller 的重入守卫会把整段动作吃掉
           if (_fishMode) {
-            // 摸鱼动作本体在 controller（静音 + 隐藏窗口）
-            onEnterFish?.call();
-          } else {
             onExitFish?.call();
+          } else {
+            onEnterFish?.call();
           }
         },
       ),

@@ -4143,14 +4143,18 @@ class PlayerController extends ChangeNotifier {
   Future<void> enterFishMode() async {
     if (!kIsWindowsDesktop || fishMode) return;
     await TrayService.ensure();
+    // 托盘图标没建起来也不再拦：F9 是全局恢复键（原生钩子拦截），
+    // 隐藏后一定能按回来。提示一下让用户知道退出方式
     if (!TrayService.ready) {
-      OsdBus.show('托盘图标不可用，未进入摸鱼模式',
-          icon: Icons.warning_amber_rounded);
-      return;
+      OsdBus.show('托盘图标不可用：按 F9 可退出摸鱼',
+          icon: Icons.keyboard);
     }
     await TrayService.updateMenu(fishMode: true);
     _mutedBeforeFish = _isMuted;
     if (!_isMuted) await setMuted(true);
+    // 先让原生侧进入"全局拦 F9"状态，再隐藏窗口：
+    // 顺序反了的话隐藏完成后第一下 F9 可能仍按窗口焦点判断而被放行
+    await WinHotkeys().setFishMode(true);
     try {
       await windowManager.hide();
     } catch (_) {}
@@ -4167,6 +4171,8 @@ class PlayerController extends ChangeNotifier {
       await windowManager.show();
       await windowManager.focus();
     } catch (_) {}
+    // 窗口回来后再把 F9 交还给系统，避免占用其它程序的 F9
+    await WinHotkeys().setFishMode(false);
     notifyListeners();
   }
 

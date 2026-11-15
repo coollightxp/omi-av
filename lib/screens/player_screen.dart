@@ -123,6 +123,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   Timer? _okLongTimer;
   bool _okHeld = false;
 
+  // 跨通道去重（Windows）：按键有两条到达路径——Flutter 键盘事件，和
+  // 网页前台时原生低级钩子经 omi/win_hotkeys 转发的动作。切到/切离网页
+  // 线路的那一瞬间两条路可能同时通，同一次物理按键被执行两遍：第一下
+  // 打开左侧列表、第二次抬起又把它关上，用户看到的就是「第一次按没用」。
+  // 按「动作+边沿」记最近一次处理时间与通道，另一条通道 150ms 内的同名
+  // 边沿直接丢掉（同一通道连按不受影响）。
+  DateTime _lastProcAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastProcKey = '';
+  String _lastProcCh = '';
+
+  /// F9 按住去重：摸鱼开关是一进一出，长按自动重复不能来回切
+  bool _f9Held = false;
+
   /// OK 按下边沿发生在面板打开期间：抬起时仍需走面板路径，
   /// 不能落入「面板外短按」（播放/暂停、重开频道列表）
   bool _okDownInPanel = false;
@@ -376,6 +389,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       });
       _scheduleBottomHide();
       _pokeCursor();
+      // 新播放器抢过窗口焦点：起播后把键盘焦点收回根节点，
+      // 否则下一按键要先用一下「把焦点移回来」（第一下像没反应）
+      _restoreFocusSoon();
     }
 
     // 网页频道切入/切出：切入时像正常起播一样先显示信息面板再自动隐藏
@@ -390,6 +406,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _scheduleBottomHide();
         _pokeCursor();
       }
+      // 网页↔普通线路互切：WebView2 会接管/交还键盘焦点，切完立刻收回
+      _restoreFocusSoon();
     }
   }
 
@@ -571,11 +589,56 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
   /// 把焦点收回根节点，保证硬件快捷键/数字选台随时可响应。
-  /// 设置面板打开时不抢焦点（里面有输入框）。
+  /// 设置面板打开时不抢焦点（里面有输入框）；弹层/电台搜索/抽屉自己有
+  /// 焦点树，也不动，否则会把用户正在操作的那一层打断。
   void _ensureShortcutFocus() {
     if (_settingsOpen) return;
+    if (_modalRouteOpen || RadioSearchDialog.active || settingsEditDialogOpen) {
+      return;
+    }
     if (_rootFocusNode.hasPrimaryFocus) return;
     _rootFocusNode.requestFocus();
+  }
+
+  /// 跨通道去重：true = 这条边沿已由另一条通道处理过，丢弃本次。
+  /// [key] 形如 `ok:d` / `ok:u` / `left:d`；[channel] 为 `flutter` / `native`。
+  bool _dropDupKey(String key, String channel) {
+    final now = DateTime.now();
+    final dup = _lastProcKey == key &&
+        _lastProcCh != channel &&
+        now.difference(_lastProcAt) < const Duration(milliseconds: 150);
+    if (!dup) {
+      _lastProcKey = key;
+      _lastProcAt = now;
+      _lastProcCh = channel;
+    }
+    return dup;
+  }
+
+  /// 换源/换台前清空「按住-抬起」配对状态。
+  ///
+  /// 切源时播放器会重建，Windows 上原生视频控件/WebView2 会抢一次窗口
+  /// 焦点，按键序列常在这一刻断掉：抬起边沿丢了，[_okHeld] 就一直卡在
+  /// true，此后每次按 OK 都被当成「按住中的重复事件」丢掉——用户实测
+  /// 「切换完直播源，第一次按 OK 呼不出左侧列表，第二次才行」。
+  void _resetKeyPairState() {
+    _okHeld = false;
+    _okDownInPanel = false;
+    _okLongFired = false;
+    _okLongTimer?.cancel();
+    _arrowDown = false;
+    _arrowLongFired = false;
+    _arrowLongTimer?.cancel();
+  }
+
+  /// 换源/起播后把键盘焦点收回根节点（下一帧再收，等布局稳定）。
+  /// 切换线路的瞬间原生播放控件/WebView2 会抢一次窗口焦点，第一下按键
+  /// 被系统拿去「把焦点移回去」，进不了 Flutter——Windows 与安卓同一种
+  /// 表现（用户实测：切换源后第一下 OK 呼不出列表，第二下才行）。
+  void _restoreFocusSoon() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _ensureShortcutFocus();
+    });
   }
 
   @override
@@ -2548,11 +2611,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return _handleKeyWhileModal(k, isDown, isUp);
     }
 
+    // F9：摸鱼模式进出（Windows）。平时按键走原生钩子，这里覆盖的是
+    // 设置面板刚关闭、钩子捕获还没恢复的那一小段
+    if (k == LogicalKeyboardKey.f9) {
+      if (isDown && !_f9Held) {
+        _f9Held = true;
+        unawaited(_toggleFishMode());
+      }
+      if (isUp) _f9Held = false;
+      return true;
+    }
+
     // OK 与左右方向键要区分短按/长按，走按下-抬起配对处理
     if (k == LogicalKeyboardKey.select ||
         k == LogicalKeyboardKey.enter ||
         k == LogicalKeyboardKey.numpadEnter ||
         k == LogicalKeyboardKey.gameButtonA) {
+      // 与原生钩子通道去重：同一次物理按键只执行一遍
+      if (_dropDupKey(isDown ? 'ok:d' : 'ok:u', 'flutter')) return true;
       if (isDown) _okDown();
       if (isUp) _okUp();
       return true;
@@ -2560,6 +2636,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (k == LogicalKeyboardKey.arrowLeft ||
         k == LogicalKeyboardKey.arrowRight) {
       final left = k == LogicalKeyboardKey.arrowLeft;
+      if (_dropDupKey('${left ? 'left' : 'right'}:${isDown ? 'd' : 'u'}',
+          'flutter')) {
+        return true;
+      }
       if (isDown) _lrDown(left);
       if (isUp) _lrUp(left);
       return true;
@@ -2572,10 +2652,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     // 上下：面板打开时面板内移动，否则切台
     if (k == LogicalKeyboardKey.arrowUp) {
+      if (_dropDupKey(isDown ? 'up:d' : 'up:u', 'flutter')) return true;
       if (isDown) _verticalKey(true);
       return true;
     }
     if (k == LogicalKeyboardKey.arrowDown) {
+      if (_dropDupKey(isDown ? 'down:d' : 'down:u', 'flutter')) return true;
       if (isDown) _verticalKey(false);
       return true;
     }
@@ -3484,6 +3566,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _winHotkeys.setCapture(!_settingsOpen);
   }
 
+  /// F9：进入/退出摸鱼模式（静音 + 隐藏窗口，仅 Windows）。
+  /// 摸鱼中窗口已隐藏，这一下由原生钩子全局拦截转发过来；
+  /// 再按一次回到窗口并还原静音前的状态。
+  Future<void> _toggleFishMode() async {
+    final c = context.read<PlayerController>();
+    if (!c.kIsWindowsDesktop) return;
+    if (c.fishMode) {
+      await c.exitFishMode();
+    } else {
+      await c.enterFishMode();
+    }
+  }
+
   /// 底部控制面板「手机扫码管理」按钮：弹出二维码
   void _showRemoteAdminQr(PlayerController controller) {
     final url = controller.remoteAdminUrl;
@@ -3545,10 +3640,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     switch (action) {
       case 'prevSource':
         if (_throttled()) return;
-        controller.prevSource();
+        _resetKeyPairState();
+        unawaited(controller.prevSource().whenComplete(_restoreFocusSoon));
       case 'nextSource':
         if (_throttled()) return;
-        controller.nextSource();
+        _resetKeyPairState();
+        unawaited(controller.nextSource().whenComplete(_restoreFocusSoon));
       // 上下键不走 900ms 加载锁：切台是「预览 + 停留提交」，连按必须
       // 每一步都能前进（锁会把 900ms 内的第二次按键吞掉，表现为
       // 「按了没反应、到点却提前切台」）
@@ -3624,7 +3721,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     controller.playChannel(target).whenComplete(() {
-      if (mounted) setState(() => _osdPreview = null);
+      if (mounted) {
+        setState(() => _osdPreview = null);
+        _restoreFocusSoon();
+      }
     });
   }
 
@@ -3741,14 +3841,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     // OK / 左右 / 菜单需要按下-抬起配对
     if (action == 'ok') {
+      if (_dropDupKey(isDown ? 'ok:d' : 'ok:u', 'native')) return;
       isDown ? _okDown() : _okUp();
       return;
     }
     if (action == 'left') {
+      if (_dropDupKey(isDown ? 'left:d' : 'left:u', 'native')) return;
       isDown ? _lrDown(true) : _lrUp(true);
       return;
     }
     if (action == 'right') {
+      if (_dropDupKey(isDown ? 'right:d' : 'right:u', 'native')) return;
       isDown ? _lrDown(false) : _lrUp(false);
       return;
     }
@@ -3760,8 +3863,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final controller = context.read<PlayerController>();
     switch (action) {
       case 'up':
+        if (_dropDupKey('up:d', 'native')) return;
         _verticalKey(true);
       case 'down':
+        if (_dropDupKey('down:d', 'native')) return;
         _verticalKey(false);
       case 'esc':
       case 'back':
@@ -3784,6 +3889,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _onShortcut('epg');
       case 's':
         _onShortcut('settings');
+      case 'f9':
+        // 原生钩子转发的 F9：进入/退出摸鱼模式
+        unawaited(_toggleFishMode());
     }
   }
 

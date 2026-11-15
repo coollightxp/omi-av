@@ -101,6 +101,14 @@ class WinHotkeys {
     } catch (_) {}
   }
 
+  /// true=摸鱼模式（窗口已隐藏）：F9 改成全局拦截并转发，
+  /// 否则隐藏后的窗口没有键盘焦点，用户按 F9 回不来。
+  Future<void> setFishMode(bool enable) async {
+    try {
+      await _channel.send(enable ? 'G1' : 'G0');
+    } catch (_) {}
+  }
+
   /// 请求 runner 恢复光标/卸载钩子后直接结束进程。
   /// 用于 Windows 10 1607 等老系统：引擎/插件析构阶段会在
   /// flutter_windows.dll 内抛 0xc0000005（退出时"已停止工作"）。

@@ -2792,11 +2792,26 @@ class _SystemSettingsTab extends StatelessWidget {
                       controller.updateSettings(s.copyWith(closeToTray: v)),
                   activeColor: Colors.blueAccent,
                 ),
+              if (defaultTargetPlatform == TargetPlatform.windows)
+                SwitchListTile(
+                  secondary: const Icon(Icons.visibility_off_outlined,
+                      color: Colors.white70),
+                  title: const Text('摸鱼模式（F9）',
+                      style: TextStyle(color: Colors.white, fontSize: 15)),
+                  subtitle: const Text(
+                      '静音并隐藏窗口；再按 F9（或左键托盘图标）回来，'
+                      '退出时还原进入前的静音状态',
+                      style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  value: controller.fishMode,
+                  onChanged: (v) => v
+                      ? controller.enterFishMode()
+                      : controller.exitFishMode(),
+                  activeColor: Colors.blueAccent,
+                ),
               // 安卓 13+：POST_NOTIFICATIONS 不给，电台前台服务的通知卡片
               // 会被系统整条吞掉（服务在跑、声音也在，但通知栏/锁屏什么都
-              // 没有）。给一个明确入口：看状态、一键申请、被拒后去设置
-              if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
-                const _NotifPermissionTile(),
+              // 没有）。这行必须放在「桌面专属」块**外面**——之前误放在
+              // isDesktop 里，安卓上永远渲染不到，等于没有入口
               SwitchListTile(
                 secondary:
                     const Icon(Icons.power_settings_new, color: Colors.white70),
@@ -2821,6 +2836,9 @@ class _SystemSettingsTab extends StatelessWidget {
                 activeColor: Colors.blueAccent,
               ),
             ],
+            // 安卓 13+ 通知权限：不属于桌面专属，放块外（安卓才渲染）
+            if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+              const _NotifPermissionTile(),
             // 定时关闭不做在这里：它跟「退出/关机」同一类动作，入口统一
             // 收在退出卡片（长按返回键 / 遥控器退出键）的「定时关闭」里，
             // 两处并存只会让人不知道该信哪个
