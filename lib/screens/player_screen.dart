@@ -117,9 +117,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 停在 true：之后每次按 OK 都被 `if (_okHeld) return` 吞掉，返回键的
   /// `_nativeHeld` 同理。用户看到的就是「从网页源切到普通源后，返回和
   /// OK 立刻全失灵」（2026-11-15 实测）。有了时刻就能自愈。
-  DateTime _okHeldAt = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _arrowDownAt = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _menuHeldAt = DateTime.fromMillisecondsSinceEpoch(0);
+  // （2.2.4）恢复 2.1.37 语义：不用时间戳自愈。自愈是「网页源切普通源
+  // 失灵」时期的猜测性修改，从未被验证有效，反而改变了正常连按的行为
 
   /// OK 按下边沿发生在面板打开期间：抬起时仍需走面板路径，
   /// 不能落入「面板外短按」（播放/暂停、重开频道列表）
@@ -394,7 +393,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 由此而来。宁可多复位一次（真实按住时最多少一次长按），也不能让
   /// 遥控器整组键僵死。
   void _resetKeyPairing() {
-    _nativeHeldAt.clear();
+    _nativeHeld.clear();
     _okHeld = false;
     _okDownInPanel = false;
     _okLongFired = false;
@@ -2775,22 +2774,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// OK 按下边沿（首次按下；系统自动重复由 _okHeld 去重）。
   /// 面板打开：转发面板；否则启动 500ms 长按计时。
   void _okDown() {
-    if (_okHeld) {
-      // 等不到抬起 = 抬起丢了（切台/网页抢焦点时最常见：按下落在
-      // FlutterView、抬起落在 WebView2，两份事件在不同窗口上）。
-      // 原来这里等 1.5 秒才自愈——而真人连按 OK 的间隔通常 200~800ms，
-      // 于是每一次重按都被当成"重复投递"吞掉，体感就是「网页播放时
-      // OK 彻底失灵、长按也没反应」。双通道重复投递只隔几毫秒，
-      // 350ms 足够区分，又不会把连按锁死。
-      if (DateTime.now().difference(_okHeldAt).inMilliseconds < 350) return;
-      WebDiag.log('key_stuck',
-          'ok stale=${DateTime.now().difference(_okHeldAt).inMilliseconds}ms');
-      _okHeld = false;
-      _okLongTimer?.cancel();
-      _okLongFired = false;
-    }
+    if (_okHeld) return;
     _okHeld = true;
-    _okHeldAt = DateTime.now();
     _okLongFired = false;
     // 待选台：OK 打开频道列表，不再触发长按面板
     if (_standbyListIntercept()) {
@@ -2803,15 +2788,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     if (_bottomPanelActive) {
-      // 底部控制条是**鼠标面板**（hover 保持、按钮所见即所得）。
-      // 遥控器进来时先把它收掉，再执行主语义：否则网页频道下 OK 会被
-      // 转发给「播放/暂停」这个空转按钮（网页没有原生播放状态），
-      // 而且这里 return 掉之后长按计时器根本没启动——用户看到的就是
-      // 「网页播放时短按没反应、长按也没反应」，返回键却还能用
-      // （返回走另一条分支）。收面板后继续往下，OK 照常打开频道列表。
-      _bottomHideTimer?.cancel();
-      setState(() => _bottomPanelVisible = false);
-      _bottomPanelKey.currentState?.handleRemoteKey('ok', isDown: false);
+      _okDownInPanel = true;
+      _bottomPanelRemoteKey('ok', true);
+      return;
     }
     _okLongTimer?.cancel();
     // 换台预览待提交：OK 就是「别等了，现在切」，不进长按呼面板逻辑
@@ -2871,14 +2850,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 可 seek（点播）：点按直接 ±60s seek（不再长按，避免面板冲突）；
   /// 不可 seek（直播/网页）：启动短按切源计时
   void _lrDown(bool isLeft) {
-    if (_arrowDown) {
-      if (DateTime.now().difference(_arrowDownAt).inMilliseconds < 350) return;
-      _arrowDown = false;
-      _arrowLongTimer?.cancel();
-      _arrowLongFired = false;
-    }
+    if (_arrowDown) return;
     _arrowDown = true;
-    _arrowDownAt = DateTime.now();
     _arrowLongFired = false;
     _arrowLongTimer?.cancel();
     if (_standbyListIntercept()) return;
@@ -2887,10 +2860,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     if (_bottomPanelActive) {
-      // 同 OK：先收鼠标面板，再执行「切源」这个主语义。
-      // 面板开着时左右键以前只在按钮间挪高亮，网页态下等于切源失灵。
-      _bottomHideTimer?.cancel();
-      setState(() => _bottomPanelVisible = false);
+      _bottomPanelRemoteKey(isLeft ? 'left' : 'right', true);
+      return;
     }
     final c = context.read<PlayerController>();
     // 可 seek（点播）：点按直接 seek，不再长按——长按会误弹面板、
@@ -2940,25 +2911,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       _panelKey(isUp ? 'up' : 'down', true);
       return;
     }
-    if (_bottomPanelActive) {
-      // 上下键的主语义是切台：面板开着时先收走，不再整下吞掉
-      _bottomHideTimer?.cancel();
-      setState(() => _bottomPanelVisible = false);
-    }
+    if (_bottomPanelActive) return;
     _onArrow(isUp ? 'prevChannel' : 'nextChannel');
   }
 
   /// 菜单键按下：启动 500ms 长按 = 手机扫码管理二维码卡片
   /// （短按 = 右侧 EPG 节目单面板）
   void _menuDown() {
-    if (_menuHeld) {
-      if (DateTime.now().difference(_menuHeldAt).inMilliseconds < 350) return;
-      _menuHeld = false;
-      _menuLongTimer?.cancel();
-      _menuLongFired = false;
-    }
+    if (_menuHeld) return;
     _menuHeld = true;
-    _menuHeldAt = DateTime.now();
     _menuLongFired = false;
     _menuLongTimer?.cancel();
     if (_standbyListIntercept()) return;
@@ -3808,7 +3769,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 钩子那一侧判「前台不是自己」就不转发抬起）。丢掉之后该动作永远被
   /// 当成「还按着」，之后所有同键按下全被吞——返回键失灵就是这个。
   /// 超过 1.5 秒的残留视为抬起丢失，直接接管。
-  final Map<String, DateTime> _nativeHeldAt = <String, DateTime>{};
+  final Set<String> _nativeHeld = <String>{};
 
   /// 原始 VK 兜底：网页态下钩子把映射表认不出的键以 vk:XX 上报，
   /// 这里按候选表合成 ok/back（down/up 成对，保持按下-抬起配对）
@@ -3859,17 +3820,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     if (isDown) {
-      final prev = _nativeHeldAt[action];
-      if (prev != null) {
-        final heldMs = DateTime.now().difference(prev).inMilliseconds;
-        // 400ms 内视为自动重复/双通道重复投递；超过说明抬起丢了，
-        // 允许重新接管。原来的 1.5 秒会把网页态下的正常连按一起吞掉
-        if (heldMs < 400) return;
-        WebDiag.log('key_stuck', 'native $action stale=${heldMs}ms');
-      }
-      _nativeHeldAt[action] = DateTime.now();
+      if (!_nativeHeld.add(action)) return; // 自动重复，忽略
     } else {
-      _nativeHeldAt.remove(action);
+      _nativeHeld.remove(action);
     }
     // 锁定状态：原生钩子路径（网页前台时 HardwareKeyboard 收不到键）
     // 同样屏蔽全部操作，仅返回键解锁
