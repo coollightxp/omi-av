@@ -87,6 +87,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 启动动画是否已经退场（上一帧值）：退场那一刻把焦点收回根节点
   bool _prevBootReady = false;
 
+  /// 本次进程是否已记录过「第一个按键」（诊断用，只写一次日志）
+  bool _firstKeyLogged = false;
+
   /// 小窗状态上一次值：切入小窗时关掉全部面板（小窗口 420×236 里
   /// 这些按大屏排版的卡片会把画面整个盖住）
   bool _prevMini = false;
@@ -1218,7 +1221,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       setState(() => _rightEpgOpen = false);
       return;
     }
-    if (_bottomPanelVisible && _bottomPanelFromUser) {
+    // 底部信息面板：返回键就是「收起面板」，这一下不再往退出卡上叠。
+    // Windows 实测（v2.3.7 之前一直如此、用户确认正常）：面板没收起时
+    // 按返回，面板收掉即可，不该同时弹退出卡。自动闪出来的同样适用
+    if (_bottomPanelVisible) {
       _logBackEaten('bottom_panel');
       _bottomHideTimer?.cancel();
       setState(() {
@@ -1226,16 +1232,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _bottomPanelFromUser = false;
       });
       return;
-    }
-    // 起播自动闪一下 / hover 带出来的信息面板：不拦返回，顺手收起，
-    // 继续往下走（用户要的是「开机第一下返回就出退出卡」）
-    if (_bottomPanelVisible) {
-      _logBackEaten('bottom_auto');
-      _bottomHideTimer?.cancel();
-      setState(() {
-        _bottomPanelVisible = false;
-        _bottomPanelFromUser = false;
-      });
     }
     // 缓冲中（内置播放器 loading / 网页起播阶段）同样允许呼出退出卡片：
     // 此时画面还没出来，但用户按返回/右键就是想退出，不能吞掉按键
@@ -2472,6 +2468,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final k = event.logicalKey;
     final isDown = event is KeyDownEvent;
     final isUp = event is KeyUpEvent;
+
+    // 诊断：本次进程收到的第一个按键是谁。冷启动「第一下没反应」时，
+    // 这条日志能区分两种根因——有这条=按键进了 Flutter（逻辑问题），
+    // 没这条=根本没进来（原生焦点/派发问题）
+    if (isDown && !_firstKeyLogged) {
+      _firstKeyLogged = true;
+      WebDiag.log('key_first logical=${k.debugName} keyId=${k.keyId}');
+    }
 
     // 键盘/遥控器一有动作就隐藏鼠标指针（鼠标一移动原生侧自动恢复）
     if (isDown) _hidePointerForRemote();

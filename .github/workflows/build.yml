@@ -135,6 +135,12 @@ jobs:
               // UI 会显示静音图标），然后 return true 阻止 AudioService
               // 再静音系统。否则一次按键两处静音，取消时只解除一处
               override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+                  // 首键保险：FlutterView 没拿焦点时先把焦点交给它。安卓
+                  // 冷启动后窗口焦点常停在 DecorView / 系统启动层上，
+                  // 遥控器/键盘的第一下被拿去「移焦」，按键本身进不了
+                  // Flutter——用户实测「开机第一下 OK 没反应，按过一下
+                  // 之后返回键才跟着正常」
+                  ensureFlutterFocus()
                   if (event.keyCode == android.view.KeyEvent.KEYCODE_VOLUME_MUTE) {
                       super.dispatchKeyEvent(event)
                       return true
@@ -165,11 +171,25 @@ jobs:
                   // 「第一下」被系统用来把焦点移过去，按键本身不进 Flutter
                   // （实测「进程序后按一下 OK 没反应，第二下才弹左侧面板」）。
                   // 首帧显示后主动抢一次焦点，第一下按键就生效
+                  ensureFlutterFocus()
+              }
+
+              // 把输入焦点钉在 FlutterView 上（重复调用安全）
+              private fun ensureFlutterFocus() {
                   try {
+                      val v = findViewById<View>(FlutterActivity.FLUTTER_VIEW_ID)
+                      if (v == null) return
+                      if (v.hasFocus()) return
                       v.isFocusable = true
                       v.isFocusableInTouchMode = true
                       v.requestFocus()
                   } catch (e: Exception) {}
+              }
+
+              // 窗口每次拿到焦点（启动、从后台回来、权限框关闭）都再钉一次
+              override fun onWindowFocusChanged(hasFocus: Boolean) {
+                  super.onWindowFocusChanged(hasFocus)
+                  if (hasFocus) ensureFlutterFocus()
               }
               // 切后台自动画中画：Dart 侧播放状态变化时同步（见 setAutoPip）
               private var autoPipArmed = false
