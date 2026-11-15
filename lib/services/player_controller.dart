@@ -262,14 +262,6 @@ class PlayerController extends ChangeNotifier {
   /// 等待期间要先记住"该回到哪个台"，超时/双击返回时用它
   Channel? _pendingRestoreChannel;
 
-  /// 最近一次真实播放的频道（不含 __dlna_cast__ 虚拟频道）。
-  ///
-  /// 连续投屏时 `_preCastChannel` 会拿不到值：第二段开始时 `_currentChannel`
-  /// 已经是上一段的 `__dlna_cast__`，按原逻辑只能记 null，于是这段播完
-  /// 「等待投屏」倒计时一结束就掉回「请选择频道」空态（用户 2.1.47 实测，
-  /// 偶发）。用它兜底，保证总有台可回。
-  Channel? _lastRealChannel;
-
   bool _awaitingChannelPick = false;
 
   /// 启动时未自动播放（设置里关了「恢复上次频道」），
@@ -1324,9 +1316,6 @@ class PlayerController extends ChangeNotifier {
         (_currentChannel?.id.startsWith('__dlna_cast__') ?? false)
             ? null
             : _currentChannel;
-    // 连播第二段起：当前频道是上一段的虚拟投屏频道，上面只能得到 null，
-    // 退回最近一次真实频道（电台/直播台），否则这段播完会掉进「请选择频道」
-    _preCastChannel ??= _lastRealChannel;
     _isCasting = true;
     // 重置卡顿看门狗
     _watchPosMs = -1;
@@ -1379,7 +1368,7 @@ class PlayerController extends ChangeNotifier {
     // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
     // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
     dlnaService.kickCastClients();
-    final restore = _preCastChannel ?? _lastRealChannel;
+    final restore = _preCastChannel;
     _preCastChannel = null;
     // 方案 3.7：投屏结束后按设置进「正在等待投屏」，给发送端连播
     // （电视剧下一集）留窗口；0=马上返回，-1=一直等
@@ -1435,7 +1424,7 @@ class PlayerController extends ChangeNotifier {
     if (!_castWaiting) return;
     _castWaiting = false;
     _castWaitRemain = 0;
-    final restore = _pendingRestoreChannel ?? _lastRealChannel;
+    final restore = _pendingRestoreChannel;
     _pendingRestoreChannel = null;
     if (restore != null) {
       await playChannel(restore);
@@ -1571,39 +1560,8 @@ class PlayerController extends ChangeNotifier {
       _isLoadingPlaylist = false;
       // 电视源换了：电台目录里的「电视伴音」要按新频道重匹配
       if (_radioCatalogLoaded) _refreshRadioCatalog();
-      _rebindResumedChannel();
       notifyListeners();
     }
-  }
-
-  /// 播放列表加载完成后，把恢复播放用的临时频道对象重绑到列表真身。
-  ///
-  /// 开机恢复时列表多半还没加载完，`_resolveLastChannel` 会用记录的
-  /// 地址构造一个临时 Channel 开播。这个对象不在任何分类里：
-  /// 序号显示 "--"、上下键相邻频道也对不上。列表就绪后按 ID（再按
-  /// 名字）找回同一频道替换之；找不到就保持原样不动。
-  void _rebindResumedChannel() {
-    final cur = _currentChannel;
-    if (cur == null || _categories.isEmpty) return;
-    final all = [for (final cat in _categories) ...cat.channels];
-    Channel? found;
-    for (final c in all) {
-      if (c.id == cur.id) {
-        found = c;
-        break;
-      }
-    }
-    if (found == null && cur.name.isNotEmpty) {
-      for (final c in all) {
-        if (c.name == cur.name) {
-          found = c;
-          break;
-        }
-      }
-    }
-    if (found == null || identical(found, cur)) return;
-    _currentChannel = found;
-    if (_sourceIndex >= found.streamUrls.length) _sourceIndex = 0;
   }
 
   /// 跨天检查：缓存是昨天抓的（或更早）就重抓内置节目单。
@@ -1780,15 +1738,8 @@ class PlayerController extends ChangeNotifier {
       }
     }
     _webPageActive = false;
-    // 关键：原生侧的低级钩子一旦进入「网页前台转发」模式，所有动作键都
-    // 被它截走转给 WebView，Flutter 就再也收不到 OK/方向键（返回键例外，
-    // 钩子仍交给 App）。这里只改字段不会把转发关掉——网页崩过一次再切回
-    // 直播时，表现就是「只有返回键/右键有反应，OK 打不开频道列表」
-    // （2.1.47 实测）。必须显式把 W0 发回去。
     _webPageForeground = false;
-    WinHotkeys().setWebForward(false);
     _currentChannel = channel;
-    if (!channel.id.startsWith('__dlna_cast__')) _lastRealChannel = channel;
     _sourceIndex = 0;
     // 立刻通知界面把网页控件摘掉。这里下面要等 2.5 秒让 WebView2 销毁
     // 完成（否则和 mpv 初始化抢 COM 会崩），如果这中间不刷新界面，
@@ -2134,10 +2085,8 @@ class PlayerController extends ChangeNotifier {
         if (_currentChannel?.id != channel.id) return;
       }
       // 上一个频道（电台/直播流）刚拆完解码器就创建 WebView2，
-      // 部分机器会撞出 0xc0000005，先让系统喘口气。
-      // 1607 + 老显卡驱动上 600ms 实测仍会崩（D3D 设备释放慢），放宽到
-      // 1000ms；这段时间界面本来就是「正在进入网页播放」的黑屏，用户无感
-      await Future<void>.delayed(const Duration(milliseconds: 1000));
+      // 部分机器会撞出 0xc0000005，先让系统喘口气
+      await Future<void>.delayed(const Duration(milliseconds: 600));
       if (_currentChannel?.id != channel.id) return;
       // 网页先在后台全屏缓冲（视频位保持黑屏），起播后再推到前台
       _webPageActive = true;
@@ -2503,32 +2452,18 @@ class PlayerController extends ChangeNotifier {
   List<Channel> get flatChannels =>
       [for (final cat in _categories) ...cat.channels];
 
-  /// 频道序号（1 起），不在列表中返回 null。
-  ///
-  /// ID 精确匹配失败时按名字兜底：开机恢复播放时若播放列表还没加载完
-  /// （或临时频道对象不在列表里），卡片序号会一直是 "--"（2026-11-15
-  /// 实测：退出重进后切台卡片没有 ID，网页源反而正常）。同名频道在
-  /// 当前列表里几乎总是同一个台，显示序号按它算。
+  /// 频道序号（1 起），不在列表中返回 null
   int? channelNumberOf(Channel? ch) {
     if (ch == null) return null;
-    final all = flatChannels;
-    var idx = all.indexWhere((c) => c.id == ch.id);
-    if (idx < 0 && ch.name.isNotEmpty) {
-      idx = all.indexWhere((c) => c.name == ch.name);
-    }
+    final idx = flatChannels.indexWhere((c) => c.id == ch.id);
     return idx < 0 ? null : idx + 1;
   }
 
-  /// 当前频道序号（1 起，同域口径）。ID 匹配不到时按名字兜底，
-  /// 否则恢复播放的临时频道对象会让切台卡片永远显示 "--"
+  /// 当前频道序号（1 起，同域口径）
   int? get currentChannelNumber {
     final ch = _currentChannel;
     if (ch == null) return null;
-    final all = _switchDomainChannels;
-    var idx = all.indexWhere((c) => c.id == ch.id);
-    if (idx < 0 && ch.name.isNotEmpty) {
-      idx = all.indexWhere((c) => c.name == ch.name);
-    }
+    final idx = _switchDomainChannels.indexWhere((c) => c.id == ch.id);
     return idx < 0 ? null : idx + 1;
   }
 
@@ -3185,8 +3120,7 @@ class PlayerController extends ChangeNotifier {
           .timeout(const Duration(milliseconds: 400));
     } catch (_) {}
     try {
-      await _disposeVideoController(detachUi: false)
-          .timeout(const Duration(seconds: 2));
+      await _disposeVideoController().timeout(const Duration(seconds: 2));
     } catch (_) {}
     try {
       await audioStop().timeout(const Duration(milliseconds: 400));
@@ -3347,13 +3281,12 @@ class PlayerController extends ChangeNotifier {
 
     switch (_sleepAction) {
       case SleepAction.shutdown:
-        OsdBus.show('定时关闭：正在关机', icon: Icons.power_settings_new);
+        OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 应用内倒计时已经走完，到这里就直接关机。以前发 /t 15，
-        // Windows 会弹「即将注销你的登录」蓝色通知——用户明确不要
-        // 任何系统提示。先发命令再退程序：进程先死不影响关机。
+        // 先发系统命令再退程序：进程先死也不影响系统照常关闭，
+        // 15 秒内还能在命令行 `shutdown /a` 撤销
         if (isDesktop) {
-          await shutdownSystem();
+          await shutdownSystem(delaySeconds: 15);
         }
         if (isDesktop) {
           await ExitGuard.quit();
@@ -3837,12 +3770,6 @@ class PlayerController extends ChangeNotifier {
   static const _kSleepAction = 'settings_sleep_action';
   static const _kSleepAt = 'settings_sleep_at_ms';
   static const _kResumeLastChannel = 'settings_resume_last_channel';
-  // 托盘三兄弟以前只同步给运行时、**从来没有落盘**：重启后
-  // closeToTray 又变回 false，✕ 直接退——用户报的「开了托盘开关
-  // 点 ✕ 还是退出」就是这么来的
-  static const _kCloseToTray = 'settings_close_to_tray';
-  static const _kTrayMute = 'settings_tray_mute';
-  static const _kFishHotkey = 'settings_fish_hotkey';
   static const _kAudioPreset = 'settings_audio_preset';
   static const _kAudioEqGains = 'settings_audio_eq_gains';
   static const _kSpectrumTexture = 'settings_spectrum_texture';
@@ -3889,9 +3816,6 @@ class PlayerController extends ChangeNotifier {
         sleepActionKey: p.getString(_kSleepAction) ?? 'pause',
         sleepAtMs: p.getInt(_kSleepAt) ?? 0,
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
-        closeToTray: p.getBool(_kCloseToTray) ?? false,
-        trayMute: p.getBool(_kTrayMute) ?? true,
-        fishHotkey: p.getBool(_kFishHotkey) ?? true,
         audioPreset: p.getString(_kAudioPreset) ?? '',
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
         spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
@@ -3906,10 +3830,9 @@ class PlayerController extends ChangeNotifier {
       // ✕ 最小化到托盘：读回设置并同步给关闭拦截（Windows）
       if (isDesktop && kIsWindowsDesktop) {
         TrayService.closeToTray = _settings.closeToTray;
-        // 关闭拦截常开，由 Dart 侧裁决 hide 还是退出（见 main.dart 的
-        // _OmiWindowListener）。原来只在开关为 true 时才 setPreventClose，
-        // 一旦开关同步晚一拍/失败，✕ 就直接销毁窗口。
-        unawaited(windowManager.setPreventClose(true));
+        if (_settings.closeToTray) {
+          unawaited(windowManager.setPreventClose(true));
+        }
       }
       // 定时关闭跨启动续上（过期则直接清掉）
       _restoreSleepTimer();
@@ -4011,9 +3934,6 @@ class PlayerController extends ChangeNotifier {
       await putString(_kSleepAction, _settings.sleepActionKey);
       await putInt(_kSleepAt, _settings.sleepAtMs);
       await putBool(_kResumeLastChannel, _settings.resumeLastChannel);
-      await putBool(_kCloseToTray, _settings.closeToTray);
-      await putBool(_kTrayMute, _settings.trayMute);
-      await putBool(_kFishHotkey, _settings.fishHotkey);
     } catch (_) {}
   }
 
@@ -4062,11 +3982,9 @@ class PlayerController extends ChangeNotifier {
       _applyAlwaysOnTop();
     }
     if (closeToTrayChanged && kIsWindowsDesktop) {
-      // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播。
-      // 拦截本身不随开关关掉：开关只决定「✕ 之后 hide 还是 quit」，
-      // 关掉拦截等于把裁决权交回 runner，任何同步延迟都会变成直接退出。
+      // ✕ 最小化到托盘：拦截系统关闭，窗口隐藏继续播
       TrayService.closeToTray = settings.closeToTray;
-      unawaited(windowManager.setPreventClose(true));
+      unawaited(windowManager.setPreventClose(settings.closeToTray));
     }
     if (dlnaChanged) {
       if (settings.dlnaEnabled) {
@@ -4126,18 +4044,8 @@ class PlayerController extends ChangeNotifier {
   // ==================== 后台播放 / 摸鱼模式（桌面端） ====================
 
   /// 摸鱼模式：窗口隐藏 + 静音，托盘图标是唯一入口（方案：后台播放场景矩阵）
-  ///
-  /// 真值放在 controller 侧：托盘服务的 _fishMode 只是菜单文案的镜像，
-  /// 两条状态各记各的必然错位（曾出现「菜单写退出，点下去还在摸鱼」）。
-  bool get fishMode => _fishActive;
-  bool _fishActive = false;
+  bool get fishMode => TrayService.instance.fishMode;
   bool? _mutedBeforeFish;
-
-  /// 进托盘前的静音状态（后台播放用，与摸鱼分开记：摸鱼恢复时按它还原）
-  bool? _mutedBeforeTray;
-
-  /// 当前会话是否开着「缩到托盘静音」并且确实是我们静的音
-  bool get _trayMutedByUs => _mutedBeforeTray != null;
 
   /// 注入托盘回调：托盘菜单/左键如何驱动窗口与播放状态（启动时调用一次）
   Future<void> bindTrayHandlers() async {
@@ -4147,13 +4055,6 @@ class PlayerController extends ChangeNotifier {
         await windowManager.show();
         await windowManager.focus();
       } catch (_) {}
-      // 从托盘恢复：把我们为「缩托盘静音」压下去的静音还原。
-      // 只还原自己改过的状态，用户本来手动静音的不会被打开。
-      if (_trayMutedByUs) {
-        final wasMuted = _mutedBeforeTray == true;
-        _mutedBeforeTray = null;
-        if (!wasMuted && _isMuted) await setMuted(false);
-      }
     };
     TrayService.onEnterFish = () => enterFishMode();
     TrayService.onExitFish = () => exitFishMode();
@@ -4174,28 +4075,16 @@ class PlayerController extends ChangeNotifier {
   Future<void> enterBackgroundAudio() async {
     if (!kIsWindowsDesktop) return;
     await TrayService.ensure();
-    // 「缩到托盘时静音」开关：默认开（后台播放就是只听声的场景，
-    // 但办公室/家里有人时恰恰要没声）。先记原状态，恢复时还原。
-    if (_settings.trayMute && _mutedBeforeTray == null) {
-      _mutedBeforeTray = _isMuted;
-      if (!_isMuted) await setMuted(true);
-    }
     try {
       await windowManager.hide();
     } catch (_) {}
   }
 
   /// 摸鱼模式：静音 + 隐藏窗口（音量状态先记住）
-  ///
-  /// 摸鱼**永远静音**，不受「缩托盘静音」开关影响：老板键的意义就是
-  /// 一键没声，留个开关等于留个坑。
   Future<void> enterFishMode() async {
-    if (!kIsWindowsDesktop || _fishActive) return;
+    if (!kIsWindowsDesktop || fishMode) return;
     await TrayService.ensure();
-    _fishActive = true;
-    // 让原生钩子在我们隐身期间也对 F9 放行（否则前台不是本进程，
-    // F9 直接被系统送给别的窗口，按第二次回不来）
-    unawaited(WinHotkeys().setHidden(true));
+    await TrayService.updateMenu(fishMode: true);
     _mutedBeforeFish = _isMuted;
     if (!_isMuted) await setMuted(true);
     try {
@@ -4206,9 +4095,8 @@ class PlayerController extends ChangeNotifier {
 
   /// 退出摸鱼：显示窗口 + 还原音量状态
   Future<void> exitFishMode() async {
-    if (!kIsWindowsDesktop || !_fishActive) return;
-    _fishActive = false;
-    unawaited(WinHotkeys().setHidden(false));
+    if (!kIsWindowsDesktop || !fishMode) return;
+    await TrayService.updateMenu(fishMode: false);
     if (_mutedBeforeFish == false) await setMuted(false);
     _mutedBeforeFish = null;
     try {
@@ -4216,15 +4104,6 @@ class PlayerController extends ChangeNotifier {
       await windowManager.focus();
     } catch (_) {}
     notifyListeners();
-  }
-
-  /// F9 老板键 / 托盘菜单 / 托盘左键的共同入口：进或出摸鱼。
-  /// 状态下沉到 TrayService.toggleFish 一处翻转，菜单文案与真实状态
-  /// 不会再各走各的。
-  Future<void> toggleFishMode() async {
-    if (!kIsWindowsDesktop) return;
-    await TrayService.ensure();
-    await TrayService.instance.toggleFish();
   }
 
   // ==================== 声音实验室（方案 12.3 第二档） ====================
@@ -5387,11 +5266,7 @@ class PlayerController extends ChangeNotifier {
   // CI 构建时由 .github/workflows/build.yml 向 windows/runner/main.cpp
   // 注入「启动保存状态 + 15 秒定时器恢复」代码，见 Patch Windows runner 步骤。
 
-  /// [detachUi] 为 true 时先通知界面摘掉视频层、等合成器交完最后一帧，
-  /// 再释放原生资源（切台/切网页必需，见下方注释）。
-  /// 退出路径（dispose / shutdownForExit）传 false：界面马上要消失，
-  /// 不必再等帧，省掉这 200ms 让 mpv 尽快释放。
-  Future<void> _disposeVideoController({bool detachUi = true}) async {
+  Future<void> _disposeVideoController() async {
     // 先尝试释放上一轮 dispose 挂起的孤儿实例
     _retryOrphanDispose();
     final c = _videoController;
@@ -5403,24 +5278,6 @@ class PlayerController extends ChangeNotifier {
         try {
           c.removeListener(closure);
         } catch (_) {}
-      }
-      // ---- 顺序是关键（0xc0000005 闪退的根因）---------------------------
-      // 以前这里直接 release，界面到 600ms 后（_webPageActive=true）才
-      // 重建、把视频层换掉。这 600ms 里 VideoPlayerWidget 手里还攥着
-      // 旧控制器，每帧继续贴**已释放的纹理**——Windows/MPV 上就是
-      // 「Exception Processing Message 0xc0000005」系统错误框，点确定
-      // 进程直接死（用户 2.1.47 实测：普通直播切网页直播）。
-      // 正确顺序：置空 → 通知界面摘掉视频层 → 等合成器交完最后一帧
-      // → 再释放原生渲染资源（mpv 的 D3D 设备）。
-      if (detachUi) {
-        notifyListeners();
-        // 等两帧左右：endOfFrame 在没有帧调度时（最小化/锁屏）可能不返回，
-        // 加超时兜底，绝不能把切台流程卡死
-        try {
-          await WidgetsBinding.instance.endOfFrame
-              .timeout(const Duration(milliseconds: 120));
-        } catch (_) {}
-        await Future<void>.delayed(const Duration(milliseconds: 90));
       }
       // 先摘监听再释放：media_kit 的 release 串行 cancel 订阅并 dispose
       // player，自身幂等；超时仅意味着底层仍在释放，绝不重复调用
@@ -5536,7 +5393,7 @@ class PlayerController extends ChangeNotifier {
     if (_isRecording && _videoController != null) {
       unawaited(_videoController!.stopRecord());
     }
-    _disposeVideoController(detachUi: false);
+    _disposeVideoController();
     WakelockPlus.disable();
     dlnaService.stop();
     remoteAdminService.stop();

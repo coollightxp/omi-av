@@ -78,9 +78,16 @@ class TrayService {
       MenuSeparator(),
       MenuItemLabel(
         label: _fishMode ? '退出摸鱼模式（恢复画面声音）' : '摸鱼模式（静音并隐藏窗口）',
-        // 统一走 toggleFish：菜单点击、F9 快捷键、托盘左键三条入口
-        // 只改同一处状态机，避免"菜单写着退出、实际又进去"这类错位
-        onClicked: (_) => instance.toggleFish(),
+        onClicked: (_) async {
+          _fishMode = !_fishMode;
+          await updateMenu(fishMode: _fishMode);
+          if (_fishMode) {
+            // 摸鱼动作本体在 controller（静音 + 隐藏窗口）
+            onEnterFish?.call();
+          } else {
+            onExitFish?.call();
+          }
+        },
       ),
       MenuSeparator(),
       MenuItemLabel(label: '退出', onClicked: (_) => onQuit?.call()),
@@ -88,22 +95,6 @@ class TrayService {
   }
 
   static void Function()? onEnterFish;
-
-  /// 翻转摸鱼状态并驱动回调。
-  ///
-  /// 三个入口（托盘菜单、F9 老板键、托盘左键）以前各写一遍翻转逻辑，
-  /// 只要有一处忘了同步 _fishMode，菜单文案与真实状态就会错位，
-  /// 出现「退出摸鱼模式」点下去仍是摸鱼。现在只剩这一处。
-  Future<void> toggleFish() async {
-    _fishMode = !_fishMode;
-    await updateMenu(fishMode: _fishMode);
-    if (_fishMode) {
-      // 摸鱼动作本体在 controller（静音 + 隐藏窗口）
-      onEnterFish?.call();
-    } else {
-      onExitFish?.call();
-    }
-  }
 
   /// 摸鱼状态变化后重建菜单文案
   static Future<void> updateMenu({required bool fishMode}) async {

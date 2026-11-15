@@ -3,9 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
-import '../services/exit_guard.dart';
 import '../services/player_controller.dart';
-import '../services/tray_service.dart';
 import '../services/window_drag.dart';
 
 /// 顶部悬停标题栏：平时隐藏，鼠标移到顶部出现。
@@ -107,17 +105,8 @@ class TopTitleBar extends StatelessWidget {
                         Icons.minimize, '最小化', () => windowManager.minimize()),
                     // 「最大化/还原」按钮已移除：窗口固定尺寸（用户要求，
                     // 防止拖拽缩放导致面板变形、文字堆叠）。小窗/全屏入口不变
-                    // ✕ 的裁决放在 Dart 侧：开着「最小化到托盘」就隐藏窗口
-                    // 继续播，否则走有序退出。以前只依赖 windowManager 的
-                    // preventClose 事件链，链没接上（设置刚开、拦截还没生效）
-                    // 就直接销毁窗口——用户实测「开了托盘开关点 ✕ 还是退出」。
-                    _winButton(Icons.close, '关闭', () async {
-                      if (TrayService.closeToTray) {
-                        await windowManager.hide();
-                      } else {
-                        await ExitGuard.quit();
-                      }
-                    }, hoverColor: Colors.red),
+                    _winButton(Icons.close, '关闭', () => windowManager.close(),
+                        hoverColor: Colors.red),
                     const SizedBox(width: 6),
                   ],
                 ),

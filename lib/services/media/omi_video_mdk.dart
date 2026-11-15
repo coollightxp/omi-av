@@ -59,13 +59,7 @@ class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
     if (_registered && _bufferSecs == bufferSeconds) return;
     _registered = true;
     _bufferSecs = bufferSeconds;
-    // 上限 120 秒与 MPV 侧一致；起播预读最多 3 秒，避免大缓冲等太久。
-    // 上限保底 10 秒（默认 5 与投屏 15 的折中）：直播是实时流，上限囤
-    // 太大延迟大、容易丢帧追（2.1.40 保底 15 秒实测直播反而卡）；但
-    // 5 秒对高码率投屏又太薄。取 10 秒两头兼顾，实测后再定
-    // 2026-11-14 用户实测：10 秒折中在 Windows 上不如 5 秒稳，回退到
-    // clamp(5,120)（2.1.41 的观感）。缓冲上限只影响直播囤积深度，
-    // 投屏的改善来自代理攒批，不靠这个参数。
+    // 上限 120 秒与 MPV 侧一致；起播预读最多 3 秒，避免大缓冲等太久
     final maxMs = bufferSeconds.clamp(5, 120) * 1000;
     final startMs = maxMs < 3000 ? maxMs : 3000;
     try {

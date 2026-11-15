@@ -43,14 +43,6 @@ export 'ime_safe_text_field.dart' show ImeSafeTextField;
 /// 遮罩）叠在一起，透出来的内容混成一片，看着很乱。
 final ValueNotifier<bool> settingsChildOpen = ValueNotifier<bool>(false);
 
-/// 设置面板「把焦点拉回来」的信号。
-///
-/// 播放页在设置打开时收到 OK，却发现 primaryFocus 已经不在面板里
-/// （改设置项会重建行控件，原 FocusNode 被换掉/卸载），就 poke 一下。
-/// 面板收到后把焦点落到左栏分类——下一次 OK 至少有个确定的目标，
-/// 不会出现「按 OK 什么也不发生，只能按返回重进设置」。
-final ValueNotifier<int> settingsPanelFocusPoke = ValueNotifier<int>(0);
-
 /// 设置里弹下一级卡片一律走这里：弹出前先把设置卡片让开，
 /// 关闭（含取消、返回、点遮罩、Esc）后恢复。
 ///
@@ -176,8 +168,6 @@ class _SettingsPanelState extends State<SettingsPanel>
     HardwareKeyboard.instance.addHandler(_onVerticalKey);
     // 下一级卡片开合时只改本卡片透明度（不重建整棵树）
     settingsChildOpen.addListener(_onChildOpenChanged);
-    // 播放页发现焦点悬空时 poke：把焦点拉回分类栏
-    settingsPanelFocusPoke.addListener(_onFocusPoke);
     // 安卓端：开始采样剪贴板（粘贴按钮弹出历史供选择）
     if (_showPasteButton) _ClipHistory.ensureWatching();
   }
@@ -185,7 +175,6 @@ class _SettingsPanelState extends State<SettingsPanel>
   @override
   void dispose() {
     settingsChildOpen.removeListener(_onChildOpenChanged);
-    settingsPanelFocusPoke.removeListener(_onFocusPoke);
     _settingsOwner?.settingsNotifier.removeListener(_onSettingsChanged);
     HardwareKeyboard.instance.removeHandler(_onVerticalKey);
     _tabController.removeListener(_onTabIndexChanged);
@@ -198,14 +187,6 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 下一级卡片开/合：只要重画本卡片（改的是 AnimatedOpacity 的终值）
   void _onChildOpenChanged() {
     if (mounted) setState(() {});
-  }
-
-  /// 播放页 poke：焦点悬空/跑出面板时，把焦点落回左栏分类。
-  /// 只动焦点，不重建、不弹键盘。
-  void _onFocusPoke() {
-    if (!mounted || !widget.isOpen) return;
-    if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
-    _navFocus.requestFocus();
   }
 
   int _lastTabIndex = 0;
@@ -270,14 +251,6 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 面板根焦点上的按键：与上面的全局处理器共用同一套逻辑，
   /// 保证焦点在面板内时按键一定先在这里被吃掉
   KeyEventResult _onPanelKeyEvent(FocusNode node, KeyEvent event) {
-    if (!widget.isOpen) return KeyEventResult.ignored;
-    // 上面压着下一级卡片（编辑/确认/扫码…）时，按键归那张卡片。
-    // 设置面板只是淡出，仍在树里；不挡的话上下键会把焦点送到
-    // 看不见的行尾按钮上，OK 一按就执行了（安卓实测：切台时
-    // 弹出「节目单已是最新」，其实就是这条路径）
-    if (!(ModalRoute.of(context)?.isCurrent ?? true)) {
-      return KeyEventResult.ignored;
-    }
     if (_handleVertical(event)) return KeyEventResult.handled;
     // 宽屏双栏：内容区按左 = 回分类栏（遥控器用户左右双向都能走）
     if (event is KeyDownEvent || event is KeyRepeatEvent) {
@@ -354,7 +327,6 @@ class _SettingsPanelState extends State<SettingsPanel>
   /// 不再有「到顶按上跳回分类栏」——用户明确要求上下只在页内循环，
   /// 只有左右才在两区之间跳。
   bool _handleVertical(KeyEvent event) {
-    if (!widget.isOpen) return false;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     final key = event.logicalKey;
     final isUp = key == LogicalKeyboardKey.arrowUp;
@@ -425,17 +397,6 @@ class _SettingsPanelState extends State<SettingsPanel>
 
   @override
   Widget build(BuildContext context) {
-    // 面板常驻挂载（靠位移+透明度收放），**关闭时必须把整棵子树移出
-    // 焦点树**：否则里面的输入框/行尾按钮还能持有焦点。安卓实测后果：
-    // ① 切台时输入法自己蹦出来（隐藏输入框仍连着输入连接）；
-    // ② OK 被设置里「立即更新节目单」吃掉，弹「节目单已是最新」。
-    // 光判 isOpen 不接按键不够——焦点留在里面时，激活走的是焦点树，
-    // 不经过按键分发。
-    //
-    // 注意包装顺序：AnimatedPositioned 必须是 Stack 的**直接子级**
-    // （定位靠 Stack 的 parent data），ExcludeFocus/IgnorePointer 只能
-    // 套在它里面——v2.1.43 把它们包在了外面，定位失效，滑下去的面板
-    // 露在屏幕上成了一层灰罩（2.1.43 实测）。
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
@@ -447,15 +408,7 @@ class _SettingsPanelState extends State<SettingsPanel>
         // 上面压了下一级卡片（编辑/确认/诊断/扫码…）就先淡出，
         // 屏幕上只亮一张卡片；关掉下一级自动淡回来
         opacity: widget.isOpen && !settingsChildOpen.value ? 1.0 : 0.0,
-        // 关闭时整棵子树退出焦点树 + 不响应指针（详见 build 开头注释）。
-        // 下级卡片亮着时同理：本卡片已淡到 opacity 0，但**仍然全屏宽
-        // 占位**，不关指针的话它会静默吃掉鼠标 hover（用户实测：设置里
-        // 弹过下一级卡片后，鼠标挪到左边缘频道面板不再弹出）。
-        child: IgnorePointer(
-          ignoring: !widget.isOpen || settingsChildOpen.value,
-          child: ExcludeFocus(
-            excluding: !widget.isOpen || settingsChildOpen.value,
-            child: ScaledPanel(
+        child: ScaledPanel(
           alignment: Alignment.bottomCenter,
           scale: panelScaleOf(context) * windowFitScaleOf(context),
           // 限宽居中：设置面板不再通栏铺满，宽屏下保持 760 逻辑像素以内
@@ -598,8 +551,6 @@ class _SettingsPanelState extends State<SettingsPanel>
                 ),
               ),
             ),
-          ),
-        ),
           ),
         ),
       ),
@@ -2813,20 +2764,6 @@ class _SystemSettingsTab extends StatelessWidget {
                       controller.updateSettings(s.copyWith(closeToTray: v)),
                   activeColor: Colors.blueAccent,
                 ),
-              if (defaultTargetPlatform == TargetPlatform.windows)
-                SwitchListTile(
-                  secondary: const Icon(Icons.visibility_off,
-                      color: Colors.white70),
-                  title: const Text('F9 一键摸鱼',
-                      style: TextStyle(color: Colors.white, fontSize: 15)),
-                  subtitle: const Text(
-                      '按 F9 立刻缩到托盘并静音（老板键），再按 F9 或点托盘图标恢复',
-                      style: TextStyle(color: Colors.white54, fontSize: 12)),
-                  value: s.fishHotkey,
-                  onChanged: (v) =>
-                      controller.updateSettings(s.copyWith(fishHotkey: v)),
-                  activeColor: Colors.blueAccent,
-                ),
               SwitchListTile(
                 secondary:
                     const Icon(Icons.power_settings_new, color: Colors.white70),
@@ -3477,17 +3414,8 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 40),
       child: Container(
-        // 手机上嫌大（2K 屏：150dp 在 1440px 上仍占三分之一屏宽）。
-        // 短边 <600 用 110 的码 + 240 的卡片，桌面/平板维持 216/360。
-        constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.shortestSide < 600
-                ? 210
-                : 360),
-        padding: EdgeInsets.fromLTRB(
-            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
-            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
-            MediaQuery.of(context).size.shortestSide < 600 ? 16 : 22,
-            18),
+        constraints: const BoxConstraints(maxWidth: 360),
+        padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
         decoration: BoxDecoration(
           color: const Color(0xFFF7F8FA),
           borderRadius: BorderRadius.circular(22),
@@ -3506,9 +3434,7 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
             const SizedBox(height: 18),
             // 二维码：白底圆角卡片内嵌圆角方块码，四周留白保证可识别
             Container(
-              // 手机上白底留白同步收窄，整块更紧凑（2K 屏手机实测仍偏大）
-              padding: EdgeInsets.all(
-                  MediaQuery.of(context).size.shortestSide < 600 ? 10 : 14),
+              padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(16),
@@ -3523,8 +3449,7 @@ Future<void> showRemoteAdminQrDialog(BuildContext context, String url) {
               child: QrImageView(
                 data: url,
                 version: QrVersions.auto,
-                size:
-                    MediaQuery.of(context).size.shortestSide < 600 ? 96 : 216,
+                size: 216,
                 backgroundColor: Colors.white,
                 padding: EdgeInsets.zero,
                 eyeStyle: const QrEyeStyle(

@@ -280,23 +280,11 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
     }
   }
 
-  /// 打开在线电台搜索。**先开弹窗、再把抽屉收起来**：抽屉留在弹窗
-  /// 后面时，它自己的上下键处理还活着（用户实测：从抽屉顶部图标点出来
-  /// 的搜索面板遥控器完全动不了，而设置里打开的同一个面板能操作）。
-  /// 弹窗与抽屉是同一个组件，差别只在打开时抽屉还开着。
-  void _openRadioSearch() {
-    RadioSearchDialog.show(context);
-    widget.onClose();
-  }
-
   /// 遥控器/键盘按键入口（由 PlayerScreen 统一分发，Windows 低级钩子
   /// 与 HardwareKeyboard 走同一入口）。
   /// action: up/down/left/right/ok/back；back 与 ok 在按下边沿触发。
   void handleRemoteKey(String action, {required bool isDown}) {
     if (!widget.isOpen || !mounted) return;
-    // 电台搜索弹窗盖在抽屉上时，按键归弹窗：抽屉不许在暗地里
-    // 继续吃上下键（否则弹窗看起来「遥控器完全没反应」）
-    if (RadioSearchDialog.active) return;
     if (action == 'back') {
       if (isDown) widget.onClose();
       return;
@@ -422,12 +410,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             // 新的一次按下：清掉可能残留的"吃掉抬起"标记
             _swallowOkUp = false;
             // 长按 OK（800ms）= 收藏/取消收藏；抬起前未超时则按短按播放
-            // 蓝牙遥控器抬起事件可能迟到甚至丢失：计时器到点时抽屉可能
-            // 已经因为别的原因关掉了，绝不能在抽屉不可见时还偷偷收藏
             _okLongFired = false;
             _okLongTimer?.cancel();
             _okLongTimer = Timer(const Duration(milliseconds: 800), () {
-              if (!widget.isOpen || !mounted) return;
               _okLongFired = true;
               final idx = _kbChannelIndex.clamp(0, channels.length - 1);
               _toggleFavorite(channels[idx]);
@@ -581,43 +566,36 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
       top: 0,
       bottom: 0,
       width: drawerW,
-      child: IgnorePointer(
-        ignoring: !widget.isOpen,
-        child: ExcludeFocus(
-          excluding: !widget.isOpen,
-          child: MouseRegion(
-            onEnter: (_) => widget.onHoverEnter?.call(),
-            onExit: (_) => widget.onHoverExit?.call(),
-            onHover: (_) => widget.onHoverMove?.call(),
-            child: AnimatedOpacity(
-              duration: const Duration(milliseconds: 200),
-              opacity: widget.isOpen ? 1.0 : 0.0,
-              child: ScaledPanel(
-                alignment: Alignment.centerLeft,
-                // 桌面窗口变小时整体等比缩，固定宽度的抽屉不被挤压变形
-                scale: windowFitScaleOf(context),
-                child: MediaQuery(
-                  // 只在面板内缩小文字，不影响主界面其它区域
-                  data: MediaQuery.of(context).copyWith(
-                    textScaler: TextScaler.linear(
-                      MediaQuery.textScalerOf(context).scale(1.0) *
-                          (compact ? 0.78 : 1.0),
-                    ),
-                  ),
-                  child: Material(
-                    // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
-                    color: AppColors.overlay,
-                    elevation: 28,
-                    shape: const Border(
-                        right: BorderSide(color: AppColors.stroke)),
-                    child: SafeArea(
-                      child: Column(
-                        children: [
-                          _buildHeader(),
-                          Expanded(child: _buildBody()),
-                        ],
-                      ),
-                    ),
+      child: MouseRegion(
+        onEnter: (_) => widget.onHoverEnter?.call(),
+        onExit: (_) => widget.onHoverExit?.call(),
+        onHover: (_) => widget.onHoverMove?.call(),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 200),
+          opacity: widget.isOpen ? 1.0 : 0.0,
+          child: ScaledPanel(
+            alignment: Alignment.centerLeft,
+            // 桌面窗口变小时整体等比缩，固定宽度的抽屉不被挤压变形
+            scale: windowFitScaleOf(context),
+            child: MediaQuery(
+              // 只在面板内缩小文字，不影响主界面其它区域
+              data: MediaQuery.of(context).copyWith(
+                textScaler: TextScaler.linear(
+                  MediaQuery.textScalerOf(context).scale(1.0) *
+                      (compact ? 0.78 : 1.0),
+                ),
+              ),
+              child: Material(
+                // 与设置面板同一套表面色 + 描边（用户要求全局面板统一）
+                color: AppColors.overlay,
+                elevation: 28,
+                shape: const Border(right: BorderSide(color: AppColors.stroke)),
+                child: SafeArea(
+                  child: Column(
+                    children: [
+                      _buildHeader(),
+                      Expanded(child: _buildBody()),
+                    ],
                   ),
                 ),
               ),
@@ -662,7 +640,7 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
             IconButton(
               icon: const Icon(Icons.travel_explore, color: Colors.white70),
               tooltip: '搜索在线电台',
-              onPressed: _openRadioSearch,
+              onPressed: () => RadioSearchDialog.show(context),
             ),
           IconButton(
             icon: const Icon(Icons.close, color: Colors.white70),
@@ -806,7 +784,9 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
               OutlinedButton.icon(
                 onPressed: radioOnlySource
                     ? () => _switchTab(1)
-                    : (isRadioTab ? _openRadioSearch : widget.onOpenSettings),
+                    : (isRadioTab
+                        ? () => RadioSearchDialog.show(context)
+                        : widget.onOpenSettings),
                 icon: Icon(
                     radioOnlySource
                         ? Icons.radio

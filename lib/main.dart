@@ -17,22 +17,13 @@ import 'services/win_error_mode.dart';
 /// 托盘图标左键恢复；否则交给 [ExitGuard] 走统一的有序退出
 /// （先销毁网页控件/WebView2 环境，再快速结束进程）。
 class _OmiWindowListener extends WindowListener {
-  /// 持有实例：window_manager 内部用 Set 保存监听者，临时对象虽然
-  /// 不会被立刻回收，但显式留一个引用能避免任何版本把它按弱引用处理
-  static final _OmiWindowListener instance = _OmiWindowListener._();
-  _OmiWindowListener._();
-
   @override
   void onWindowClose() async {
     if (TrayService.closeToTray) {
-      try {
-        await windowManager.hide();
-      } catch (e) {
-        debugPrint('hide to tray failed: $e');
-      }
-      return;
+      await windowManager.hide();
+    } else {
+      await ExitGuard.quit();
     }
-    await ExitGuard.quit();
   }
 }
 
@@ -83,7 +74,7 @@ void main() async {
   if (desktop) {
     await windowManager.ensureInitialized();
     // 关闭拦截统一在这处理（托盘设置见 设置→系统）
-    windowManager.addListener(_OmiWindowListener.instance);
+    windowManager.addListener(_OmiWindowListener());
 
     final launchAtStartupSynced = launchAtStartup;
     if (prefsOk) {
