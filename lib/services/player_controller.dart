@@ -4361,10 +4361,18 @@ class PlayerController extends ChangeNotifier {
 
   static String _audioPresetLabel(String key) {
     switch (key) {
+      case 'space':
+        return '3D 全景环绕';
       case 'voice':
-        return '人声增强';
+        return '清澈人声';
       case 'bass':
-        return '低音增强';
+        return '澎湃低音';
+      case 'vintage':
+        return '复古胆机';
+      case 'live':
+        return '现场 LIVE';
+      case 'car':
+        return '车载座舱';
       case 'night':
         return '夜间模式';
       default:

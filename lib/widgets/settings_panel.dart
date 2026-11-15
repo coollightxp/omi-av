@@ -2410,10 +2410,18 @@ class _PlayerSettingsTab extends StatelessWidget {
 
   static String _audioPresetLabelOf(String key) {
     switch (key) {
+      case 'space':
+        return '3D 全景环绕';
       case 'voice':
-        return '人声增强';
+        return '清澈人声';
       case 'bass':
-        return '低音增强';
+        return '澎湃低音';
+      case 'vintage':
+        return '复古胆机';
+      case 'live':
+        return '现场 LIVE';
+      case 'car':
+        return '车载座舱';
       case 'night':
         return '夜间模式';
       default:
@@ -2425,9 +2433,13 @@ class _PlayerSettingsTab extends StatelessWidget {
       BuildContext context, PlayerController controller) async {
     final current = controller.audioPreset;
     final options = <(String, String, String)>[
-      ('', '标准', '不加处理，原声直出'),
-      ('voice', '人声增强', '新闻/口播更清楚，压轰鸣提人声'),
-      ('bass', '低音增强', '音乐台更带感'),
+      ('', '标准 / 原声无损', '不加处理，原声直出'),
+      ('space', '3D 全景环绕', '立体声拉宽+微回声，声音往外撑开'),
+      ('voice', '清澈人声', '新闻/口播更清楚，压轰鸣提人声'),
+      ('bass', '澎湃低音', '60/130Hz 双点提升，音乐台更带感'),
+      ('vintage', '复古胆机', '削高频毛刺暖低频，老收音机的味道'),
+      ('live', '现场 LIVE', '厅堂混响，宛如音乐厅前排'),
+      ('car', '车载座舱', '去风噪补鼓点，车载扬声器调校'),
       ('night', '夜间模式', '音量忽大忽小被抹平，睡前听不打醒'),
     ];
     final picked = await showChildDialog<String>(

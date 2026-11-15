@@ -240,12 +240,25 @@ class PlayerSettings {
 }
 
 /// 声音实验室预设（方案 12.3 第二档）：mpv lavfi 音频滤镜串。
-/// 「标准」为空（清除滤镜），不进表。
+/// 「标准 / 原声无损」为空（清除滤镜），不进表。
+/// 场景音效七档（2026-11-16，对齐 LXFM 的 7 种硬件级场景声场）：
+/// 都是标准 lavfi 滤镜（equalizer / aecho / extrastereo / highpass），
+/// mpv 内核在 Windows 与安卓同一套，切换即时生效。
 const Map<String, String> kAudioPresets = {
-  // 人声增强：压 250Hz 鼻音/轰鸣，提 3kHz 人声主区
+  // 3D 全景环绕：立体声拉宽 + 双段微回声，声音往外撑开
+  'space': 'extrastereo=m=1.8,aecho=0.7:0.55:20|45:0.22|0.12',
+  // 清澈人声：压 250Hz 鼻音/轰鸣，提 3kHz 人声主区
   'voice': 'equalizer=f=250:t=q:w=1.4:g=-3,equalizer=f=3000:t=q:w=1.2:g=4',
-  // 低音增强：80/160Hz 双点提升
-  'bass': 'equalizer=f=80:t=q:w=1.2:g=6,equalizer=f=160:t=q:w=1.2:g=3',
+  // 澎湃低音：60/130Hz 双点重提升，低频下潜有力
+  'bass': 'equalizer=f=60:t=q:w=1.2:g=7,equalizer=f=130:t=q:w=1.2:g=4',
+  // 复古胆机：削 13kHz 以上高频毛刺（电子管柔化），180Hz 暖低频托底
+  'vintage':
+      'equalizer=f=13000:t=q:w=1.4:g=-5,equalizer=f=200:t=q:w=1:g=3',
+  // 现场 LIVE：厅堂混响（60/120ms 两段衰减），音乐厅前排的空间感
+  'live': 'aecho=0.85:0.65:60|120:0.3|0.15',
+  // 车载座舱：先去掉 45Hz 以下发动机/风噪，再补鼓点和中高频穿透
+  'car': 'highpass=f=45,equalizer=f=100:t=q:w=1.2:g=4.5,'
+      'equalizer=f=3500:t=q:w=1.5:g=2',
   // 夜间模式：动态响度归一，音量忽大忽小被抹平，睡觉听不打醒
   'night': 'dynaudnorm=f=250:g=15:p=0.9',
 };
