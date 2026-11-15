@@ -165,8 +165,17 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   /// （切窗口、焦点被抢、廉价接收器只发按下不发抬起）把键锁死。
   final Map<int, int> _physDownAt = {};
 
-  /// 兜底：两路都完整发了 Down/Up（真正无法区分的重复）时，靠这个
-  /// 60ms 窗口挡第二路；正常人手连按远慢于它，不会误伤。
+  /// 每颗物理键「上次抬起」的时刻。用来识别第二种重复：设备把一次按下
+  /// 发成「Down-Up-Down」——两个 KeyDown 各配一个假抬起，间隔能到
+  /// 100~200ms。用「两次按下的间隔」当窗口挡它，窗口一小就漏、一大就
+  /// 误伤正常连按；但看**松开时长**就没有这个问题：真人按一下，手指
+  /// 抬起再落下至少 60ms 以上，设备补发的假抬起离下一个 Down 只有几
+  /// 毫秒。所以判据是「离上次抬起过了多久」，不是「离上次按下过了多久」。
+  final Map<int, int> _physUpAt = {};
+  static const int _bounceMs = 90;
+
+  /// 兜底：两路完整 Down/Up 且错开很远（>90ms 才松手）时，靠这个 60ms
+  /// 窗口挡第二路；正常人手连按远慢于它，不会误伤。
   int _lastKeyId = 0;
   int _lastKeyAt = 0;
 
@@ -176,6 +185,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     final phys = event.physicalKey.usbHidUsage;
     if (event is KeyUpEvent) {
       _physDownAt.remove(phys);
+      _physUpAt[phys] = now;
       return KeyEventResult.ignored;
     }
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
@@ -183,6 +193,13 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     if (downAt != null && now - downAt < 700) {
       // 还没抬起就又按下：这就是"按一下跳两行 / 两行两行地跳"的来源
       WebDiag.log('radio_key dup phys=$phys lg=${event.logicalKey.debugName}');
+      return KeyEventResult.handled;
+    }
+    final upAt = _physUpAt[phys];
+    if (upAt != null && now - upAt < _bounceMs) {
+      // 抬起后立刻又按下：机械抖动/接收器补发，不是人手连按
+      WebDiag.log('radio_key bounce phys=$phys '
+          'gap=${now - upAt}ms lg=${event.logicalKey.debugName}');
       return KeyEventResult.handled;
     }
     _physDownAt[phys] = now;
@@ -335,6 +352,10 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   /// 丢掉（间隔只有几毫秒）。真正的重复按下由物理键配对挡在前面。
   int _lastMoveAt = 0;
 
+  /// 上一次落到的行号。焦点因为列表重建/输入法抢焦而一时悬空时，
+  /// 用它兜底，避免下一次按键被当成「不在任何行上」而跳回顶部。
+  int _rowCursor = 0;
+
   bool _moveGate() {
     final now = DateTime.now().millisecondsSinceEpoch;
     // 30ms 只够挡「同一按键被两路同时派发」，挡不住人手连按，不会误伤
@@ -377,8 +398,9 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   void _moveRow(int delta) {
     if (_rowCount <= 0) return;
     if (!_moveGate()) return;
-    final cur = _currentRow();
-    if (cur < 0) {
+    var cur = _currentRow();
+    if (cur < 0) cur = _rowCursor;
+    if (cur < 0 || cur >= _rowCount) {
       _focusRow(0);
       return;
     }
@@ -435,6 +457,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
 
   /// 把焦点放到第 [row] 行的默认格上
   void _focusRow(int row) {
+    _rowCursor = row;
     if (row <= 0) {
       (_tab == 0 ? _tabSearchFocus : _tabMineFocus).requestFocus();
       _ensureVisible();
