@@ -156,28 +156,38 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   bool _onHardwareKey(KeyEvent event) =>
       _handleKey(event) == KeyEventResult.handled;
 
-  /// 一次按键的去抖窗口：部分遥控器/接收器会把一次按下连发两个
-  /// KeyDown（用户实测「按一下跳两格 / 两行两行地跳」）。同一颗键
-  /// 窗口内的第二个按下直接吞掉。
+  /// 物理键是否还按着。同一颗键在收到 KeyUp 之前的任何 KeyDown 都是
+  /// 重复（系统自动重复 / 接收器连发 / 多通道重复派发），一律吞掉。
   ///
-  /// 方向键给 220ms：实测这种接收器的两个 KeyDown 间隔能到 100~180ms，
-  /// 以前统一 60ms 根本挡不住，表现就是按一下走两行。人手在遥控器上
-  /// 连按方向键的间隔通常 >250ms，不会误伤；OK/返回这类"按了就有动作"
-  /// 的键仍用 60ms，避免连按被吞。
+  /// 用户实测「按一下 ↓ 走两行」：不靠时间窗猜（时间窗挡 30ms 的连发
+  /// 可以，挡 200ms 的就会误伤正常连按），改按「有没有抬起来」判定——
+  /// 一次按下只可能有一次 KeyDown。700ms 超时是防 KeyUp 丢事件
+  /// （切窗口、焦点被抢、廉价接收器只发按下不发抬起）把键锁死。
+  final Map<int, int> _physDownAt = {};
+
+  /// 兜底：两路都完整发了 Down/Up（真正无法区分的重复）时，靠这个
+  /// 60ms 窗口挡第二路；正常人手连按远慢于它，不会误伤。
   int _lastKeyId = 0;
   int _lastKeyAt = 0;
 
   KeyEventResult _handleKey(KeyEvent event) {
     if (!mounted) return KeyEventResult.ignored;
-    if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    final k = event.logicalKey;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final isArrow = k == LogicalKeyboardKey.arrowUp ||
-        k == LogicalKeyboardKey.arrowDown ||
-        k == LogicalKeyboardKey.arrowLeft ||
-        k == LogicalKeyboardKey.arrowRight;
-    final dedupMs = isArrow ? 220 : 60;
-    if (k.keyId == _lastKeyId && now - _lastKeyAt < dedupMs) {
+    final phys = event.physicalKey.usbHidUsage;
+    if (event is KeyUpEvent) {
+      _physDownAt.remove(phys);
+      return KeyEventResult.ignored;
+    }
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final downAt = _physDownAt[phys];
+    if (downAt != null && now - downAt < 700) {
+      // 还没抬起就又按下：这就是"按一下跳两行 / 两行两行地跳"的来源
+      WebDiag.log('radio_key dup phys=$phys lg=${event.logicalKey.debugName}');
+      return KeyEventResult.handled;
+    }
+    _physDownAt[phys] = now;
+    final k = event.logicalKey;
+    if (k.keyId == _lastKeyId && now - _lastKeyAt < 60) {
       return KeyEventResult.handled;
     }
     _lastKeyId = k.keyId;
@@ -321,15 +331,14 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   int get _rowCount =>
       _headRows + _resultCount + (_tab == 0 && _results.isNotEmpty ? 1 : 0);
 
-  /// 一次方向键只认一格：同一次按下被派发两遍时，第二遍直接丢掉。
-  /// 遥控器/接收机连发的两个 KeyDown 间隔实测 6~15ms，人手连按最快也在
-  /// 80ms 以上，90ms 挡得住重复、不误伤连按（按住走的是 KeyRepeatEvent，
-  /// 本函数只看 KeyDown，不会一顿一顿）。
+  /// 一次方向键只认一格：同一次按下被两条通道同时派发时，第二遍直接
+  /// 丢掉（间隔只有几毫秒）。真正的重复按下由物理键配对挡在前面。
   int _lastMoveAt = 0;
 
   bool _moveGate() {
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastMoveAt < 90) return false;
+    // 30ms 只够挡「同一按键被两路同时派发」，挡不住人手连按，不会误伤
+    if (now - _lastMoveAt < 30) return false;
     _lastMoveAt = now;
     return true;
   }
