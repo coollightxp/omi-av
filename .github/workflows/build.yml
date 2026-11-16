@@ -27,6 +27,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 版本一致性门禁：pubspec 的 version 前半段必须与 lib/core/app_version.dart
+      # 一致（退出卡片显示的是后者，历史上曾错位——包是 2.3.23、界面印 2.3.21）
+      - name: Version consistency check
+        run: |
+          PUB=$(grep -m1 '^version:' pubspec.yaml | sed 's/version: \([0-9.]*\).*/\1/')
+          APP=$(grep -m1 "value = " lib/core/app_version.dart | sed "s/.*value = '\\([^']*\\)'.*/\\1/")
+          echo "pubspec=$PUB app_version=$APP"
+          if [ "$PUB" != "$APP" ]; then
+            echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
+            exit 1
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -965,6 +977,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # 版本一致性门禁：pubspec 的 version 前半段必须与 lib/core/app_version.dart
+      # 一致（退出卡片显示的是后者，历史上曾错位——包是 2.3.23、界面印 2.3.21）
+      - name: Version consistency check
+        run: |
+          PUB=$(grep -m1 '^version:' pubspec.yaml | sed 's/version: \([0-9.]*\).*/\1/')
+          APP=$(grep -m1 "value = " lib/core/app_version.dart | sed "s/.*value = '\\([^']*\\)'.*/\\1/")
+          echo "pubspec=$PUB app_version=$APP"
+          if [ "$PUB" != "$APP" ]; then
+            echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
+            exit 1
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -1905,6 +1929,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 版本一致性门禁：pubspec 的 version 前半段必须与 lib/core/app_version.dart
+      # 一致（退出卡片显示的是后者，历史上曾错位——包是 2.3.23、界面印 2.3.21）
+      - name: Version consistency check
+        run: |
+          PUB=$(grep -m1 '^version:' pubspec.yaml | sed 's/version: \([0-9.]*\).*/\1/')
+          APP=$(grep -m1 "value = " lib/core/app_version.dart | sed "s/.*value = '\\([^']*\\)'.*/\\1/")
+          echo "pubspec=$PUB app_version=$APP"
+          if [ "$PUB" != "$APP" ]; then
+            echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
+            exit 1
+          fi
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -1947,6 +1983,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # 版本一致性门禁：pubspec 的 version 前半段必须与 lib/core/app_version.dart
+      # 一致（退出卡片显示的是后者，历史上曾错位——包是 2.3.23、界面印 2.3.21）
+      - name: Version consistency check
+        run: |
+          PUB=$(grep -m1 '^version:' pubspec.yaml | sed 's/version: \([0-9.]*\).*/\1/')
+          APP=$(grep -m1 "value = " lib/core/app_version.dart | sed "s/.*value = '\\([^']*\\)'.*/\\1/")
+          echo "pubspec=$PUB app_version=$APP"
+          if [ "$PUB" != "$APP" ]; then
+            echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
+            exit 1
+          fi
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -2458,6 +2506,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # 版本一致性门禁：pubspec 的 version 前半段必须与 lib/core/app_version.dart
+      # 一致（退出卡片显示的是后者，历史上曾错位——包是 2.3.23、界面印 2.3.21）
+      - name: Version consistency check
+        run: |
+          PUB=$(grep -m1 '^version:' pubspec.yaml | sed 's/version: \([0-9.]*\).*/\1/')
+          APP=$(grep -m1 "value = " lib/core/app_version.dart | sed "s/.*value = '\\([^']*\\)'.*/\\1/")
+          echo "pubspec=$PUB app_version=$APP"
+          if [ "$PUB" != "$APP" ]; then
+            echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
+            exit 1
+          fi
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2

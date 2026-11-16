@@ -82,6 +82,18 @@ class PlayerController extends ChangeNotifier {
   /// 这条 lavfi 链（安卓电台实测：直通正常，任选音效立刻 3/3 重试失败，
   /// 带档重启也起不来），自动摘掉回「标准」。
   DateTime? _afAppliedAt;
+
+  /// 滤镜余波抑制窗口：非直通档挂链后 30 秒内（含自愈之后再续 30 秒），
+  /// 期间的所有 error 事件都按「滤镜重配置的余波」处理——在播就清现场，
+  /// 断流就静默重拉，绝不进「自动重试 n/n」横幅。滤镜重配置往往冒出
+  /// 不止一次 error，而自愈会把预设清空，让第二次 error 绕过自愈判定
+  /// 直落重试横幅（Windows 2.3.23 实测），所以需要独立于预设的窗口。
+  DateTime? _afFalloutUntil;
+
+  bool get _afFalloutActive =>
+      !_isCasting &&
+      _afFalloutUntil != null &&
+      _afFalloutUntil!.isAfter(DateTime.now());
   PlayerSettings _settings = const PlayerSettings();
 
   /// 时钟显隐的独立通知器：切换它只重建时钟本身，不触发整棵播放
@@ -3784,15 +3796,27 @@ class PlayerController extends ChangeNotifier {
     // 重试就能不带滤镜跑通；用户想再试随时可重新选（会再次尝试）。
     // 只信「挂链后紧跟着的报错」，普通网络坏错不冤枉音效设置。
     final afPreset = _settings.audioPreset;
-    if (afPreset.isNotEmpty &&
-        !_isCasting &&
-        _afAppliedAt != null &&
-        DateTime.now().difference(_afAppliedAt!).inSeconds <= 20) {
+    final afJustApplied = _afAppliedAt != null &&
+        DateTime.now().difference(_afAppliedAt!).inSeconds <= 20;
+    // 预设在且刚挂链（20s 内）→ 直接自愈；预设在但已过时限 → 不冤枉音效，
+    // 走常规错误路径；预设已被自愈清空但还在余波窗口 → 静默收尾
+    final afHeal = afPreset.isNotEmpty && afJustApplied;
+    final afFallout = afPreset.isEmpty && _afFalloutActive;
+    if ((afHeal || afFallout) && !_isCasting) {
       _afAppliedAt = null;
-      WebDiag.log('af_selfheal', 'preset=$afPreset → 标准');
-      updateSettings(_settings.copyWith(audioPreset: ''));
-      unawaited(_videoController?.applyAudioFilter(null));
-      OsdBus.show('当前设备不支持该音效，已切回标准', icon: Icons.equalizer);
+      if (afPreset.isNotEmpty) {
+        WebDiag.log('af_selfheal', 'preset=$afPreset → 标准');
+        updateSettings(_settings.copyWith(audioPreset: ''));
+        // 真摘链：预设清了但链还挂在播放器上，声音就还是处理过的
+        unawaited(_videoController?.applyAudioFilter(null));
+        OsdBus.show('当前设备不支持该音效，已切回标准', icon: Icons.equalizer);
+      } else {
+        // 预设已被上一次自愈清空：这是滤镜重配置的后续余波 error，
+        // 静默处理即可（再弹一次「已切回标准」反而让人困惑）
+        WebDiag.log('af_selfheal', 'fallout (preset 已空) 静默清现场');
+      }
+      // 余波窗口续 30 秒：同一场风暴里还有 error 要消化
+      _afFalloutUntil = DateTime.now().add(const Duration(seconds: 30));
       // 自愈后绝不能落进下面的「自动重试」横幅（Windows 实测：切音效
       // → 自愈回直通成功、声音一直正常，横幅却数到 5/5 挂着不消——
       // 滤镜重配置会冒瞬时 error 事件，不代表断流）。分两种情况收尾：
@@ -4330,6 +4354,9 @@ class PlayerController extends ChangeNotifier {
     if (c != null) await c.applyAudioFilter(filterForPreset(preset));
     // 自愈窗口起点：非直通档挂链成功即计时（直通清链不算）
     _afAppliedAt = preset.isEmpty ? null : DateTime.now();
+    if (preset.isNotEmpty) {
+      _afFalloutUntil = DateTime.now().add(const Duration(seconds: 30));
+    }
     final label = preset.isEmpty ? '标准' : _audioPresetLabel(preset);
     OsdBus.show('声音：$label', icon: Icons.equalizer);
   }
