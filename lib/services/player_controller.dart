@@ -45,6 +45,7 @@ import 'radio_logo.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
 import 'source_manager.dart';
+import 'stream_probe.dart';
 import 'web_env.dart';
 import 'web_launch.dart';
 import 'network_monitor.dart';
@@ -415,6 +416,11 @@ class PlayerController extends ChangeNotifier {
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
     _isTv = await isTvDevice();
     tvModeNotifier.value = _isTv;
+    // 直播流可用性探测：先读上次结果（列表过滤要用），再同步设置开关，
+    // 并挂上「结果落库 → 重建列表」回调。探测本身延迟到启动稳定后跑
+    await StreamProbe.ensureLoaded();
+    StreamProbe.hideUnavailable = _settings.hideUnavailableChannels;
+    StreamProbe.onChanged = _onStreamProbeChanged;
     // Windows 托盘：后台播放/摸鱼模式的容器（不阻塞启动）
     unawaited(bindTrayHandlers());
     _boot('正在加载节目源…');
@@ -434,6 +440,11 @@ class PlayerController extends ChangeNotifier {
         RadioCatalog.invalidate();
         await reloadRadioCatalog();
       }));
+      // 清单更新完再探一轮（新台没探过、老台结果可能过期）。
+      // 延迟 50 秒：避开两个更新请求，也让界面先起来
+      Timer(const Duration(seconds: 30), () {
+        unawaited(probeBuiltinStreams());
+      });
       // 内置节目单：每天从央视网抓「今天 + 明天」，只有真更新过才重解析
       unawaited(BuiltinEpg.maybeAutoRefresh().then((updated) async {
         if (!updated) return;
@@ -938,7 +949,19 @@ class PlayerController extends ChangeNotifier {
           // 同款的更新时间 / 自动检查间隔 / 立即检查更新
           builtinInfo: () async {
             final sm = sourceManager;
+            // 内置电台流的探测统计（网页显示「可用 N 路 / 不可用 M 路」）
+            final rawCats = await RadioCatalog.builtinRawCategories();
+            final rawChs = <Channel>[
+              for (final c in rawCats) ...c.channels,
+            ];
+            final (alive, dead, unknown) = StreamProbe.summarize(rawChs);
             return {
+              'probe': {
+                'at': StreamProbe.lastProbedAt()?.toIso8601String(),
+                'alive': alive,
+                'dead': dead,
+                'unknown': unknown,
+              },
               'cctv': {
                 'count': await sm.builtinCctvChannelCount(),
                 'at': (await sm.getBuiltinCctvFetchedAt())?.toIso8601String(),
@@ -956,7 +979,27 @@ class PlayerController extends ChangeNotifier {
                 ? await sourceManager.updateBuiltinRadio(force: true)
                 : await sourceManager.updateBuiltinCctv(force: true);
             notifyListeners();
+            // 清单变了就重探一轮（后台跑，不阻塞网页的「检查更新」）
+            if (ok && kind == 'radio') {
+              RadioCatalog.invalidate();
+              unawaited(reloadRadioCatalog());
+              unawaited(probeBuiltinStreamsAfterUpdate());
+            }
             return {'ok': ok, 'message': msg};
+          },
+          // 手动检测（扫码网页「检测可用性」按钮）：等待完成再回报
+          probeBuiltin: () async {
+            final (n, alive, bad) = await probeBuiltinStreams(force: true);
+            final (_, dead, _) = StreamProbe.summarize(
+                [for (final c in await RadioCatalog.builtinRawCategories()) ...c.channels]);
+            return {
+              'probed': n,
+              'alive': alive,
+              'dead': dead,
+              'message': n == 0
+                  ? '暂无需要检测的频道'
+                  : '检测 $n 路：$alive 路可用，$dead 路不可用（已隐藏）',
+            };
           },
           setBuiltinInterval: (kind, days) async {
             if (kind == 'radio') {
@@ -972,6 +1015,17 @@ class PlayerController extends ChangeNotifier {
       _remoteAdminUrl = '';
     }
     notifyListeners();
+  }
+
+  /// 探测结果落库后：按新的可用性重建电台目录；
+  /// 若电视域的当前源正好是内置源，也一并重建电视列表。
+  /// 只重建列表，不反过来触发新探测（否则会自激）
+  void _onStreamProbeChanged() {
+    RadioCatalog.invalidate();
+    unawaited(reloadRadioCatalog());
+    if (sourceManager.currentPlaylist?.type == PlaylistSourceType.builtin) {
+      unawaited(refreshChannels());
+    }
   }
 
   void _stopRemoteAdmin() {
@@ -1027,6 +1081,7 @@ class PlayerController extends ChangeNotifier {
         'preferredQuality': s.preferredQuality.name,
         'playEngine': s.playEngine,
         'showWebNativeToggle': s.showWebNativeToggle,
+        'hideUnavailableChannels': s.hideUnavailableChannels,
         // 网页端没有引擎可用性上下文，不再暴露
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
@@ -1153,6 +1208,8 @@ class PlayerController extends ChangeNotifier {
       final webEnabled = rb('webEnabled') ?? cur.webEnabled;
       final webNative =
           rb('showWebNativeToggle') ?? cur.showWebNativeToggle;
+      final hideUnavailable =
+          rb('hideUnavailableChannels') ?? cur.hideUnavailableChannels;
       final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
       final resumeLast = rb('resumeLastChannel') ?? cur.resumeLastChannel;
       final closeToTray = kIsWindowsDesktop
@@ -1229,6 +1286,7 @@ class PlayerController extends ChangeNotifier {
           autoReloadStall != _settings.autoReloadStall ||
           webEnabled != _settings.webEnabled ||
           webNative != _settings.showWebNativeToggle ||
+          hideUnavailable != _settings.hideUnavailableChannels ||
           retryTimes != _settings.retryTimes ||
           castEndWait != _settings.castEndWaitSeconds ||
           uiScaleAuto != _settings.uiScaleAuto ||
@@ -1252,6 +1310,7 @@ class PlayerController extends ChangeNotifier {
           autoReloadStall: autoReloadStall,
           webEnabled: webEnabled,
           showWebNativeToggle: webNative,
+          hideUnavailableChannels: hideUnavailable,
           retryTimes: retryTimes,
           castEndWaitSeconds: castEndWait,
           uiScaleAuto: uiScaleAuto,
@@ -3868,6 +3927,7 @@ class PlayerController extends ChangeNotifier {
   static const _kFishHotkey = 'settings_fish_hotkey';
   static const _kPlayEngine = 'settings_play_engine';
   static const _kShowWebNativeToggle = 'settings_show_web_native_toggle';
+  static const _kHideUnavailable = 'settings_hide_unavailable_channels';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -3915,6 +3975,7 @@ class PlayerController extends ChangeNotifier {
         // 保持原选择（尊重手动切换），MDK 起播失败还有 _forceMpv 兜底
         playEngine: p.getString(_kPlayEngine) ?? 'mdk',
         showWebNativeToggle: p.getBool(_kShowWebNativeToggle) ?? false,
+        hideUnavailableChannels: p.getBool(_kHideUnavailable) ?? true,
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -4004,6 +4065,8 @@ class PlayerController extends ChangeNotifier {
 
       await putString(_kPlayEngine, _settings.playEngine);
       await putBool(_kShowWebNativeToggle, _settings.showWebNativeToggle);
+      await putBool(
+          _kHideUnavailable, _settings.hideUnavailableChannels);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
@@ -4232,6 +4295,47 @@ class PlayerController extends ChangeNotifier {
   /// 播放内核：'mpv'（默认，功能全）/ 'mdk'（D3D11 直出，老显卡更稳）
   String get playEngine => _settings.playEngine;
   bool get showWebNativeToggle => _settings.showWebNativeToggle;
+
+  /// 是否隐藏探测确认不可用的内置频道（死台在清单里保留，恢复即回来）
+  bool get hideUnavailableChannels => _settings.hideUnavailableChannels;
+
+  /// 切换「隐藏不可用频道」：立刻按新口径重建两个列表，不用重启
+  Future<void> setHideUnavailableChannels(bool v) async {
+    if (_settings.hideUnavailableChannels == v) return;
+    updateSettings(_settings.copyWith(hideUnavailableChannels: v));
+    StreamProbe.hideUnavailable = v;
+    RadioCatalog.invalidate();
+    await reloadRadioCatalog();
+    if (sourceManager.currentPlaylist?.type == PlaylistSourceType.builtin) {
+      await refreshChannels();
+    }
+  }
+
+  /// 手动检测内置电台流可用性；返回 (探测条数, 可用, 不可用)
+  Future<(int, int, int)> probeBuiltinStreams({bool force = false}) async {
+    final cats = await RadioCatalog.builtinRawCategories();
+    final chs = <Channel>[
+      for (final c in cats) ...c.channels,
+    ];
+    if (chs.isEmpty) return (0, 0, 0);
+    final n = await StreamProbe.probeChannels(chs, force: force);
+    final (ok, dead, unknown) = StreamProbe.summarize(chs);
+    return (n, ok, dead + unknown);
+  }
+
+  /// 清单刚更新完：后台全量重探一轮（新清单里的台都没探过，老结果可能
+  /// 已过期），完成后用 OSD 汇报。不阻塞更新调用本身——60 路最坏要一分
+  /// 多钟，卡在「检查更新」按钮上会让人以为卡死
+  Future<void> probeBuiltinStreamsAfterUpdate() async {
+    final (n, alive, bad) = await probeBuiltinStreams(force: true);
+    if (n == 0) return;
+    OsdBus.show(
+      bad > 0
+          ? '频道检测完成：$alive 路可用，$bad 路暂不可用（已隐藏）'
+          : '频道检测完成：$alive 路全部可用',
+      icon: Icons.network_check,
+    );
+  }
   bool get useMdkEngine => _settings.playEngine == 'mdk';
 
   /// 切换播放内核。正在播内置流时立刻重开当前台，让用户当场看到差别；

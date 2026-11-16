@@ -16,6 +16,7 @@ import 'builtin_catalog.dart';
 import 'builtin_epg.dart';
 import 'playlist_parser.dart';
 import 'radio_library.dart';
+import 'stream_probe.dart';
 import 'xmltv_epg_parser.dart';
 
 /// 播放列表与 EPG 源管理服务
@@ -657,7 +658,13 @@ class SourceManager {
         ];
       }
       // 导入过滤（方案 12.3）：只留 group-title/频道名命中关键字的频道
-      _cachedChannels = applyGroupFilter(cats, source.groupFilter);
+      var filtered = applyGroupFilter(cats, source.groupFilter);
+      // 内置源：隐掉探测确认不可用的台（清单文件里仍保留，恢复即回来）。
+      // 用户自己的源不过滤——他的源可能只是本机网络一时不通
+      if (source.type == PlaylistSourceType.builtin) {
+        filtered = StreamProbe.filterCategories(filtered);
+      }
+      _cachedChannels = filtered;
       _channelsLoaded = true;
 
       // 更新最后更新时间

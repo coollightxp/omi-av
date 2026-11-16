@@ -29,6 +29,7 @@ import '../services/radio_recorder.dart';
 import '../services/recording_share.dart';
 import '../services/radio_library.dart';
 import '../services/radio_catalog.dart';
+import '../services/stream_probe.dart';
 import '../services/web_diag.dart';
 import 'ime_safe_text_field.dart';
 
@@ -2927,6 +2928,10 @@ class _HelpTab extends StatelessWidget {
               '台标优先使用源内 tvg-logo，没有则按台名匹配内置台标，仍没有时留空。',
               '底部面板的「网页播放器/内置播放器切换」按钮默认不显示（很少用、还占遥控器焦点），'
                   '需要时在「设置 → 播放器」打开「显示网页播放器切换按钮」。',
+              '内置电台是直连音频流，上游随时可能下架：更新清单后会自动逐路检测，'
+                  '连续两次不通的台从列表隐藏，连续失效满 30 天彻底撤掉（清单里仍保留）；'
+                  '也可在「设置 → 节目源 → 内置电台精选」点「检测可用性」手动重测，'
+                  '或关掉「隐藏检测为不可用的台」让它们照常显示。',
             ]),
           ],
         );
@@ -4032,6 +4037,10 @@ class _BuiltinListConfig {
   final Future<(bool, String)> Function(SourceManager sm) update;
   final Future<void> Function(SourceManager sm)? restore;
   final String restoreLabel;
+
+  /// 是否做「流可用性检测」：电台是直连流，会随上游下架失效；
+  /// 央视频道走网页播放、页面地址长期有效，没有探流的概念
+  final bool canProbe;
   const _BuiltinListConfig({
     required this.icon,
     required this.title,
@@ -4044,6 +4053,7 @@ class _BuiltinListConfig {
     required this.update,
     this.restore,
     this.restoreLabel = '',
+    this.canProbe = false,
   });
 }
 
@@ -4086,6 +4096,7 @@ class _BuiltinUpdateSection extends StatefulWidget {
     loadCount: (sm) => sm.builtinRadioStationCount(),
     saveDays: (sm, d) => sm.setBuiltinRadioIntervalDays(d),
     update: (sm) => sm.updateBuiltinRadio(force: true),
+    canProbe: true,
   );
 
   @override
@@ -4097,6 +4108,11 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
   DateTime? _at;
   int _count = 0;
   bool _busy = false;
+  // 流检测统计（仅 canProbe 的区块用）
+  int _probeAlive = 0;
+  int _probeDead = 0;
+  int _probeUnknown = 0;
+  DateTime? _probeAt;
 
   @override
   void initState() {
@@ -4110,17 +4126,38 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
     final days = await cfg.loadDays(sm);
     final at = await cfg.loadAt(sm);
     final count = await cfg.loadCount(sm);
+    // 流检测统计：取全量（含已隐藏的台），否则隐藏后统计会假性全绿
+    var alive = 0, dead = 0, unknown = 0;
+    if (cfg.canProbe) {
+      final cats = await RadioCatalog.builtinRawCategories();
+      final chs = <Channel>[
+        for (final c in cats) ...c.channels,
+      ];
+      (alive, dead, unknown) = StreamProbe.summarize(chs);
+    }
     if (!mounted) return;
     setState(() {
       _days = days;
       _at = at;
       _count = count;
+      _probeAlive = alive;
+      _probeDead = dead;
+      _probeUnknown = unknown;
+      _probeAt = StreamProbe.lastProbedAt();
     });
   }
 
   String get _atText {
     final at = _at;
     if (at == null) return '从未更新（当前用出厂清单）';
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${at.year}-${two(at.month)}-${two(at.day)} '
+        '${two(at.hour)}:${two(at.minute)}';
+  }
+
+  String get _probeAtText {
+    final at = _probeAt;
+    if (at == null) return '未检测';
     String two(int v) => v.toString().padLeft(2, '0');
     return '${at.year}-${two(at.month)}-${two(at.day)} '
         '${two(at.hour)}:${two(at.minute)}';
@@ -4141,10 +4178,29 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
       if (widget.config.sourceId == PlaylistSource.builtinRadioId) {
         RadioCatalog.invalidate();
         await c.reloadRadioCatalog();
+        // 新清单里的台都没探过：后台补一轮（不阻塞这里的「检查中」）
+        unawaited(c.probeBuiltinStreamsAfterUpdate().then((_) {
+          if (mounted) _load();
+        }));
       } else if (c.sourceManager.currentPlaylistId == widget.config.sourceId) {
         await c.refreshChannels();
       }
     }
+  }
+
+  /// 手动检测：逐路探内置电台流，完成后按新结果重建列表
+  Future<void> _probe() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final c = context.read<PlayerController>();
+    final (n, alive, bad) = await c.probeBuiltinStreams(force: true);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    await _load();
+    OsdBus.show(
+      n == 0 ? '暂无可检测的频道' : '$n 路检测完成：$alive 可用，$bad 不可用',
+      icon: Icons.network_check,
+    );
   }
 
   @override
@@ -4226,6 +4282,40 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
               ),
             ],
           ),
+          if (cfg.canProbe) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                const Text('隐藏检测为不可用的台',
+                    style: TextStyle(color: Colors.white54, fontSize: 12.5)),
+                const Spacer(),
+                Switch(
+                  value: c.hideUnavailableChannels,
+                  activeColor: Colors.blueAccent,
+                  onChanged: (v) => c.setHideUnavailableChannels(v),
+                ),
+              ],
+            ),
+            Text(
+              '连续两次不通先从列表隐藏（清单里仍保留，恢复后自动回来）；'
+              '连续失效满 30 天就认定这源已废弃，彻底撤掉不再显示。'
+              '上次检测：${_probeAt == null ? '未检测' : _probeAtText}'
+              '（可用 $_probeAlive 路'
+              '${_probeDead > 0 ? '，不可用 $_probeDead 路' : ''}'
+              '${_probeUnknown > 0 ? '，待检测 $_probeUnknown 路' : ''}）',
+              style: const TextStyle(
+                  color: Colors.white38, fontSize: 11.5, height: 1.5),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _busy ? null : _probe,
+                icon: const Icon(Icons.network_check, size: 16),
+                label: const Text('检测可用性',
+                    style: TextStyle(fontSize: 12.5)),
+              ),
+            ),
+          ],
           if (!hasSource && cfg.restore != null)
             Align(
               alignment: Alignment.centerLeft,

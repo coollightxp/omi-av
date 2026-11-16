@@ -6,6 +6,7 @@ import '../models/channel.dart';
 import '../models/playlist_source.dart';
 import 'playlist_parser.dart';
 import 'radio_library.dart';
+import 'stream_probe.dart';
 
 /// 电台目录：把「内置精选」和「我的电台」合成一份给左侧频道列表用。
 ///
@@ -19,10 +20,18 @@ class RadioCatalog {
 
   static List<ChannelCategory>? _builtin;
 
+  /// 未经过滤的解析结果（含被探测判死、已从列表隐藏的台）。
+  /// 探测必须能看到这些台，否则它们藏起来后就再没机会被重新验证、
+  /// 永远回不到列表
+  static List<ChannelCategory>? _builtinRaw;
+
   static List<ChannelCategory>? get cachedBuiltin => _builtin;
 
   /// 丢掉已解析的内置目录（清单更新后重读用）
-  static void invalidate() => _builtin = null;
+  static void invalidate() {
+    _builtin = null;
+    _builtinRaw = null;
+  }
 
   static Future<List<ChannelCategory>> builtinCategories() async {
     final cached = _builtin;
@@ -43,13 +52,22 @@ class RadioCatalog {
       }
       final cats = PlaylistParser.parse(raw, PlaylistFormat.m3u);
       // 分组顺序按 m3u 里出现顺序（电视伴音 → 央广 → 省市 → 音乐 → 故事）
-      _builtin = cats;
-      return cats;
+      _builtinRaw = cats;
+      // 隐藏探测确认不可用的台（清单里仍保留，恢复后自动回来）
+      _builtin = StreamProbe.filterCategories(cats);
+      return _builtin!;
     } catch (e) {
       debugPrint('[RadioCatalog] builtin load failed: $e');
       _builtin = const [];
       return const [];
     }
+  }
+
+  /// 未过滤的内置目录（含探测已判死的台）：探测入口用它取全量频道
+  static Future<List<ChannelCategory>> builtinRawCategories() async {
+    if (_builtinRaw != null) return _builtinRaw!;
+    await builtinCategories(); // 顺带完成解析
+    return _builtinRaw ?? const <ChannelCategory>[];
   }
 
   /// 「我的电台」在前（自己加的优先看到），其后是内置精选各组。

@@ -164,7 +164,14 @@ class BuiltinCatalog {
     try {
       slugs = await fetchSlugs();
     } catch (e) {
-      return (false, '抓取央视网直播页失败：$e', null);
+      // 站点改版 / 网络抖动：隔 1.5 秒重试一次，仍失败才放弃（绝不动
+      // 现有清单）。改版能自愈的前提是抓取端容错，而不是一次就投降
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 1500));
+        slugs = await fetchSlugs();
+      } catch (e2) {
+        return (false, '抓取央视网直播页失败：$e2', null);
+      }
     }
     // 站点改版时宁可不动，也不要用半截结果覆盖能用的清单
     if (slugs.length < 10) {

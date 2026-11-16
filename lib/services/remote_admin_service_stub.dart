@@ -34,6 +34,10 @@ class RemoteAdminHooks {
   /// 设置内置清单自动检查间隔（天）：0 关闭 / 7 每周 / 30 每月
   final Future<void> Function(String kind, int days)? setBuiltinInterval;
 
+  /// 手动检测内置电台流可用性（后台并发探测），返回
+  /// {probed, alive, dead, message}
+  final Future<Map<String, dynamic>> Function()? probeBuiltin;
+
   const RemoteAdminHooks({
     required this.getSnapshot,
     required this.applySnapshot,
@@ -49,6 +53,7 @@ class RemoteAdminHooks {
     this.builtinInfo,
     this.updateBuiltin,
     this.setBuiltinInterval,
+    this.probeBuiltin,
   });
 }
 

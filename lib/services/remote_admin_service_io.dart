@@ -52,6 +52,10 @@ class RemoteAdminHooks {
   /// 设置内置清单自动检查间隔（天）：0 关闭 / 7 每周 / 30 每月
   final Future<void> Function(String kind, int days)? setBuiltinInterval;
 
+  /// 手动检测内置电台流可用性（后台并发探测），返回
+  /// {probed, alive, dead, message}
+  final Future<Map<String, dynamic>> Function()? probeBuiltin;
+
   const RemoteAdminHooks({
     required this.getSnapshot,
     required this.applySnapshot,
@@ -67,6 +71,7 @@ class RemoteAdminHooks {
     this.builtinInfo,
     this.updateBuiltin,
     this.setBuiltinInterval,
+    this.probeBuiltin,
   });
 }
 
@@ -206,6 +211,15 @@ class RemoteAdminService {
           _json(req, {'ok': false, 'error': 'not supported'});
         } else {
           _json(req, await fn(kind));
+        }
+      } else if (req.method == 'POST' && path == '/api/builtin/probe') {
+        // 手动检测：逐路探一遍内置电台流（最坏一分钟，网页端按钮转圈等）
+        final fn = _hooks!.probeBuiltin;
+        if (fn == null) {
+          req.response.statusCode = 501;
+          _json(req, {'ok': false, 'error': 'not supported'});
+        } else {
+          _json(req, await fn());
         }
       } else if (req.method == 'POST' && path == '/api/builtin/interval') {
         final body = await utf8.decoder.bind(req).join();
@@ -627,6 +641,9 @@ function renderRadio(){
   var b=state.radioBuiltin||{};
   var lib=state.radios||[];
   var html='<div class="group-title">内置电台</div>';
+  // 死台处理：默认隐藏但保留在清单里，恢复后下次检测自动回到列表
+  html+=switchCard('hideUnavailableChannels','隐藏检测为不可用的台',
+    '默认开。死台只是不显示，清单里仍保留；哪天恢复，检测通过就自动回来');
   if(b.exists){
     html+='<div class="card'+(b.current?' is-cur':'')+'">'
       +'<div class="card-head"><div class="name">内置电台精选</div>'
@@ -762,11 +779,31 @@ function intervalText(days){
 }
 function builtinActs(kind){
   var b=(builtin||{})[kind]||{};
-  return '<div class="meta">清单更新 '+(b.at?fmtTime(b.at):'从未更新')
-    +' · 共 '+(b.count!=null?b.count:'-')+' 个台</div>'
-    +'<div class="acts">'
+  var html='<div class="meta">清单更新 '+(b.at?fmtTime(b.at):'从未更新')
+    +' · 共 '+(b.count!=null?b.count:'-')+' 个台</div>';
+  // 电台是直连流，会随上游下架失效：显示探测结果（央视走网页播放、
+  // 地址长期有效，不需要探流，所以只在电台上显示）
+  if(kind==='radio'){
+    var pr=(builtin||{}).probe||{};
+    html+='<div class="meta">流检测 '+(pr.at?fmtTime(pr.at):'未检测')
+      +' · 可用 '+(pr.alive!=null?pr.alive:'-')+' 路'
+      +(pr.dead?(' · 不可用 '+pr.dead+' 路（已隐藏）'):'')
+      +(pr.unknown?(' · 待检测 '+pr.unknown+' 路'):'')+'</div>';
+  }
+  html+='<div class="acts">'
     +'<button class="btn b3" onclick="cycleBuiltinInterval(\''+kind+'\')">'+intervalText(b.days)+'</button>'
-    +'<button class="btn ok" id="bu-'+kind+'" onclick="updateBuiltinNow(\''+kind+'\')">立即检查更新</button></div>';
+    +'<button class="btn ok" id="bu-'+kind+'" onclick="updateBuiltinNow(\''+kind+'\')">立即检查更新</button>'
+    +(kind==='radio'?'<button class="btn b3" id="bp-'+kind+'" onclick="probeBuiltinNow()">检测可用性</button>':'')
+    +'</div>';
+  return html;
+}
+function probeBuiltinNow(){
+  var btn=el('bp-radio');
+  if(btn){btn.disabled=true;btn.textContent='检测中…'}
+  fetch('/api/builtin/probe',{method:'POST'}).then(function(r){return r.json()})
+    .then(function(d){toast(d.message||'检测完成');load()})
+    .catch(function(){toast('检测失败：电脑端没响应')})
+    .then(function(){if(btn){btn.disabled=false;btn.textContent='检测可用性'}});
 }
 function cycleBuiltinInterval(kind){
   var b=(builtin||{})[kind]||{days:7};

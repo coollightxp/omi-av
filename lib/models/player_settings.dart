@@ -116,6 +116,10 @@ class PlayerSettings {
   /// 挤占遥控器焦点路径（用户要求收进设置，开关控制显隐）
   final bool showWebNativeToggle;
 
+  /// 列表里隐藏「探测确认不可用」的内置源频道（默认开）。
+  /// 只影响内置电台精选——死台源在清单里保留，恢复后自动回到列表
+  final bool hideUnavailableChannels;
+
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -145,6 +149,7 @@ class PlayerSettings {
     this.fishHotkey = true,
     this.playEngine = 'mdk',
     this.showWebNativeToggle = false,
+    this.hideUnavailableChannels = true,
   });
 
   PlayerSettings copyWith({
@@ -176,6 +181,7 @@ class PlayerSettings {
     bool? fishHotkey,
     String? playEngine,
     bool? showWebNativeToggle,
+    bool? hideUnavailableChannels,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -207,6 +213,8 @@ class PlayerSettings {
       fishHotkey: fishHotkey ?? this.fishHotkey,
       playEngine: playEngine ?? this.playEngine,
       showWebNativeToggle: showWebNativeToggle ?? this.showWebNativeToggle,
+      hideUnavailableChannels:
+          hideUnavailableChannels ?? this.hideUnavailableChannels,
     );
   }
 }
