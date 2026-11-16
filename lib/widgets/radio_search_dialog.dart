@@ -16,6 +16,7 @@ import '../services/builtin_radio_index.dart';
 import '../services/radio_directory.dart';
 import '../services/radio_library.dart';
 import '../services/web_diag.dart';
+import 'scaled_panel.dart';
 
 /// 在线电台搜索（Radio Browser 目录）。
 ///
@@ -190,9 +191,15 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     if (event is KeyUpEvent) {
       _physDownAt.remove(phys);
       _physUpAt[phys] = now;
+      // OK 族键抬起：重新武装「一次物理按下只认一次 OK」（见 _handleOk）
+      if (_isOkKey(event.logicalKey)) _okUpAt = now;
       return KeyEventResult.ignored;
     }
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    // 按住不放的系统连发：KeyRepeatEvent 是 KeyDownEvent 的子类，
+    // 不在这里认出来就会混进下面的处理（方向键靠 700ms 抖动窗压着，
+    // OK 键在 _handleOk 里单独处理）
+    final isRepeat = event is KeyRepeatEvent;
     final downAt = _physDownAt[phys];
     if (downAt != null && now - downAt < 700) {
       // 还没抬起就又按下：这就是"按一下跳两行 / 两行两行地跳"的来源
@@ -238,69 +245,113 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     // 被 Flutter 的默认遍历带走一格（用户实测：搜索按钮按 OK 跳到地区
     // 行、「仅中国」按 OK 跳到音乐分类），看起来就是"按哪都乱跳"。
     // 自己处理并返回 handled，焦点停在原地，动作只发生一次。
-    if (k == LogicalKeyboardKey.select ||
-        k == LogicalKeyboardKey.enter ||
-        k == LogicalKeyboardKey.numpadEnter ||
-        k == LogicalKeyboardKey.gameButtonA) {
-      if (_regionRow.hasFocus) {
-        _activateRegion(_regionIdx);
+    if (_isOkKey(k)) {
+      return _handleOk(k, isRepeat: isRepeat);
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// OK 族键（遥控器 OK / 回车 / 小键盘回车 / 手柄 A）统一算「确认」
+  static bool _isOkKey(LogicalKeyboardKey k) =>
+      k == LogicalKeyboardKey.select ||
+      k == LogicalKeyboardKey.enter ||
+      k == LogicalKeyboardKey.numpadEnter ||
+      k == LogicalKeyboardKey.gameButtonA;
+
+  /// 上一次 OK 激活时刻 / OK 键上次抬起时刻（毫秒）
+  int _okFiredAt = 0;
+  int _okUpAt = 0;
+
+  /// OK 键统一入口：一次物理按下只认一次激活。
+  ///
+  /// 用户安卓实测「按一下没反应，长按反而加进去又取消、乱跳」，两个来源：
+  /// ① 部分安卓盒子/接收器把一次 OK 翻译成 select + enter 两颗键先后送来
+  ///    （间隔能到一两百毫秒，60ms 同键去重挡不住）→ 按一下 = 加了又删；
+  /// ② 按住不放的系统连发（KeyRepeat 也是 KeyDownEvent，700ms 抖动窗
+  ///    一过期连发就漏进来）→ 长按 = 反复加/删。
+  /// 规则：连发一律吞；激活后 300ms 内的 OK 族键全吞（双键派发）；
+  /// 抬起（KeyUp）重新武装；KeyUp 丢失时 2 秒兜底放行，不会把 OK 锁死。
+  KeyEventResult _handleOk(LogicalKeyboardKey k, {required bool isRepeat}) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (isRepeat) return KeyEventResult.handled;
+    if (_okFiredAt > 0) {
+      if (now - _okFiredAt < 300) return KeyEventResult.handled;
+      if (_okFiredAt > _okUpAt && now - _okFiredAt < 2000) {
         return KeyEventResult.handled;
       }
-      if (_tagRow.hasFocus) {
-        _activateTag(_tagIdx);
-        return KeyEventResult.handled;
-      }
-      if (_topRow.hasFocus) {
-        _backToTop();
-        return KeyEventResult.handled;
-      }
-      // 搜索条：输入框 / 搜索按钮 / 仅中国。焦点一律不动——
-      // 搜索是异步的，重建列表时焦点漂走就会出现"跳到筛选行"
-      if (_queryFocus.hasFocus) {
-        _search();
-        return KeyEventResult.handled;
-      }
-      if (_searchBtnFocus.hasFocus) {
-        if (!_loading) _search();
-        return KeyEventResult.handled;
-      }
-      if (_cnFocus.hasFocus) {
-        setState(() => _cnOnly = !_cnOnly);
-        _search();
-        return KeyEventResult.handled;
-      }
-      // 页签
-      if (_tabSearchFocus.hasFocus) {
-        _switchTab(0);
-        return KeyEventResult.handled;
-      }
-      if (_tabMineFocus.hasFocus) {
-        if (_tab == 1) {
-          _focusMineList();
-        } else {
-          _switchTab(1);
-        }
-        return KeyEventResult.handled;
-      }
-      // 结果行 / 我的电台行：按 OK 等价于点行（加入 / 试听）
-      if (_tab == 0) {
-        for (final s in _results) {
-          if (_rowNodeFor('search:${s.id}').hasFocus) {
-            _toggle(s);
-            return KeyEventResult.handled;
-          }
-        }
+    }
+    _okFiredAt = now;
+    if (_regionRow.hasFocus) {
+      _activateRegion(_regionIdx);
+      return KeyEventResult.handled;
+    }
+    if (_tagRow.hasFocus) {
+      _activateTag(_tagIdx);
+      return KeyEventResult.handled;
+    }
+    if (_topRow.hasFocus) {
+      _backToTop();
+      return KeyEventResult.handled;
+    }
+    // 搜索条：输入框 / 搜索按钮 / 仅中国。焦点一律不动——
+    // 搜索是异步的，重建列表时焦点漂走就会出现"跳到筛选行"
+    if (_queryFocus.hasFocus) {
+      _search();
+      return KeyEventResult.handled;
+    }
+    if (_searchBtnFocus.hasFocus) {
+      if (!_loading) _search();
+      return KeyEventResult.handled;
+    }
+    if (_cnFocus.hasFocus) {
+      setState(() => _cnOnly = !_cnOnly);
+      _search();
+      return KeyEventResult.handled;
+    }
+    // 页签
+    if (_tabSearchFocus.hasFocus) {
+      _switchTab(0);
+      return KeyEventResult.handled;
+    }
+    if (_tabMineFocus.hasFocus) {
+      if (_tab == 1) {
+        _focusMineList();
       } else {
-        for (final s in RadioLibrary.items) {
-          if (_rowNodeFor('mine:${s.id}').hasFocus) {
-            _play(s);
-            return KeyEventResult.handled;
-          }
-        }
+        _switchTab(1);
       }
       return KeyEventResult.handled;
     }
-    return KeyEventResult.ignored;
+    // 结果行 / 我的电台行：按 OK 等价于点行（加入/取消 / 试听）。
+    // 定位优先走行号——与上下移动是同一套解析，导航能到哪一行 OK 就
+    // 作用于哪一行；行号解析不出来时再回退逐个查焦点节点
+    final row = _currentRow();
+    if (row >= _headRows) {
+      final i = row - _headRows;
+      WebDiag.log('radio_ok row=$row tab=$_tab key=${k.debugName}');
+      if (_tab == 0) {
+        if (i < _results.length) _toggle(_results[i]);
+      } else {
+        final items = RadioLibrary.items;
+        if (i < items.length) _play(items[i]);
+      }
+      return KeyEventResult.handled;
+    }
+    if (_tab == 0) {
+      for (final s in _results) {
+        if (_rowNodeFor('search:${s.id}').hasFocus) {
+          _toggle(s);
+          return KeyEventResult.handled;
+        }
+      }
+    } else {
+      for (final s in RadioLibrary.items) {
+        if (_rowNodeFor('mine:${s.id}').hasFocus) {
+          _play(s);
+          return KeyEventResult.handled;
+        }
+      }
+    }
+    return KeyEventResult.handled;
   }
 
   /// 搜索条里当前焦点在哪一格：0 输入框 / 1 搜索 / 2 仅中国 / -1 不在条上
@@ -741,16 +792,24 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
             backgroundColor: Colors.transparent,
             insetPadding:
                 const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
-            child: Container(
-              width: size.width * 0.82,
-              constraints: const BoxConstraints(maxWidth: 760, maxHeight: 640),
-              decoration: BoxDecoration(
-                color: AppColors.overlay,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: AppColors.stroke),
+            // 手机/小平板上与设置面板同一套形态缩放（0.72 / 0.9 / 1.0）：
+            // 用户实测安卓手机上这张卡比设置面板大一圈、字也大——设置面板
+            // 走 ScaledPanel 缩过，这里此前没缩。窗口自适应缩放同样跟上
+            child: ScaledPanel(
+              alignment: Alignment.center,
+              scale: panelScaleOf(context) * windowFitScaleOf(context),
+              child: Container(
+                width: size.width * 0.82,
+                constraints:
+                    const BoxConstraints(maxWidth: 760, maxHeight: 640),
+                decoration: BoxDecoration(
+                  color: AppColors.overlay,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: AppColors.stroke),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: _tab == 0 ? _searchPage() : _minePage(),
               ),
-              clipBehavior: Clip.antiAlias,
-              child: _tab == 0 ? _searchPage() : _minePage(),
             ),
           ),
         ),
