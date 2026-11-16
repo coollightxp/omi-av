@@ -77,23 +77,6 @@ class PlayerController extends ChangeNotifier {
   /// MDK 起播失败后的临时降级（不写设置，下次启动仍尊重用户选择）
   bool _forceMpv = false;
 
-  /// 最近一次给内核挂音频滤镜（场景音效）的时间。
-  /// 自愈判据：挂上后短时间内就进 play_err → 认定这台设备/内核吃不下
-  /// 这条 lavfi 链（安卓电台实测：直通正常，任选音效立刻 3/3 重试失败，
-  /// 带档重启也起不来），自动摘掉回「标准」。
-  DateTime? _afAppliedAt;
-
-  /// 滤镜余波抑制窗口：非直通档挂链后 30 秒内（含自愈之后再续 30 秒），
-  /// 期间的所有 error 事件都按「滤镜重配置的余波」处理——在播就清现场，
-  /// 断流就静默重拉，绝不进「自动重试 n/n」横幅。滤镜重配置往往冒出
-  /// 不止一次 error，而自愈会把预设清空，让第二次 error 绕过自愈判定
-  /// 直落重试横幅（Windows 2.3.23 实测），所以需要独立于预设的窗口。
-  DateTime? _afFalloutUntil;
-
-  bool get _afFalloutActive =>
-      !_isCasting &&
-      _afFalloutUntil != null &&
-      _afFalloutUntil!.isAfter(DateTime.now());
   PlayerSettings _settings = const PlayerSettings();
 
   /// 时钟显隐的独立通知器：切换它只重建时钟本身，不触发整棵播放
@@ -329,6 +312,12 @@ class PlayerController extends ChangeNotifier {
 
   bool get isPlaying =>
       _webPageActive ? _webPlaying : _state == PlayerState.playing;
+
+  /// UI 播放/暂停按钮的显示态：loading = 起播意向明确，按「播放中」
+  /// 显示（⏸），避免进台时先亮「播放」键、起播成功再闪成「暂停」
+  bool get uiShowsPlaying =>
+      _webPageActive ? _webPlaying : _state == PlayerState.playing ||
+          _state == PlayerState.loading;
   bool get isInitialized =>
       _videoController != null && _videoController!.value.isInitialized;
 
@@ -537,7 +526,7 @@ class PlayerController extends ChangeNotifier {
     if (_settings.remoteAdminEnabled) {
       _startRemoteAdmin();
     }
-    _initSystemValues();
+    await _initSystemValues();
 
     // 频道加载完毕后，恢复上次退出时播放的频道。
     // 设置里关掉「启动时恢复上次频道」→ 停在待选台画面，
@@ -1037,7 +1026,6 @@ class PlayerController extends ChangeNotifier {
         // 播放器页
         'preferredQuality': s.preferredQuality.name,
         'playEngine': s.playEngine,
-        // audioPreset 已随「声音实验室」下架：选音效走播放页底部弹窗，
         // 网页端没有引擎可用性上下文，不再暴露
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
@@ -1152,7 +1140,6 @@ class PlayerController extends ChangeNotifier {
           engine != cur.playEngine) {
         await setPlayEngine(engine);
       }
-      // （audioPreset 已下架：旧版网页缓存保存回的该键在此被忽略）
       VideoQuality? quality;
       final qName = rs('preferredQuality');
       for (final v in VideoQuality.values) {
@@ -1573,6 +1560,15 @@ class PlayerController extends ChangeNotifier {
       } catch (_) {
         _volume = _settings.defaultVolume;
       }
+    }
+    // 兜底：正常时序下播放器创建晚于这里（_init 已 await），但万一
+    // 控制器先起（换台恢复等），这里把恢复出的音量补推给内核，
+    // 否则播放器一直用建实参时的默认 0.8（实测安卓「调完下次进来
+    // 又回原音量」的根因之一）
+    if (_videoController != null && !_webPageActive) {
+      try {
+        await _videoController?.setVolume(_volume);
+      } catch (_) {}
     }
     notifyListeners();
   }
@@ -2731,12 +2727,6 @@ class PlayerController extends ChangeNotifier {
     if (channel.isRadio && _isBackgroundNow) {
       unawaited(c.setVideoOutputDisabled(true));
     }
-    // 声音实验室（方案 12.3 第二档）：换台重建控制器后重挂音频滤镜
-    // （'custom' 走自定义均衡器增益构建）；自愈窗口从这里起算——
-    // 挂档起播短时间内报错会被 _enterErrorOrRetry 判定为滤镜不兼容
-    unawaited(c.applyAudioFilter(filterForPreset(_settings.audioPreset)));
-    _afAppliedAt =
-        _settings.audioPreset.isEmpty ? null : DateTime.now();
     // 新内核的音量对齐应用音量：mpv 默认 100，不设的话静音/调音量
     // 在换台后会失效（新实例满音量）
     unawaited(c.setVolume(_volume));
@@ -3787,62 +3777,7 @@ class PlayerController extends ChangeNotifier {
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
     final total = _settings.retryTimes;
-    // 留痕：跟「选音效后马上报错」这类时序问题对时间线用
-    WebDiag.log('play_err',
-        'preset=${_settings.audioPreset}|ch=${_currentChannel?.name ?? '-'}');
-    // 音效自愈：挂上滤镜后 20 秒内就报错 → 十有八九是这台设备/内核
-    // 吃不下这条 lavfi 链（安卓电台实测：直通正常，任选音效立刻
-    // 3/3 重试失败，带档重启也起不来）。自动摘掉并回「标准」，本次
-    // 重试就能不带滤镜跑通；用户想再试随时可重新选（会再次尝试）。
-    // 只信「挂链后紧跟着的报错」，普通网络坏错不冤枉音效设置。
-    final afPreset = _settings.audioPreset;
-    final afJustApplied = _afAppliedAt != null &&
-        DateTime.now().difference(_afAppliedAt!).inSeconds <= 20;
-    // 预设在且刚挂链（20s 内）→ 直接自愈；预设在但已过时限 → 不冤枉音效，
-    // 走常规错误路径；预设已被自愈清空但还在余波窗口 → 静默收尾
-    final afHeal = afPreset.isNotEmpty && afJustApplied;
-    final afFallout = afPreset.isEmpty && _afFalloutActive;
-    if ((afHeal || afFallout) && !_isCasting) {
-      _afAppliedAt = null;
-      if (afPreset.isNotEmpty) {
-        WebDiag.log('af_selfheal', 'preset=$afPreset → 标准');
-        updateSettings(_settings.copyWith(audioPreset: ''));
-        // 真摘链：预设清了但链还挂在播放器上，声音就还是处理过的
-        unawaited(_videoController?.applyAudioFilter(null));
-        OsdBus.show('当前设备不支持该音效，已切回标准', icon: Icons.equalizer);
-      } else {
-        // 预设已被上一次自愈清空：这是滤镜重配置的后续余波 error，
-        // 静默处理即可（再弹一次「已切回标准」反而让人困惑）
-        WebDiag.log('af_selfheal', 'fallout (preset 已空) 静默清现场');
-      }
-      // 余波窗口续 30 秒：同一场风暴里还有 error 要消化
-      _afFalloutUntil = DateTime.now().add(const Duration(seconds: 30));
-      // 自愈后绝不能落进下面的「自动重试」横幅（Windows 实测：切音效
-      // → 自愈回直通成功、声音一直正常，横幅却数到 5/5 挂着不消——
-      // 滤镜重配置会冒瞬时 error 事件，不代表断流）。分两种情况收尾：
-      _autoReloadCount = 0;
-      _lastError = null;
-      final stillPlaying = _videoController?.value.isPlaying ?? false;
-      if (stillPlaying) {
-        // 声音没断：清掉错误现场继续播
-        _state = PlayerState.playing;
-        notifyListeners();
-        return;
-      }
-      // 真断流（安卓旧内核那种挂法）：静默重拉一次当前台（已不带滤镜），
-      // 不进计数横幅；再失败由后续事件走常规错误路径
-      _state = PlayerState.loading;
-      notifyListeners();
-      final ch = _currentChannel;
-      _autoRetryTimer = Timer(const Duration(seconds: 1), () {
-        _autoRetryTimer = null;
-        // 期间用户已切台/开始投屏：放弃
-        if (!identical(_currentChannel, ch) || _isCasting) return;
-        _sourceIndex = 0;
-        _playCurrentSource();
-      });
-      return;
-    }
+    WebDiag.log('play_err', 'ch=${_currentChannel?.name ?? '-'}');
     // 后台（通知卡片在操作）不重试。
     //
     // 后台没有界面可看，重试只会让卡片在「播放/暂停」之间反复闪、声音
@@ -3918,9 +3853,8 @@ class PlayerController extends ChangeNotifier {
   static const _kResumeLastChannel = 'settings_resume_last_channel';
   static const _kCloseToTray = 'settings_close_to_tray';
   static const _kFishHotkey = 'settings_fish_hotkey';
-  static const _kAudioPreset = 'settings_audio_preset';
-  static const _kAudioEqGains = 'settings_audio_eq_gains';
   static const _kPlayEngine = 'settings_play_engine';
+  static const _kShowWebNativeToggle = 'settings_show_web_native_toggle';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -3964,11 +3898,10 @@ class PlayerController extends ChangeNotifier {
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
         closeToTray: p.getBool(_kCloseToTray) ?? false,
         fishHotkey: p.getBool(_kFishHotkey) ?? true,
-        audioPreset: p.getString(_kAudioPreset) ?? '',
-        audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
         // 默认 MDK：实测同机 MPV 叠面板闪黑、MDK 不闪；已存过设置的用户
         // 保持原选择（尊重手动切换），MDK 起播失败还有 _forceMpv 兜底
         playEngine: p.getString(_kPlayEngine) ?? 'mdk',
+        showWebNativeToggle: p.getBool(_kShowWebNativeToggle) ?? false,
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -4056,9 +3989,8 @@ class PlayerController extends ChangeNotifier {
         await p.setString(k, v);
       }
 
-      await putString(_kAudioPreset, _settings.audioPreset);
-      await putString(_kAudioEqGains, jsonEncode(_settings.audioEqGains));
       await putString(_kPlayEngine, _settings.playEngine);
+      await putBool(_kShowWebNativeToggle, _settings.showWebNativeToggle);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
@@ -4284,24 +4216,10 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ==================== 声音实验室（方案 12.3 第二档） ====================
-
-  String get audioPreset => _settings.audioPreset;
-
   /// 播放内核：'mpv'（默认，功能全）/ 'mdk'（D3D11 直出，老显卡更稳）
   String get playEngine => _settings.playEngine;
+  bool get showWebNativeToggle => _settings.showWebNativeToggle;
   bool get useMdkEngine => _settings.playEngine == 'mdk';
-
-  /// 场景音效（mpv lavfi 滤镜）当前会话是否可用：
-  /// - MDK 引擎不吃 mpv 的 af 属性（选了也是静默无效）→ 不可用；
-  /// - 电台固定走 MPV → 可用；MDK 起播失败自动回退 MPV（_forceMpv）→ 可用；
-  /// - 网页频道前台时声音走站点自己的播放器 → 不可用。
-  /// 底部面板据此把「音效」按钮置灰，设置里的均衡器同理参考此判断提示。
-  bool get audioFxAvailable =>
-      (_settings.playEngine != 'mdk' ||
-          _forceMpv ||
-          (currentChannel?.isRadio ?? false)) &&
-      !_webPageActive;
 
   /// 切换播放内核。正在播内置流时立刻重开当前台，让用户当场看到差别；
   /// 网页频道不受影响（网页走 WebView，与内核无关）
@@ -4311,7 +4229,7 @@ class PlayerController extends ChangeNotifier {
     _forceMpv = false;
     updateSettings(_settings.copyWith(playEngine: next));
     OsdBus.show(
-      next == 'mdk' ? '播放内核：MDK（画面更稳，均衡器不可用）' : '播放内核：MPV（功能完整）',
+      next == 'mdk' ? '播放内核：MDK（画面更稳）' : '播放内核：MPV（功能完整）',
       icon: Icons.memory,
     );
     final ch = _currentChannel;
@@ -4321,157 +4239,6 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  /// 当前音效档显示名
-  String get audioPresetLabel => _audioPresetLabel(_settings.audioPreset);
-
-  /// 场景音效固定顺序（底部面板「音效」按钮一键循环用）
-  static const List<String> kAudioPresetCycleOrder = [
-    '',
-    'space',
-    'voice',
-    'bass',
-    'vintage',
-    'live',
-    'car',
-    'night',
-  ];
-
-  /// 底部面板「音效」按钮：按固定顺序循环，遥控器/手机一键切换，
-  /// 不用进设置翻（用户要求：这是个很直接的东西）
-  Future<void> cycleAudioPreset() async {
-    final i = kAudioPresetCycleOrder.indexOf(_settings.audioPreset);
-    final next =
-        kAudioPresetCycleOrder[(i < 0 ? 0 : i + 1) % kAudioPresetCycleOrder.length];
-    await setAudioPreset(next);
-  }
-
-  /// 切换声音实验室预设（'' = 标准）：mpv lavfi 音频滤镜。
-  /// 只影响内置播放器；换台重建控制器后自动重挂（见播放控制器创建处）
-  Future<void> setAudioPreset(String preset) async {
-    if (_settings.audioPreset == preset) return;
-    updateSettings(_settings.copyWith(audioPreset: preset));
-    final c = _videoController;
-    if (c != null) await c.applyAudioFilter(filterForPreset(preset));
-    // 自愈窗口起点：非直通档挂链成功即计时（直通清链不算）
-    _afAppliedAt = preset.isEmpty ? null : DateTime.now();
-    if (preset.isNotEmpty) {
-      _afFalloutUntil = DateTime.now().add(const Duration(seconds: 30));
-    }
-    final label = preset.isEmpty ? '标准' : _audioPresetLabel(preset);
-    OsdBus.show('声音：$label', icon: Icons.equalizer);
-  }
-
-  /// 均衡器 10 段中心频率（Hz）
-  static const List<int> kEqBands = [
-    31,
-    62,
-    125,
-    250,
-    500,
-    1000,
-    2000,
-    4000,
-    8000,
-    16000,
-  ];
-  static const List<String> kEqBandLabels = [
-    '31',
-    '62',
-    '125',
-    '250',
-    '500',
-    '1k',
-    '2k',
-    '4k',
-    '8k',
-    '16k',
-  ];
-
-  List<double> get audioEqGains {
-    final g = _settings.audioEqGains;
-    if (g.length == kEqBands.length) return g;
-    return List<double>.filled(kEqBands.length, 0);
-  }
-
-  /// 自定义均衡器增益 → 滤镜串（全 0 段返回 null = 直通）
-  String? filterForPreset(String preset) {
-    if (preset != 'custom') return kAudioPresets[preset];
-    final gains = audioEqGains;
-    final parts = <String>[];
-    for (var i = 0; i < kEqBands.length; i++) {
-      final g = gains[i];
-      if (g.abs() < 0.05) continue;
-      parts.add('equalizer=f=${kEqBands[i]}:t=q:w=1.0:'
-          'g=${g.toStringAsFixed(1)}');
-    }
-    return parts.isEmpty ? null : parts.join(',');
-  }
-
-  /// 调整某段增益（-12~+12 dB）；当前不在自定义档时自动切过去
-  Future<void> setAudioEqGain(int band, double value) async {
-    if (band < 0 || band >= kEqBands.length) return;
-    final v = value.clamp(-12.0, 12.0);
-    final gains = [...audioEqGains];
-    gains[band] = v;
-    updateSettings(_settings.copyWith(
-      audioEqGains: gains,
-      audioPreset: 'custom',
-    ));
-    final c = _videoController;
-    if (c != null) await c.applyAudioFilter(filterForPreset('custom'));
-  }
-
-  /// 自定义均衡器一键拉平（清增益但停在自定义档）
-  Future<void> resetAudioEq() async {
-    updateSettings(_settings.copyWith(
-      audioEqGains: List<double>.filled(kEqBands.length, 0),
-      audioPreset: 'custom',
-    ));
-    final c = _videoController;
-    if (c != null) await c.applyAudioFilter(null);
-    OsdBus.show('均衡器已拉平', icon: Icons.equalizer);
-  }
-
-  /// 持久化解码：json 列表 → 10 段增益（坏数据回全 0）
-  static List<double> _decodeEqGains(String? raw) {
-    if (raw == null || raw.isEmpty) {
-      return List<double>.filled(kEqBands.length, 0);
-    }
-    try {
-      final list =
-          (jsonDecode(raw) as List).map((e) => (e as num).toDouble()).toList();
-      if (list.length != kEqBands.length) {
-        return List<double>.filled(kEqBands.length, 0);
-      }
-      return list;
-    } catch (_) {
-      return List<double>.filled(kEqBands.length, 0);
-    }
-  }
-
-  static String _audioPresetLabel(String key) {
-    switch (key) {
-      case 'space':
-        return '3D 全景环绕';
-      case 'voice':
-        return '清澈人声';
-      case 'bass':
-        return '澎湃低音';
-      case 'vintage':
-        return '复古胆机';
-      case 'live':
-        return '现场 LIVE';
-      case 'car':
-        return '车载座舱';
-      case 'night':
-        return '夜间模式';
-      case 'custom':
-        // 设置里调过 10 段 EQ 后停在的档，底部按钮/弹窗同步叫这个名
-        return '自定义均衡器';
-      default:
-        return '标准';
-    }
-  }
 
   // ==================== EPG & 节目信息 ====================
 

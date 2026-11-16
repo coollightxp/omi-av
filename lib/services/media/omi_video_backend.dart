@@ -16,8 +16,6 @@ import 'omi_video_value.dart';
 /// | mdk | `OmiVideoMdkController`（omi_video_mdk.dart） | 老显卡/老系统上 D3D11 纹理更稳，不闪黑 |
 /// | web | `OmiVideoController`（omi_video_web.dart） | 浏览器 HTML video |
 ///
-/// 能力差异：MDK 引擎不支持 mpv 的 `af` 滤镜链，因此均衡器/音效
-/// 在 MDK 下不生效（UI 按引擎置灰），其余播放控制完全一致。
 abstract class OmiVideoBackend extends ChangeNotifier {
   OmiVideoValue get value;
 
@@ -33,7 +31,6 @@ abstract class OmiVideoBackend extends ChangeNotifier {
   Future<void> stopRecord();
 
   /// mpv 专属；MDK 下为空实现
-  Future<void> applyAudioFilter(String? lavfi);
 
   /// 关掉/恢复视频输出（mpv `vid=no`/`auto`）。
   /// 后台切台（通知栏上一台/下一台）时安卓侧没有 Surface，新播放器

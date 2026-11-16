@@ -99,19 +99,10 @@ class PlayerSettings {
   /// 注意开关本身只控制快捷键，不会立刻隐藏窗口——进出动作由 F9/托盘触发。
   final bool fishHotkey;
 
-  /// 声音实验室预设（方案 12.3 第二档）：'' = 标准；key 见 kAudioPresets。
-  /// 走 mpv lavfi 音频滤镜，仅内置播放器生效（网页播放器不支持）。
-  /// 'custom' = 自定义 10 段均衡器，增益见 [audioEqGains]
-  final String audioPreset;
-
-  /// 自定义均衡器 10 段增益（dB，-12~+12），中心频率
-  /// 31/62/125/250/500/1k/2k/4k/8k/16k；空表 = 全 0（直通）
-  final List<double> audioEqGains;
-
   /// 播放内核（'mpv' / 'mdk'，默认 mdk）。
   ///
   /// - mdk：fvp + libmdk（D3D11 直出纹理），画面最稳，老显卡/1607 上
-  ///   叠加面板不闪黑；均衡器与真电平波形不生效（波形自动退回模拟）
+  ///   叠加面板不闪黑
   /// - mpv：media_kit + libmpv，功能最全（滤镜/录制/电平/截帧），但个别
   ///   老显卡在面板动画时会闪一下
   ///
@@ -119,6 +110,11 @@ class PlayerSettings {
   /// 作回退（设置可切，MDK 起播失败也会自动回落）
   /// 切换后换台生效（当前画面不会热切）
   final String playEngine;
+
+  /// 底部面板是否显示「网页播放器/内置播放器切换」按钮。
+  /// 默认关：该按钮很不常用（网页频道嗅探接管场景），常驻面板反而
+  /// 挤占遥控器焦点路径（用户要求收进设置，开关控制显隐）
+  final bool showWebNativeToggle;
 
   const PlayerSettings({
     this.autoPlayNext = true,
@@ -147,9 +143,8 @@ class PlayerSettings {
     this.resumeLastChannel = true,
     this.closeToTray = false,
     this.fishHotkey = true,
-    this.audioPreset = '',
-    this.audioEqGains = const <double>[],
     this.playEngine = 'mdk',
+    this.showWebNativeToggle = false,
   });
 
   PlayerSettings copyWith({
@@ -179,9 +174,8 @@ class PlayerSettings {
     bool? resumeLastChannel,
     bool? closeToTray,
     bool? fishHotkey,
-    String? audioPreset,
-    List<double>? audioEqGains,
     String? playEngine,
+    bool? showWebNativeToggle,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -211,36 +205,14 @@ class PlayerSettings {
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
       closeToTray: closeToTray ?? this.closeToTray,
       fishHotkey: fishHotkey ?? this.fishHotkey,
-      audioPreset: audioPreset ?? this.audioPreset,
-      audioEqGains: audioEqGains ?? this.audioEqGains,
       playEngine: playEngine ?? this.playEngine,
+      showWebNativeToggle: showWebNativeToggle ?? this.showWebNativeToggle,
     );
   }
 }
 
 /// 声音实验室预设（方案 12.3 第二档）：mpv lavfi 音频滤镜串。
 /// 「标准 / 原声无损」为空（清除滤镜），不进表。
-/// 场景音效七档（2026-11-16，对齐 LXFM 的 7 种硬件级场景声场）：
-/// 都是标准 lavfi 滤镜（equalizer / aecho / extrastereo / highpass），
-/// mpv 内核在 Windows 与安卓同一套，切换即时生效。
-const Map<String, String> kAudioPresets = {
-  // 3D 全景环绕：立体声拉宽 + 双段微回声，声音往外撑开
-  'space': 'extrastereo=m=1.8,aecho=0.7:0.55:20|45:0.22|0.12',
-  // 清澈人声：压 250Hz 鼻音/轰鸣，提 3kHz 人声主区
-  'voice': 'equalizer=f=250:t=q:w=1.4:g=-3,equalizer=f=3000:t=q:w=1.2:g=4',
-  // 澎湃低音：60/130Hz 双点重提升，低频下潜有力
-  'bass': 'equalizer=f=60:t=q:w=1.2:g=7,equalizer=f=130:t=q:w=1.2:g=4',
-  // 复古胆机：削 13kHz 以上高频毛刺（电子管柔化），180Hz 暖低频托底
-  'vintage':
-      'equalizer=f=13000:t=q:w=1.4:g=-5,equalizer=f=200:t=q:w=1:g=3',
-  // 现场 LIVE：厅堂混响（60/120ms 两段衰减），音乐厅前排的空间感
-  'live': 'aecho=0.85:0.65:60|120:0.3|0.15',
-  // 车载座舱：先去掉 45Hz 以下发动机/风噪，再补鼓点和中高频穿透
-  'car': 'highpass=f=45,equalizer=f=100:t=q:w=1.2:g=4.5,'
-      'equalizer=f=3500:t=q:w=1.5:g=2',
-  // 夜间模式：动态响度归一，音量忽大忽小被抹平，睡觉听不打醒
-  'night': 'dynaudnorm=f=250:g=15:p=0.9',
-};
 
 enum VideoQuality {
   auto('自动'),

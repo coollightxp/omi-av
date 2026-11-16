@@ -897,8 +897,6 @@ function renderPlayer(){
     s.preferredQuality||'auto');
   html+=choiceCard('playEngine','播放内核','换台生效。MDK 画面最稳、叠面板不闪黑；MPV 滤镜/录制/电平最全',
     [['mpv','MPV'],['mdk','MDK']], s.playEngine||'mdk');
-  // 声音实验室（audioPreset）已从设置面板移除：选音效统一走播放页底部
-  // 弹窗、且按引擎可用性置灰，网页端没有引擎上下文，不再提供该入口
   html+=switchCard('autoPlayNext','自动播放下一频道','当前节目结束后自动切台');
   html+=switchCard('resumeLastChannel','启动时恢复上次频道','关闭后启动停在「请选择频道」，不发任何网络请求');
   // 「真波形纹理/电平驱动波形」两个实验项已下架（与音效滤镜冲突，2026-11 移除）
@@ -920,7 +918,7 @@ function renderPlayer(){
     html+=rangeCard('uiScale','界面缩放比例','电视上字太小看不全就调大',0.8,2.5,0.05,
       (typeof s.uiScale==='number'?s.uiScale:1),2,'x');
   }
-  html+='<div class="set-hint">修改即时生效并自动保存；设备上改的设置这里几秒内自动刷新。换台跳过关键词、声音均衡器细调等请在设备上打开设置面板。</div>';
+  html+='<div class="set-hint">修改即时生效并自动保存；设备上改的设置这里几秒内自动刷新。换台跳过关键词等请在设备上打开设置面板。</div>';
   el('list').innerHTML=html;
 }
 

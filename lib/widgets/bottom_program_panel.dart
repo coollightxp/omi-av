@@ -398,7 +398,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
 
   /// 「音频直播」徽章：跳动的四根小条 + 文案，暂停时条压平、文案改「已暂停」
   Widget _audioBadge(PlayerController controller) {
-    final playing = controller.isPlaying;
+    // loading = 起播意向明确：直接按播放中显示，别先亮「已暂停」再闪回
+    final playing =
+        controller.isPlaying || controller.state == PlayerState.loading;
     final t = AppTypography.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -462,8 +464,11 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     // 投屏态：播放会话由发送端控制，只保留必要操作
     if (c.isCasting) {
       final castActions = <_KbAction>[
-        _KbAction('playpause', c.isPlaying ? Icons.pause : Icons.play_arrow,
-            c.isPlaying ? '暂停' : '播放', widget.onTogglePlayPause),
+        _KbAction(
+            'playpause',
+            c.uiShowsPlaying ? Icons.pause : Icons.play_arrow,
+            c.uiShowsPlaying ? '暂停' : '播放',
+            widget.onTogglePlayPause),
         if (c.isDesktop)
           _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
               c.isMuted ? '取消静音' : '静音', c.toggleMute),
@@ -508,8 +513,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.hasNextSource ? c.nextSource : null),
       _KbAction(
           'playpause',
-          c.isPlaying ? Icons.pause : Icons.play_arrow,
-          c.isPlaying ? '暂停' : '播放',
+          c.uiShowsPlaying ? Icons.pause : Icons.play_arrow,
+          c.uiShowsPlaying ? '暂停' : '播放',
           hasChannel ? widget.onTogglePlayPause : null),
       if (c.isDesktop && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
@@ -533,15 +538,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       // 全屏仍只在桌面端（移动端全屏由系统/手势接管）
       _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
           c.isMuted ? '取消静音' : '静音', c.toggleMute),
-      // 场景音效：点按钮在上方弹出选单（同线路菜单样式）上下选；
-      // MDK 内核/网页频道不支持 mpv 音频滤镜 → 置灰不可点
-      _KbAction(
-          'audioFx',
-          Icons.graphic_eq,
-          c.audioFxAvailable
-              ? '音效：${c.audioPresetLabel}（弹出选单）'
-              : '音效（${c.webPageActive ? '网页频道' : 'MDK 内核'}不支持）',
-          c.audioFxAvailable ? () => _showAudioFxMenu(context, c) : null),
       if (c.isDesktop)
         _KbAction(
             'fullscreen',
@@ -559,7 +555,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             c.isCasting ? null : widget.onReload),
       // 网页/内置切换：仅网页频道体系内可用——网页播放中可切内置流
       // 播放（需已嗅探到可直连流），接管后可切回网页；纯流频道不显示
-      if (c.showWebNativeButton)
+      if (c.showWebNativeButton && c.showWebNativeToggle)
         _KbAction(
           'webnative',
           c.webPageActive ? Icons.smart_display : Icons.language,
@@ -628,7 +624,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     }
 
     addById('mute');
-    addById('audioFx');
     addById('fullscreen');
 
     // 尾部功能组：重载 / 网页切换 / 断开投屏（有则加竖线）
@@ -710,113 +705,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     return '${a.tooltip} ($key)';
   }
 
-  /// 场景音效选单：仿「线路菜单」（SourceStepper）在按钮上方弹一块
-  /// 小窗口，上下键移动 / OK 选中 / 触屏直点，当前档打勾。
-  /// 设置面板里不再放音效入口（用户要求：这是个很直接的东西，
-  /// 收进设置反而藏了）；自定义均衡器仍留在设置里。
-  Future<void> _showAudioFxMenu(
-      BuildContext context, PlayerController c) async {
-    final box = context.findRenderObject() as RenderBox?;
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox?;
-    if (box == null || overlay == null) return;
-    final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
-    final d = AppDensity.of(context);
-    final t = AppTypography.of(context);
-    final order = PlayerController.kAudioPresetCycleOrder;
-    final current = c.audioPreset;
-    // 档位说明与设置里原「声音实验室」一致，弹窗里窄屏只放主标题
-    const labels = <String, String>{
-      '': '标准（原声无损）',
-      'space': '3D 全景环绕',
-      'voice': '清澈人声',
-      'bass': '澎湃低音',
-      'vintage': '复古胆机',
-      'live': '现场 LIVE',
-      'car': '车载座舱',
-      'night': '夜间模式',
-      // 自定义 = 设置里 10 段均衡器调出来的那档，末尾一行可直接选回
-      'custom': '自定义均衡器',
-    };
-    // 自定义 EQ 概要：列出调过（|增益|≥0.5dB）的段，如「62 +3 · 1k -2」
-    String eqSummary() {
-      final gains = c.audioEqGains;
-      final parts = <String>[];
-      for (var i = 0;
-          i < gains.length && i < PlayerController.kEqBandLabels.length;
-          i++) {
-        final g = gains[i];
-        if (g.abs() >= 0.5) {
-          parts.add('${PlayerController.kEqBandLabels[i]} '
-              '${g > 0 ? '+' : ''}${g.toStringAsFixed(0)}');
-        }
-      }
-      return parts.isEmpty ? '未调整（直通）' : parts.join(' · ');
-    }
-
-    final rowH = d.listRowHeight * 0.8;
-    const width = 230.0;
-    // 8 个固定档 + 自定义均衡器，共 9 行
-    final menuH = (order.length + 1) * rowH + 16;
-    // 遥控器放行（见 menu_nav_flag）：菜单开着时播放页不再吞方向键/OK，
-    // 交给 Flutter 菜单自带焦点遍历；initialValue 让焦点落在当前档
-    menuNavActive.value = true;
-    String? chosen;
-    try {
-      chosen = await showMenu<String>(
-      context: context,
-      initialValue: current,
-      position: RelativeRect.fromLTRB(
-        origin.dx.clamp(8.0, overlay.size.width - width - 8),
-        (origin.dy - menuH).clamp(8.0, double.infinity),
-        overlay.size.width - origin.dx.clamp(0.0, overlay.size.width - width - 8) - width,
-        0,
-      ),
-      color: const Color(0xF01A1614),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(d.modalRadius),
-      ),
-      items: [
-        for (final key in [...order, 'custom'])
-          PopupMenuItem<String>(
-            value: key,
-            height: rowH,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 22,
-                  child: key == current
-                      ? const Icon(Icons.check,
-                          size: 16, color: Color(0xFFFFB35C))
-                      : null,
-                ),
-                Text(
-                  labels[key] ?? key,
-                  style: TextStyle(
-                    color: key == current ? Colors.white : Colors.white70,
-                    fontSize: t.body,
-                  ),
-                ),
-                const Spacer(),
-                // 自定义档：行尾带上当前 EQ 各段概要
-                if (key == 'custom')
-                  Text(eqSummary(),
-                      style:
-                          TextStyle(color: Colors.white38, fontSize: t.caption)),
-                if (key == current)
-                  Text('当前',
-                      style:
-                          TextStyle(color: Colors.white38, fontSize: t.caption)),
-              ],
-            ),
-          ),
-      ],
-      );
-    } finally {
-      menuNavActive.value = false;
-    }
-    if (chosen != null && chosen != current) await c.setAudioPreset(chosen);
-  }
 
   /// 分组竖线：电视/桌面显示，手机档不画（5 钮连线显碎）
   Widget _groupDivider(AppDensity d) {

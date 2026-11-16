@@ -2207,8 +2207,7 @@ class _PlayerSettingsTab extends StatelessWidget {
                   style: TextStyle(color: Colors.white, fontSize: 15)),
               subtitle: Text(
                 controller.useMdkEngine
-                    ? 'MDK（libmdk / D3D11）：默认，画面最稳，叠面板不闪黑；'
-                        '均衡器与真电平波形不可用'
+                    ? 'MDK（libmdk / D3D11）：默认，画面最稳，叠面板不闪黑'
                     : 'MPV（libmpv）：功能完整（滤镜/录制/实时电平）；'
                         '个别老显卡叠加面板时会闪一下',
                 style: const TextStyle(color: Colors.white54, fontSize: 12),
@@ -2227,18 +2226,19 @@ class _PlayerSettingsTab extends StatelessWidget {
                 },
               ),
             ),
-            // 音效选档已收进播放页底部面板的「音效」弹窗（用户要求：
-            // 直接的东西放明面上，设置里不重复放）；这里只留自定义均衡器
-            ListTile(
-              leading: const Icon(Icons.equalizer, color: Colors.white70),
-              title: const Text('自定义均衡器（10 段）',
+            // 网页/内置切换按钮默认不占面板：很不常用，常驻反而挤占
+            // 遥控器焦点路径；开关打开才在底部面板显示（用户要求）
+            SwitchListTile(
+              secondary: const Icon(Icons.language, color: Colors.white70),
+              title: const Text('显示网页播放器切换按钮',
                   style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: Text(
-                _eqSummary(controller.audioEqGains),
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-              trailing: const Icon(Icons.chevron_right, color: Colors.white38),
-              onTap: () => _showEqDialog(context, controller),
+              subtitle: const Text('网页频道嗅探到直连流后，底部面板出现'
+                  '「网页播放器播放/内置播放器播放」切换键',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              value: s.showWebNativeToggle,
+              onChanged: (v) =>
+                  controller.updateSettings(s.copyWith(showWebNativeToggle: v)),
+              activeColor: Colors.blueAccent,
             ),
             SwitchListTile(
               secondary: const Icon(Icons.skip_next, color: Colors.white70),
@@ -2380,102 +2380,6 @@ class _PlayerSettingsTab extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-
-  /// 均衡器概要（拖到非 0 的段才显示）
-  static String _eqSummary(List<double> gains) {
-    final active = <String>[];
-    for (var i = 0;
-        i < gains.length && i < PlayerController.kEqBandLabels.length;
-        i++) {
-      final g = gains[i];
-      if (g.abs() >= 0.05) {
-        active.add('${PlayerController.kEqBandLabels[i]}'
-            '${g > 0 ? '+' : ''}${g.toStringAsFixed(0)}');
-      }
-    }
-    return active.isEmpty ? '未调整（全部直通）' : active.join('  ');
-  }
-
-  /// 自定义均衡器：10 段滑杆（31Hz~16kHz，±12dB），松手即生效
-  Future<void> _showEqDialog(
-      BuildContext context, PlayerController controller) async {
-    await showChildDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) {
-          final gains = controller.audioEqGains;
-          return AlertDialog(
-            title: Row(
-              children: [
-                const Expanded(
-                  child: Text('自定义均衡器（10 段）', style: TextStyle(fontSize: 16)),
-                ),
-                TextButton(
-                  onPressed: () async {
-                    await controller.resetAudioEq();
-                    setLocal(() {});
-                  },
-                  child: const Text('拉平'),
-                ),
-              ],
-            ),
-            content: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (var i = 0; i < PlayerController.kEqBands.length; i++)
-                    Row(
-                      children: [
-                        SizedBox(
-                          width: 42,
-                          child: Text(
-                            PlayerController.kEqBandLabels[i],
-                            textAlign: TextAlign.right,
-                            style: const TextStyle(
-                                color: Colors.white54, fontSize: 12),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          // 遥控器/键盘：左右调该频段，上下自动跳到上下一条
-                          // （原生 Slider 会把上下键当成调值，焦点卡死在这里）
-                          child: _NavSlider(
-                            value: gains[i],
-                            min: -12,
-                            max: 12,
-                            divisions: 24,
-                            label:
-                                '${gains[i] > 0 ? '+' : ''}${gains[i].toStringAsFixed(1)}',
-                            onChanged: (v) {
-                              () async {
-                                await controller.setAudioEqGain(i, v);
-                                setLocal(() {});
-                              }();
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    '往上调增强该频段，往下调削弱；每档 0.5dB 一格，拖动即生效',
-                    style: TextStyle(color: Colors.white24, fontSize: 11.5),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('完成'),
-              ),
-            ],
-          );
-        },
-      ),
     );
   }
 

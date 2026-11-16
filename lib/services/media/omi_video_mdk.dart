@@ -18,7 +18,6 @@ import 'omi_video_value.dart';
 /// 里切换，换台后生效。
 ///
 /// 能力边界（与 mpv 引擎的差异，均在 UI 上做了降级）：
-/// - 没有 `af` 滤镜链 → 均衡器预设/自定义 EQ 不生效
 /// - 录制/截帧走 fvp 扩展（MDK 原生 `record` / `snapshot`，见 OMPlayer
 ///   同款实现），与 mpv 的 stream-record 一样可用
 class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
@@ -225,10 +224,6 @@ class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
       debugPrint('[OmiVideo/mdk] record stop failed: $e');
     }
   }
-
-  /// MDK 无 af 滤镜链：均衡器预设在这里不生效（UI 已提示）
-  @override
-  Future<void> applyAudioFilter(String? lavfi) async {}
 
   @override
   Future<void> setVideoOutputDisabled(bool disabled) async {}
