@@ -526,6 +526,19 @@ jobs:
               private var logoBitmap: Bitmap? = null
               private var logoLoaded = ""
 
+              // 当前卡片内容快照：logo 下载是异步的，回来时按这套字段重画，
+              // 保证图与台名/曲目永远同台（用户实测换台后卡片"图和字对不上、
+              // 很乱"，就是旧线程把上一台的图配了新台的台名）
+              @Volatile private var curName = ""
+              @Volatile private var curProgram = ""
+              @Volatile private var curPlaying = true
+              @Volatile private var curLogoUrl = ""
+
+              // 台标下载走单线程串行队列 + 代际号：快速换台时旧下载一律作废，
+              // 不会乱序回写，也不会堆积线程
+              private val logoExec = java.util.concurrent.Executors.newSingleThreadExecutor()
+              @Volatile private var logoSeq = 0
+
               /** 通知按钮 → 命令广播的接收器（onCreate 注册，onDestroy 注销） */
               private val actionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -624,25 +637,38 @@ jobs:
 
               private fun showCard(name: String, program: String, playing: Boolean, logoUrl: String) {
                   val s = session ?: return
+                  curName = name
+                  curProgram = program
+                  curPlaying = playing
+                  curLogoUrl = logoUrl
                   if (logoUrl.isNotEmpty() && logoUrl != logoLoaded) {
-                      // 先用现有封面立即出卡片（保证 startForeground 5 秒时限），
-                      // 台标下载完成后再刷一次
-                      post(s, name, program, playing, logoBitmap)
-                      Thread {
+                      // 台标还没就位：先不带图出卡片（保证 startForeground 5 秒
+                      // 时限；大图缺省回落应用图标），绝不拿上一台的旧图占位。
+                      // 下载完成（或失败清图）后再刷一次
+                      post(s)
+                      val job = ++logoSeq
+                      logoExec.execute {
                           val b = fetchBitmap(logoUrl)
-                          if (b != null) {
-                              logoBitmap = b
-                              logoLoaded = logoUrl
-                              post(s, name, program, playing, b)
-                          }
-                      }.start()
+                          if (job != logoSeq) return@execute // 期间又换台了：作废
+                          logoBitmap = b
+                          logoLoaded = if (b != null) logoUrl else ""
+                          post(s)
+                      }
                   } else {
-                      post(s, name, program, playing, logoBitmap)
+                      post(s)
                   }
               }
 
-              private fun post(s: MediaSessionCompat, name: String, program: String,
-                               playing: Boolean, logo: Bitmap?) {
+              /** 通知内容只从 cur* 快照读：logo 异步回来重画时，台名/曲目/
+               *  播放态取的是当前值；台标只在 curLogoUrl == logoLoaded（当前台
+               *  的图已就位）时才给——刚换台或下载失败时宁可先不带图，
+               *  也绝不把上一台的旧图配进新台卡片 */
+              private fun post(s: MediaSessionCompat) {
+                  val name = curName
+                  val program = curProgram
+                  val playing = curPlaying
+                  val logo = if (curLogoUrl.isNotEmpty() && curLogoUrl == logoLoaded)
+                      logoBitmap else null
                   val md = MediaMetadataCompat.Builder()
                       .putString(MediaMetadataCompat.METADATA_KEY_TITLE, name)
                       .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, program)
@@ -768,6 +794,7 @@ jobs:
               override fun onDestroy() {
                   running = false
                   live = null
+                  try { logoExec.shutdownNow() } catch (e: Exception) {}
                   try { unregisterReceiver(actionReceiver) } catch (e: Exception) {}
                   try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (e: Exception) {}
                   wakeLock = null
@@ -1478,6 +1505,19 @@ jobs:
               private var logoBitmap: Bitmap? = null
               private var logoLoaded = ""
 
+              // 当前卡片内容快照：logo 下载是异步的，回来时按这套字段重画，
+              // 保证图与台名/曲目永远同台（用户实测换台后卡片"图和字对不上、
+              // 很乱"，就是旧线程把上一台的图配了新台的台名）
+              @Volatile private var curName = ""
+              @Volatile private var curProgram = ""
+              @Volatile private var curPlaying = true
+              @Volatile private var curLogoUrl = ""
+
+              // 台标下载走单线程串行队列 + 代际号：快速换台时旧下载一律作废，
+              // 不会乱序回写，也不会堆积线程
+              private val logoExec = java.util.concurrent.Executors.newSingleThreadExecutor()
+              @Volatile private var logoSeq = 0
+
               /** 通知按钮 → 命令广播的接收器（onCreate 注册，onDestroy 注销） */
               private val actionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -1576,25 +1616,38 @@ jobs:
 
               private fun showCard(name: String, program: String, playing: Boolean, logoUrl: String) {
                   val s = session ?: return
+                  curName = name
+                  curProgram = program
+                  curPlaying = playing
+                  curLogoUrl = logoUrl
                   if (logoUrl.isNotEmpty() && logoUrl != logoLoaded) {
-                      // 先用现有封面立即出卡片（保证 startForeground 5 秒时限），
-                      // 台标下载完成后再刷一次
-                      post(s, name, program, playing, logoBitmap)
-                      Thread {
+                      // 台标还没就位：先不带图出卡片（保证 startForeground 5 秒
+                      // 时限；大图缺省回落应用图标），绝不拿上一台的旧图占位。
+                      // 下载完成（或失败清图）后再刷一次
+                      post(s)
+                      val job = ++logoSeq
+                      logoExec.execute {
                           val b = fetchBitmap(logoUrl)
-                          if (b != null) {
-                              logoBitmap = b
-                              logoLoaded = logoUrl
-                              post(s, name, program, playing, b)
-                          }
-                      }.start()
+                          if (job != logoSeq) return@execute // 期间又换台了：作废
+                          logoBitmap = b
+                          logoLoaded = if (b != null) logoUrl else ""
+                          post(s)
+                      }
                   } else {
-                      post(s, name, program, playing, logoBitmap)
+                      post(s)
                   }
               }
 
-              private fun post(s: MediaSessionCompat, name: String, program: String,
-                               playing: Boolean, logo: Bitmap?) {
+              /** 通知内容只从 cur* 快照读：logo 异步回来重画时，台名/曲目/
+               *  播放态取的是当前值；台标只在 curLogoUrl == logoLoaded（当前台
+               *  的图已就位）时才给——刚换台或下载失败时宁可先不带图，
+               *  也绝不把上一台的旧图配进新台卡片 */
+              private fun post(s: MediaSessionCompat) {
+                  val name = curName
+                  val program = curProgram
+                  val playing = curPlaying
+                  val logo = if (curLogoUrl.isNotEmpty() && curLogoUrl == logoLoaded)
+                      logoBitmap else null
                   val md = MediaMetadataCompat.Builder()
                       .putString(MediaMetadataCompat.METADATA_KEY_TITLE, name)
                       .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, program)
@@ -1720,6 +1773,7 @@ jobs:
               override fun onDestroy() {
                   running = false
                   live = null
+                  try { logoExec.shutdownNow() } catch (e: Exception) {}
                   try { unregisterReceiver(actionReceiver) } catch (e: Exception) {}
                   try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (e: Exception) {}
                   wakeLock = null
