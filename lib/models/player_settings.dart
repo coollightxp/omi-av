@@ -108,12 +108,6 @@ class PlayerSettings {
   /// 31/62/125/250/500/1k/2k/4k/8k/16k；空表 = 全 0（直通）
   final List<double> audioEqGains;
 
-  /// 电台「真波形纹理」实验开关（默认关）。
-  /// 开着时让 mpv 用 lavfi-complex 把音频画成视频帧贴出来（真实波形，
-  /// 但会占 vo，部分流的滤镜链建不起来）；关着走 Flutter 侧电平波形，
-  /// 稳定且不黑屏。绝大多数用户不需要开。
-  final bool spectrumTexture;
-
   /// 播放内核（'mpv' / 'mdk'，默认 mdk）。
   ///
   /// - mdk：fvp + libmdk（D3D11 直出纹理），画面最稳，老显卡/1607 上
@@ -125,15 +119,6 @@ class PlayerSettings {
   /// 作回退（设置可切，MDK 起播失败也会自动回落）
   /// 切换后换台生效（当前画面不会热切）
   final String playEngine;
-
-  /// 电台「真实电平波形」开关（默认关）。
-  ///
-  /// 开着时在 mpv 的 `af` 链上串一条 `astats` 电平表，波形跟着真实响度走；
-  /// 关着时波形按播放态动画，**完全不碰音频链**。
-  /// 2026-11 用户实测：Win10 1607 上挂这条滤镜后电台整路无声（视频不受
-  /// 影响，因为视频不挂滤镜），所以默认关闭；想要真波形的用户可在
-  /// 「在线电台」页签里自行开启，出现无声直接关掉即可。
-  final bool radioMeter;
 
   const PlayerSettings({
     this.autoPlayNext = true,
@@ -164,8 +149,6 @@ class PlayerSettings {
     this.fishHotkey = true,
     this.audioPreset = '',
     this.audioEqGains = const <double>[],
-    this.spectrumTexture = false,
-    this.radioMeter = false,
     this.playEngine = 'mdk',
   });
 
@@ -198,8 +181,6 @@ class PlayerSettings {
     bool? fishHotkey,
     String? audioPreset,
     List<double>? audioEqGains,
-    bool? spectrumTexture,
-    bool? radioMeter,
     String? playEngine,
   }) {
     return PlayerSettings(
@@ -232,8 +213,6 @@ class PlayerSettings {
       fishHotkey: fishHotkey ?? this.fishHotkey,
       audioPreset: audioPreset ?? this.audioPreset,
       audioEqGains: audioEqGains ?? this.audioEqGains,
-      spectrumTexture: spectrumTexture ?? this.spectrumTexture,
-      radioMeter: radioMeter ?? this.radioMeter,
       playEngine: playEngine ?? this.playEngine,
     );
   }

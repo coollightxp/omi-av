@@ -901,8 +901,7 @@ function renderPlayer(){
   // 弹窗、且按引擎可用性置灰，网页端没有引擎上下文，不再提供该入口
   html+=switchCard('autoPlayNext','自动播放下一频道','当前节目结束后自动切台');
   html+=switchCard('resumeLastChannel','启动时恢复上次频道','关闭后启动停在「请选择频道」，不发任何网络请求');
-  html+=switchCard('spectrumTexture','电台真波形纹理（实验）','让 mpv 直接输出波形画面，个别流可能黑屏；换台生效');
-  html+=switchCard('radioMeter','电台电平驱动波形（实验）','波形跟着真实响度起伏，个别机器会出现电台无声');
+  // 「真波形纹理/电平驱动波形」两个实验项已下架（与音效滤镜冲突，2026-11 移除）
   html+=rangeCard('gestureSensitivity','手势灵敏度','左右滑调音量/亮度的跟手程度',0.5,2,0.1,
     (typeof s.gestureSensitivity==='number'?s.gestureSensitivity:1),1,'x');
   html+=rangeCard('autoHideDelaySec','面板自动隐藏','底部控制面板停手后多久收起',1,10,1,

@@ -12,18 +12,14 @@ import 'omi_video_value.dart';
 ///
 /// | 引擎 | 实现类 | 适用 |
 /// |---|---|---|
-/// | mpv | `OmiVideoController`（omi_video_io.dart） | 默认，功能最全（音量/滤镜/录制/截帧/电平） |
+/// | mpv | `OmiVideoController`（omi_video_io.dart） | 默认，功能最全（音量/滤镜/录制/截帧） |
 /// | mdk | `OmiVideoMdkController`（omi_video_mdk.dart） | 老显卡/老系统上 D3D11 纹理更稳，不闪黑 |
 /// | web | `OmiVideoController`（omi_video_web.dart） | 浏览器 HTML video |
 ///
-/// 能力差异：MDK 引擎不支持 mpv 的 `af` 滤镜链，因此均衡器/真电平波形
-/// 在 MDK 下不生效（波形自动退回模拟动画），其余播放控制完全一致。
+/// 能力差异：MDK 引擎不支持 mpv 的 `af` 滤镜链，因此均衡器/音效
+/// 在 MDK 下不生效（UI 按引擎置灰），其余播放控制完全一致。
 abstract class OmiVideoBackend extends ChangeNotifier {
   OmiVideoValue get value;
-
-  /// 实时音频电平 0~1（-1 = 未知）。仅 mpv 引擎提供；MDK 恒为 -1，
-  /// 波形组件据此退回模拟动画
-  ValueNotifier<double> get audioLevel;
 
   Future<void> initialize();
   Future<void> play();

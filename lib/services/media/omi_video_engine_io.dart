@@ -8,8 +8,6 @@ OmiVideoBackend createOmiVideoBackend({
   Map<String, String>? headers,
   String? formatHint,
   int bufferSeconds = 5,
-  bool radioSpectrum = false,
-  bool audioMeter = false,
   bool useMdk = false,
 }) {
   if (useMdk) {
@@ -18,8 +16,6 @@ OmiVideoBackend createOmiVideoBackend({
       headers: headers,
       formatHint: formatHint,
       bufferSeconds: bufferSeconds,
-      radioSpectrum: radioSpectrum,
-      audioMeter: audioMeter,
     );
   }
   return OmiVideoController.network(
@@ -27,7 +23,5 @@ OmiVideoBackend createOmiVideoBackend({
     headers: headers,
     formatHint: formatHint,
     bufferSeconds: bufferSeconds,
-    radioSpectrum: radioSpectrum,
-    audioMeter: audioMeter,
   );
 }

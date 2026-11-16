@@ -2241,30 +2241,6 @@ class _PlayerSettingsTab extends StatelessWidget {
               onTap: () => _showEqDialog(context, controller),
             ),
             SwitchListTile(
-              secondary: const Icon(Icons.graphic_eq, color: Colors.white70),
-              title: const Text('电台真波形纹理（实验）',
-                  style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: const Text(
-                  '默认关：波形由实时电平驱动，稳定可见。开启后让 mpv 直接输出'
-                  '波形画面，部分流可能黑屏，换台生效',
-                  style: TextStyle(color: Colors.white54, fontSize: 12)),
-              value: s.spectrumTexture,
-              onChanged: (v) => controller.setSpectrumTexture(v),
-              activeColor: Colors.blueAccent,
-            ),
-            SwitchListTile(
-              secondary: const Icon(Icons.timeline, color: Colors.white70),
-              title: const Text('电台电平驱动波形（实验）',
-                  style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: const Text(
-                  '默认关：波形按播放状态动画，完全不碰音频链。开启后波形跟着'
-                  '真实响度起伏，但个别机器会出现电台无声（关掉即恢复）',
-                  style: TextStyle(color: Colors.white54, fontSize: 12)),
-              value: s.radioMeter,
-              onChanged: (v) => controller.setRadioMeter(v),
-              activeColor: Colors.blueAccent,
-            ),
-            SwitchListTile(
               secondary: const Icon(Icons.skip_next, color: Colors.white70),
               title: const Text('自动播放下一频道',
                   style: TextStyle(color: Colors.white, fontSize: 15)),

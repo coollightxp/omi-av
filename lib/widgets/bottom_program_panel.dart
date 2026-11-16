@@ -411,7 +411,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         children: [
           AudioBars(
               active: playing,
-              level: controller.audioLevel,
               height: 11,
               bars: 4,
               barWidth: 2.2,

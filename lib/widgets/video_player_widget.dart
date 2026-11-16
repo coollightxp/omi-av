@@ -291,7 +291,6 @@ class _RadioStage extends StatelessWidget {
                         const SizedBox(width: 10),
                         _AudioTag(
                           playing: controller.isPlaying,
-                          level: controller.audioLevel,
                         ),
                         // 定时关闭实时倒计时（每秒走字，到点自动暂停）
                         ValueListenableBuilder<Duration?>(
@@ -413,34 +412,13 @@ class _RadioStage extends StatelessWidget {
     );
   }
 
-  /// 波形区：默认 Flutter 侧电平波形（真实响度驱动，必定可见可动）；
-  /// 只有开了「真波形纹理(实验)」且 mpv 真出帧（尺寸非 0）才贴纹理。
-  /// 早期版本无条件优先纹理，结果 lavfi-complex 在部分流上建不起来，
-  /// 看到的是一块不动的黑底 —— 用户反馈"波形没起作用"就是这个。
-  Widget _wave(double s) {
-    final vc = controller.videoController;
-    if (vc == null || !controller.spectrumTexture) return _fallbackWave(s);
-    return AnimatedBuilder(
-      animation: vc,
-      builder: (context, _) {
-        // mpv 的 showwaves 一旦出帧，宽高就非 0
-        if (vc.value.size.width <= 0) return _fallbackWave(s);
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(10),
-          child: Container(
-            width: 470 * s,
-            height: 64 * s,
-            color: const Color(0xFF0B0805),
-            child: vc.build(fit: BoxFit.cover),
-          ),
-        );
-      },
-    );
-  }
+  /// 波形区：Flutter 侧模拟波形（按播放态动画，必定可见可动）。
+  /// 「真波形纹理(实验)」已下架（2026-11：lavfi-complex 占 vo 且与
+  /// 音效滤镜冲突，部分流上黑屏/不动）
+  Widget _wave(double s) => _fallbackWave(s);
 
   Widget _fallbackWave(double s) => AudioWave(
         active: controller.isPlaying,
-        level: controller.audioLevel,
         fillWidth: true,
         height: 56 * s,
         bars: 45,

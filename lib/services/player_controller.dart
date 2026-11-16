@@ -1027,8 +1027,6 @@ class PlayerController extends ChangeNotifier {
         'playEngine': s.playEngine,
         // audioPreset 已随「声音实验室」下架：选音效走播放页底部弹窗，
         // 网页端没有引擎可用性上下文，不再暴露
-        'spectrumTexture': s.spectrumTexture,
-        'radioMeter': s.radioMeter,
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
         'tuneDwellMs': s.tuneDwellMs,
@@ -1143,14 +1141,6 @@ class PlayerController extends ChangeNotifier {
         await setPlayEngine(engine);
       }
       // （audioPreset 已下架：旧版网页缓存保存回的该键在此被忽略）
-      final spectrum = rb('spectrumTexture');
-      if (spectrum != null && spectrum != cur.spectrumTexture) {
-        await setSpectrumTexture(spectrum);
-      }
-      final meter = rb('radioMeter');
-      if (meter != null && meter != cur.radioMeter) {
-        await setRadioMeter(meter);
-      }
       VideoQuality? quality;
       final qName = rs('preferredQuality');
       for (final v in VideoQuality.values) {
@@ -2713,12 +2703,8 @@ class PlayerController extends ChangeNotifier {
       headers: headers.isEmpty ? null : headers,
       formatHint: formatHint,
       bufferSeconds: bufSecs,
-      // 电台：默认不抢 vo（lavfi-complex 出纹理在部分流上会黑屏/不动，
-      // 见设置「真波形纹理(实验)」）；电平表始终挂，波形跟真实响度走
-      radioSpectrum: channel.isRadio && _settings.spectrumTexture,
-      // 电平表默认不挂：实测部分机器（Win10 1607 + 某些声卡）挂上
-      // astats 后电台整路无声，视频不受影响。想听真波形可在设置里开
-      audioMeter: channel.isRadio && _settings.radioMeter,
+      // 「真波形纹理/电平驱动波形」两个实验项已下架（2026-11：与音效
+      // 滤镜抢 af/vo 链，冲突排查成本高）；波形一律走 Flutter 模拟动画
     );
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
@@ -3807,6 +3793,31 @@ class PlayerController extends ChangeNotifier {
       updateSettings(_settings.copyWith(audioPreset: ''));
       unawaited(_videoController?.applyAudioFilter(null));
       OsdBus.show('当前设备不支持该音效，已切回标准', icon: Icons.equalizer);
+      // 自愈后绝不能落进下面的「自动重试」横幅（Windows 实测：切音效
+      // → 自愈回直通成功、声音一直正常，横幅却数到 5/5 挂着不消——
+      // 滤镜重配置会冒瞬时 error 事件，不代表断流）。分两种情况收尾：
+      _autoReloadCount = 0;
+      _lastError = null;
+      final stillPlaying = _videoController?.value.isPlaying ?? false;
+      if (stillPlaying) {
+        // 声音没断：清掉错误现场继续播
+        _state = PlayerState.playing;
+        notifyListeners();
+        return;
+      }
+      // 真断流（安卓旧内核那种挂法）：静默重拉一次当前台（已不带滤镜），
+      // 不进计数横幅；再失败由后续事件走常规错误路径
+      _state = PlayerState.loading;
+      notifyListeners();
+      final ch = _currentChannel;
+      _autoRetryTimer = Timer(const Duration(seconds: 1), () {
+        _autoRetryTimer = null;
+        // 期间用户已切台/开始投屏：放弃
+        if (!identical(_currentChannel, ch) || _isCasting) return;
+        _sourceIndex = 0;
+        _playCurrentSource();
+      });
+      return;
     }
     // 后台（通知卡片在操作）不重试。
     //
@@ -3885,8 +3896,6 @@ class PlayerController extends ChangeNotifier {
   static const _kFishHotkey = 'settings_fish_hotkey';
   static const _kAudioPreset = 'settings_audio_preset';
   static const _kAudioEqGains = 'settings_audio_eq_gains';
-  static const _kSpectrumTexture = 'settings_spectrum_texture';
-  static const _kRadioMeter = 'settings_radio_meter';
   static const _kPlayEngine = 'settings_play_engine';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
@@ -3933,8 +3942,6 @@ class PlayerController extends ChangeNotifier {
         fishHotkey: p.getBool(_kFishHotkey) ?? true,
         audioPreset: p.getString(_kAudioPreset) ?? '',
         audioEqGains: _decodeEqGains(p.getString(_kAudioEqGains)),
-        spectrumTexture: p.getBool(_kSpectrumTexture) ?? false,
-        radioMeter: p.getBool(_kRadioMeter) ?? false,
         // 默认 MDK：实测同机 MPV 叠面板闪黑、MDK 不闪；已存过设置的用户
         // 保持原选择（尊重手动切换），MDK 起播失败还有 _forceMpv 兜底
         playEngine: p.getString(_kPlayEngine) ?? 'mdk',
@@ -4027,8 +4034,6 @@ class PlayerController extends ChangeNotifier {
 
       await putString(_kAudioPreset, _settings.audioPreset);
       await putString(_kAudioEqGains, jsonEncode(_settings.audioEqGains));
-      await putBool(_kSpectrumTexture, _settings.spectrumTexture);
-      await putBool(_kRadioMeter, _settings.radioMeter);
       await putString(_kPlayEngine, _settings.playEngine);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
@@ -4259,14 +4264,6 @@ class PlayerController extends ChangeNotifier {
 
   String get audioPreset => _settings.audioPreset;
 
-  /// 当前播放内核的实时电平（0~1，-1 = 取不到）。
-  /// 波形组件直接订阅这个 notifier：每 90ms 更新一次，不走
-  /// ChangeNotifier，避免为了一条波形把整棵播放树重建。
-  ValueListenable<double>? get audioLevel => _videoController?.audioLevel;
-
-  /// 真波形纹理（实验）：mpv lavfi-complex → vo 出图
-  bool get spectrumTexture => _settings.spectrumTexture;
-
   /// 播放内核：'mpv'（默认，功能全）/ 'mdk'（D3D11 直出，老显卡更稳）
   String get playEngine => _settings.playEngine;
   bool get useMdkEngine => _settings.playEngine == 'mdk';
@@ -4298,28 +4295,6 @@ class PlayerController extends ChangeNotifier {
       // 重开当前台：playChannel 内部会按新引擎重建控制器
       await playChannel(ch);
     }
-  }
-
-  /// 电台真实电平波形（实验）：在音频链上挂 astats 取响度。
-  /// 关着时波形按播放态动画，音频链完全不碰
-  bool get radioMeter => _settings.radioMeter;
-
-  Future<void> setRadioMeter(bool on) async {
-    if (_settings.radioMeter == on) return;
-    updateSettings(_settings.copyWith(radioMeter: on));
-    OsdBus.show(
-      on ? '真实电平波形：开（重开当前电台生效）' : '真实电平波形：关（波形改为模拟）',
-      icon: Icons.graphic_eq,
-    );
-  }
-
-  Future<void> setSpectrumTexture(bool on) async {
-    if (_settings.spectrumTexture == on) return;
-    updateSettings(_settings.copyWith(spectrumTexture: on));
-    OsdBus.show(
-      on ? '真波形纹理：开（下次换台生效）' : '真波形纹理：关',
-      icon: Icons.graphic_eq,
-    );
   }
 
   /// 当前音效档显示名
