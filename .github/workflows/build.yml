@@ -539,6 +539,10 @@ jobs:
               private val logoExec = java.util.concurrent.Executors.newSingleThreadExecutor()
               @Volatile private var logoSeq = 0
 
+              // 无台标时的占位图缓存（台名首字 → 画好的图）
+              private var placeholderKey = ""
+              private var placeholderBitmap: Bitmap? = null
+
               /** 通知按钮 → 命令广播的接收器（onCreate 注册，onDestroy 注销） */
               private val actionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -642,9 +646,9 @@ jobs:
                   curPlaying = playing
                   curLogoUrl = logoUrl
                   if (logoUrl.isNotEmpty() && logoUrl != logoLoaded) {
-                      // 台标还没就位：先不带图出卡片（保证 startForeground 5 秒
-                      // 时限；大图缺省回落应用图标），绝不拿上一台的旧图占位。
-                      // 下载完成（或失败清图）后再刷一次
+                      // 台标还没就位：先用「方底 + 台名首字」占位出卡片（同时保证
+                      // startForeground 5 秒时限），绝不拿上一台的旧图占位。
+                      // 下载完成（或失败）后再刷一次
                       post(s)
                       val job = ++logoSeq
                       logoExec.execute {
@@ -659,16 +663,47 @@ jobs:
                   }
               }
 
+              /** 台标还没拿到时的占位图：方底 + 台名首字。
+               *  与 App 内 ChannelBadge 同一套观感（系统会把大图裁成圆/圆角，
+               *  方底正好）；真台标下载完成后自动替换，不必等也不用空着。 */
+              private fun placeholderFor(name: String): Bitmap? {
+                  val ch = name.trim().take(1).ifEmpty { "?" }
+                  if (placeholderKey == ch && placeholderBitmap != null) {
+                      return placeholderBitmap
+                  }
+                  return try {
+                      val size = 256
+                      val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                      val c = android.graphics.Canvas(bmp)
+                      val bg = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                      bg.color = android.graphics.Color.parseColor("#2A3138")
+                      c.drawRect(0f, 0f, size.toFloat(), size.toFloat(), bg)
+                      val tp = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                      tp.color = android.graphics.Color.WHITE
+                      tp.textSize = size * 0.52f
+                      tp.textAlign = android.graphics.Paint.Align.CENTER
+                      tp.typeface = android.graphics.Typeface.DEFAULT_BOLD
+                      val fm = tp.fontMetrics
+                      // 垂直居中按字体度量算，避免中文偏上/偏下
+                      val baseline = size / 2f - (fm.ascent + fm.descent) / 2f
+                      c.drawText(ch, size / 2f, baseline, tp)
+                      placeholderKey = ch
+                      placeholderBitmap = bmp
+                      bmp
+                  } catch (e: Exception) { null }
+              }
+
               /** 通知内容只从 cur* 快照读：logo 异步回来重画时，台名/曲目/
                *  播放态取的是当前值；台标只在 curLogoUrl == logoLoaded（当前台
-               *  的图已就位）时才给——刚换台或下载失败时宁可先不带图，
-               *  也绝不把上一台的旧图配进新台卡片 */
+               *  的图已就位）时才给真图——刚换台或下载失败时用「方底 + 首字」
+               *  占位，绝不把上一台的旧图配进新台卡片 */
               private fun post(s: MediaSessionCompat) {
                   val name = curName
                   val program = curProgram
                   val playing = curPlaying
+                  // 真台标就位用真图；否则用「方底 + 首字」占位（下载完成自动换掉）
                   val logo = if (curLogoUrl.isNotEmpty() && curLogoUrl == logoLoaded)
-                      logoBitmap else null
+                      logoBitmap else placeholderFor(name)
                   val md = MediaMetadataCompat.Builder()
                       .putString(MediaMetadataCompat.METADATA_KEY_TITLE, name)
                       .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, program)
@@ -1518,6 +1553,10 @@ jobs:
               private val logoExec = java.util.concurrent.Executors.newSingleThreadExecutor()
               @Volatile private var logoSeq = 0
 
+              // 无台标时的占位图缓存（台名首字 → 画好的图）
+              private var placeholderKey = ""
+              private var placeholderBitmap: Bitmap? = null
+
               /** 通知按钮 → 命令广播的接收器（onCreate 注册，onDestroy 注销） */
               private val actionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -1621,9 +1660,9 @@ jobs:
                   curPlaying = playing
                   curLogoUrl = logoUrl
                   if (logoUrl.isNotEmpty() && logoUrl != logoLoaded) {
-                      // 台标还没就位：先不带图出卡片（保证 startForeground 5 秒
-                      // 时限；大图缺省回落应用图标），绝不拿上一台的旧图占位。
-                      // 下载完成（或失败清图）后再刷一次
+                      // 台标还没就位：先用「方底 + 台名首字」占位出卡片（同时保证
+                      // startForeground 5 秒时限），绝不拿上一台的旧图占位。
+                      // 下载完成（或失败）后再刷一次
                       post(s)
                       val job = ++logoSeq
                       logoExec.execute {
@@ -1638,16 +1677,47 @@ jobs:
                   }
               }
 
+              /** 台标还没拿到时的占位图：方底 + 台名首字。
+               *  与 App 内 ChannelBadge 同一套观感（系统会把大图裁成圆/圆角，
+               *  方底正好）；真台标下载完成后自动替换，不必等也不用空着。 */
+              private fun placeholderFor(name: String): Bitmap? {
+                  val ch = name.trim().take(1).ifEmpty { "?" }
+                  if (placeholderKey == ch && placeholderBitmap != null) {
+                      return placeholderBitmap
+                  }
+                  return try {
+                      val size = 256
+                      val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                      val c = android.graphics.Canvas(bmp)
+                      val bg = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                      bg.color = android.graphics.Color.parseColor("#2A3138")
+                      c.drawRect(0f, 0f, size.toFloat(), size.toFloat(), bg)
+                      val tp = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                      tp.color = android.graphics.Color.WHITE
+                      tp.textSize = size * 0.52f
+                      tp.textAlign = android.graphics.Paint.Align.CENTER
+                      tp.typeface = android.graphics.Typeface.DEFAULT_BOLD
+                      val fm = tp.fontMetrics
+                      // 垂直居中按字体度量算，避免中文偏上/偏下
+                      val baseline = size / 2f - (fm.ascent + fm.descent) / 2f
+                      c.drawText(ch, size / 2f, baseline, tp)
+                      placeholderKey = ch
+                      placeholderBitmap = bmp
+                      bmp
+                  } catch (e: Exception) { null }
+              }
+
               /** 通知内容只从 cur* 快照读：logo 异步回来重画时，台名/曲目/
                *  播放态取的是当前值；台标只在 curLogoUrl == logoLoaded（当前台
-               *  的图已就位）时才给——刚换台或下载失败时宁可先不带图，
-               *  也绝不把上一台的旧图配进新台卡片 */
+               *  的图已就位）时才给真图——刚换台或下载失败时用「方底 + 首字」
+               *  占位，绝不把上一台的旧图配进新台卡片 */
               private fun post(s: MediaSessionCompat) {
                   val name = curName
                   val program = curProgram
                   val playing = curPlaying
+                  // 真台标就位用真图；否则用「方底 + 首字」占位（下载完成自动换掉）
                   val logo = if (curLogoUrl.isNotEmpty() && curLogoUrl == logoLoaded)
-                      logoBitmap else null
+                      logoBitmap else placeholderFor(name)
                   val md = MediaMetadataCompat.Builder()
                       .putString(MediaMetadataCompat.METADATA_KEY_TITLE, name)
                       .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, program)
