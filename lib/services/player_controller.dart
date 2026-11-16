@@ -145,6 +145,19 @@ class PlayerController extends ChangeNotifier {
   // 整场投屏是否已重建过（所有自愈路径统一守门，只重建一次）
   bool _castReinitDone = false;
 
+  /// 投屏端在 SetURI 之后立刻下发的「续播 Seek」。
+  ///
+  /// 第三方投屏端（TVBox / 乐播等）的信令是 SetURI → Play → Seek(断点)，
+  /// Seek 通常在 SetURI 后 1 秒内到达，此时播放器刚初始化、时长还未知。
+  /// 旧逻辑对「时长未知」的投屏 Seek 一律丢弃（防微信视频号的进度同步
+  /// 把直播内核 seek 挂死），于是发送端轮询 GetPositionInfo 永远看到
+  /// 0:00:00 + 空时长 → 停在「等待投屏状态」，重新投还是同一循环。
+  ///
+  /// 现在先存下来，等时长可用时补做一次（[_applyPendingCastSeek]）；
+  /// 20 秒内始终不可用（真直播/起播失败）则丢弃。
+  Duration? _castPendingSeek;
+  DateTime? _castPendingSeekAt;
+
   // buffering 持续超时自愈
   DateTime? _bufferingSince;
   // 上次观察到的已缓冲末尾（ms）：缓冲中若该值仍在增长，说明下载在
@@ -478,6 +491,7 @@ class PlayerController extends ChangeNotifier {
     _tickTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
       // 通知栏卡片状态跟播放/曲目走（内部有签名去重，几乎零成本）
       _syncAudioNotification();
+      _applyPendingCastSeek();
       _checkCastStall();
       final vc = _videoController;
       if (vc == null || !vc.value.isInitialized) return;
@@ -1372,6 +1386,9 @@ class PlayerController extends ChangeNotifier {
       CastLog.write('cast play SAME URL ignored: $title');
       return;
     }
+    // 新投屏：上一次挂起的续播 Seek 已无意义
+    _castPendingSeek = null;
+    _castPendingSeekAt = null;
     CastLog.write('cast play url: $title');
     // 诊断：记录 URL 类型与 host（不落完整 URL 里的鉴权参数）
     try {
@@ -1432,6 +1449,8 @@ class PlayerController extends ChangeNotifier {
     _isCasting = false;
     _watchPosMs = -1;
     _watchAdvanceAt = null;
+    _castPendingSeek = null;
+    _castPendingSeekAt = null;
     unawaited(CastStreamProxy.instance.stop());
     // 本机主动断开：清 DLNA 媒体 + 推 STOPPED + 终止订阅 + SSDP
     // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
@@ -4452,6 +4471,16 @@ class PlayerController extends ChangeNotifier {
     // 播放内核挂起（画面永久卡死），直接忽略
     final rawDur = _videoController?.value.duration ?? Duration.zero;
     if (_isCasting && (rawDur <= Duration.zero || _isLiveDuration(rawDur))) {
+      if (rawDur <= Duration.zero) {
+        // 起播瞬间时长还没上报：第三方投屏端（TVBox/乐播）的续播 Seek
+        // 正是在 SetURI 后 1 秒内到达。直接丢弃会让它轮询到的位置永远
+        // 是 0:00:00，卡在「等待投屏状态」。先挂起，时长可用后补做
+        _castPendingSeek = position;
+        _castPendingSeekAt = DateTime.now();
+        CastLog.write('seekTo(${position.inSeconds}s) DEFERRED rawDur=0s '
+            'init=${_videoController?.value.isInitialized ?? false}');
+        return;
+      }
       CastLog.write(
           'seekTo(${position.inSeconds}s) IGNORED rawDur=${rawDur.inSeconds}s (live/unknown)');
       return;
@@ -4471,6 +4500,47 @@ class PlayerController extends ChangeNotifier {
     // 缓冲增长豁免（见 _checkCastStall），慢速下载不受影响。
     _seekGraceUntil = DateTime.now().add(const Duration(seconds: 30));
     notifyListeners();
+  }
+
+  /// 补做起播阶段挂起的投屏续播 Seek（由 500ms tick 驱动）。
+  ///
+  /// 时长一旦可用就按目标位置补一次 seek；确认是直播（时长超 1 天）或
+  /// 20 秒还拿不到时长（真直播 / 起播失败）就丢弃，不无限挂着。
+  void _applyPendingCastSeek() {
+    final p = _castPendingSeek;
+    if (p == null) return;
+    if (!_isCasting) {
+      _castPendingSeek = null;
+      _castPendingSeekAt = null;
+      return;
+    }
+    final vc = _videoController;
+    if (vc == null || !vc.value.isInitialized) return;
+    final d = vc.value.duration;
+    if (_isLiveDuration(d)) {
+      _castPendingSeek = null;
+      _castPendingSeekAt = null;
+      CastLog.write('cast seek drop: live dur=${d.inSeconds}s');
+      return;
+    }
+    if (d <= Duration.zero) {
+      final at = _castPendingSeekAt;
+      if (at != null &&
+          DateTime.now().difference(at) > const Duration(seconds: 20)) {
+        _castPendingSeek = null;
+        _castPendingSeekAt = null;
+        CastLog.write('cast seek drop: duration unknown after 20s');
+      }
+      return;
+    }
+    _castPendingSeek = null;
+    _castPendingSeekAt = null;
+    var target = p;
+    if (target >= d) target = d - const Duration(seconds: 1);
+    if (target <= Duration.zero) return;
+    CastLog.write(
+        'cast seek apply deferred ${target.inSeconds}s dur=${d.inSeconds}s');
+    unawaited(seekTo(target));
   }
 
   /// 投屏卡顿看门狗（500ms 一次）。
