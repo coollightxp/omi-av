@@ -106,6 +106,32 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   /// 搜索结果里哪些台已经在内置精选里（按 station id 记）
   Set<String> _builtinIds = {};
 
+  /// 一次激活只认一次：目标键 → 上次真正生效的时刻（毫秒）。
+  ///
+  /// 遥控器按一次 OK，Flutter 会把事件分发给**所有** key handler——
+  /// `HardwareKeyboard._dispatchKeyEvent` 不中断派发，只做
+  /// `handled = handled || thisResult` 累计。于是行控件自己的
+  /// ActivateIntent 快捷键和弹窗的全局 `_handleOk` **各执行一遍**：
+  /// 加一次又删一次，净结果为零。用户实测「跳到一个带 + 号的台，
+  /// 按一下 OK 怎么都加不进去，只有长按才偶尔进得去」就是这个——
+  /// 长按撞上奇数次才停在“已加入”。
+  ///
+  /// 这里按目标做短窗去重：同一次按下不管从几条通道派发过来，
+  /// 只有第一个生效。窗口只取 300ms，人手正常连按（>400ms）不受影响。
+  final Map<String, int> _actAt = {};
+  static const int _actGuardMs = 300;
+
+  bool _claimAct(String tag) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final last = _actAt[tag];
+    if (last != null && now - last < _actGuardMs) {
+      WebDiag.log('radio_act dup tag=$tag gap=${now - last}ms');
+      return false;
+    }
+    _actAt[tag] = now;
+    return true;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -324,10 +350,14 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
     // 结果行 / 我的电台行：按 OK 等价于点行（加入/取消 / 试听）。
     // 定位优先走行号——与上下移动是同一套解析，导航能到哪一行 OK 就
     // 作用于哪一行；行号解析不出来时再回退逐个查焦点节点
-    final row = _currentRow();
+    var row = _currentRow();
+    // 焦点一时悬空（列表重建 / 输入法抢焦）时按上次落点算，
+    // 与 _moveRow 的兜底同一套逻辑；否则这里会静默什么都不做
+    if (row < 0) row = _rowCursor;
     if (row >= _headRows) {
       final i = row - _headRows;
-      WebDiag.log('radio_ok row=$row tab=$_tab key=${k.debugName}');
+      WebDiag.log('radio_ok row=$row tab=$_tab i=$i/$_resultCount '
+          'key=${k.debugName}');
       if (_tab == 0) {
         if (i < _results.length) _toggle(_results[i]);
       } else {
@@ -351,6 +381,10 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
         }
       }
     }
+    // 走到这里说明既没解析出行号、也没在焦点树里匹配到行：留痕，
+    // 免得下次再出「按 OK 没反应」还得靠猜
+    WebDiag.log('radio_ok miss row=$row cursor=$_rowCursor tab=$_tab '
+        'key=${k.debugName}');
     return KeyEventResult.handled;
   }
 
@@ -621,6 +655,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
 
   void _activateRegion(int i) {
     if (i < 0 || i >= RadioDirectory.quickRegions.length) return;
+    if (!_claimAct('rg:$i')) return;
     final city = RadioDirectory.quickRegions[i];
     final on = _queryCtl.text.trim() == city && _tag.isEmpty;
     if (on) {
@@ -635,6 +670,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
 
   void _activateTag(int i) {
     if (i < 0 || i >= RadioDirectory.quickTags.length) return;
+    if (!_claimAct('tg2:$i')) return;
     final tag = RadioDirectory.quickTags[i].$2;
     final on = _tag == tag;
     _queryCtl.clear();
@@ -739,6 +775,9 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   }
 
   Future<void> _toggle(RadioStation s) async {
+    // 同一台 300ms 内只认一次：OK 键会被两条通道各派发一次，
+    // 不去重就是「加入→移除」净零（见 _claimAct 注释）
+    if (!_claimAct('tg:${s.id}')) return;
     final c = context.read<PlayerController>();
     if (c.isStationSaved(s.id)) {
       await c.removeRadioStation(s.id);
@@ -1018,6 +1057,7 @@ class _RadioSearchDialogState extends State<RadioSearchDialog> {
   }
 
   Future<void> _play(RadioStation s) async {
+    if (!_claimAct('pl:${s.id}')) return;
     final c = context.read<PlayerController>();
     await c.playChannel(RadioLibrary.toChannel(s));
     if (!mounted) return;
