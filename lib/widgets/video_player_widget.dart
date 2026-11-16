@@ -278,10 +278,10 @@ class _RadioStage extends StatelessWidget {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        _LiveDot(playing: controller.isPlaying),
+                        _LiveDot(playing: controller.uiShowsPlaying),
                         const SizedBox(width: 8),
                         Text(
-                          controller.isPlaying ? '正在收听' : '已暂停',
+                          controller.uiShowsPlaying ? '正在收听' : '已暂停',
                           style: TextStyle(
                             color: const Color(0xCCFFFFFF),
                             fontSize: 14 * s,
@@ -290,7 +290,7 @@ class _RadioStage extends StatelessWidget {
                         // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
                         const SizedBox(width: 10),
                         _AudioTag(
-                          playing: controller.isPlaying,
+                          playing: controller.uiShowsPlaying,
                         ),
                         // 定时关闭实时倒计时（每秒走字，到点自动暂停）
                         ValueListenableBuilder<Duration?>(

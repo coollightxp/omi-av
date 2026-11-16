@@ -897,6 +897,7 @@ function renderPlayer(){
     s.preferredQuality||'auto');
   html+=choiceCard('playEngine','播放内核','换台生效。MDK 画面最稳、叠面板不闪黑；MPV 滤镜/录制/电平最全',
     [['mpv','MPV'],['mdk','MDK']], s.playEngine||'mdk');
+  html+=switchCard('showWebNativeToggle','显示网页播放器切换按钮','不常用，默认隐藏；开了之后网页频道嗅探到直连流时，底部面板才会出现网页/内置播放器切换键');
   html+=switchCard('autoPlayNext','自动播放下一频道','当前节目结束后自动切台');
   html+=switchCard('resumeLastChannel','启动时恢复上次频道','关闭后启动停在「请选择频道」，不发任何网络请求');
   // 「真波形纹理/电平驱动波形」两个实验项已下架（与音效滤镜冲突，2026-11 移除）

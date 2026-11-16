@@ -1026,6 +1026,7 @@ class PlayerController extends ChangeNotifier {
         // 播放器页
         'preferredQuality': s.preferredQuality.name,
         'playEngine': s.playEngine,
+        'showWebNativeToggle': s.showWebNativeToggle,
         // 网页端没有引擎可用性上下文，不再暴露
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
@@ -1150,6 +1151,8 @@ class PlayerController extends ChangeNotifier {
       final autoPlayNext = rb('autoPlayNext') ?? cur.autoPlayNext;
       final autoReloadStall = rb('autoReloadStall') ?? cur.autoReloadStall;
       final webEnabled = rb('webEnabled') ?? cur.webEnabled;
+      final webNative =
+          rb('showWebNativeToggle') ?? cur.showWebNativeToggle;
       final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
       final resumeLast = rb('resumeLastChannel') ?? cur.resumeLastChannel;
       final closeToTray = kIsWindowsDesktop
@@ -1225,6 +1228,7 @@ class PlayerController extends ChangeNotifier {
           autoPlayNext != _settings.autoPlayNext ||
           autoReloadStall != _settings.autoReloadStall ||
           webEnabled != _settings.webEnabled ||
+          webNative != _settings.showWebNativeToggle ||
           retryTimes != _settings.retryTimes ||
           castEndWait != _settings.castEndWaitSeconds ||
           uiScaleAuto != _settings.uiScaleAuto ||
@@ -1247,6 +1251,7 @@ class PlayerController extends ChangeNotifier {
           autoPlayNext: autoPlayNext,
           autoReloadStall: autoReloadStall,
           webEnabled: webEnabled,
+          showWebNativeToggle: webNative,
           retryTimes: retryTimes,
           castEndWaitSeconds: castEndWait,
           uiScaleAuto: uiScaleAuto,
@@ -1801,6 +1806,9 @@ class PlayerController extends ChangeNotifier {
     _webPageForeground = false;
     _currentChannel = channel;
     _sourceIndex = 0;
+    // 立刻进 loading：换台到真正起播之间要建内核/等网络，这段空档
+    // 不能让界面沿用上一台的状态（实测：进电台先闪一下「已暂停」）
+    if (!_isBackgroundNow) _state = PlayerState.loading;
     // 立刻通知界面把网页控件摘掉。这里下面要等 2.5 秒让 WebView2 销毁
     // 完成（否则和 mpv 初始化抢 COM 会崩），如果这中间不刷新界面，
     // 旧的网页视图会一直挂在最上层、露出 WebView2 的白底——用户看到的
@@ -2520,7 +2528,12 @@ class PlayerController extends ChangeNotifier {
   /// 当前列表里几乎总是同一个台，显示序号按它算。
   int? channelNumberOf(Channel? ch) {
     if (ch == null) return null;
-    final all = flatChannels;
+    // 按频道所属域取号：电台预览/电台当前台必须查电台目录。
+    // 原来只查电视列表（flatChannels），电台里上下切台时 OSD 的
+    // 大号序号一直显示「--」（用户实测「切台那个 ID 没了」）
+    final all = ch.isRadio
+        ? [for (final cat in _radioCategories) ...cat.channels]
+        : flatChannels;
     var idx = all.indexWhere((c) => c.id == ch.id);
     if (idx < 0 && ch.name.isNotEmpty) {
       idx = all.indexWhere((c) => c.name == ch.name);

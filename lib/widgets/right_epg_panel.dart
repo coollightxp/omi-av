@@ -476,7 +476,7 @@ class RightEpgPanelState extends State<RightEpgPanel> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  c.isPlaying ? '正在收听' : '已暂停',
+                  c.uiShowsPlaying ? '正在收听' : '已暂停',
                   style: const TextStyle(
                     color: AppColors.textPrimary,
                     fontSize: 14,
