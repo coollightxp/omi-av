@@ -63,6 +63,13 @@ jobs:
           cp branding/android/mipmap-xhdpi/ic_launcher.png   android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
           cp branding/android/mipmap-xxhdpi/ic_launcher.png  android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
           cp branding/android/mipmap-xxxhdpi/ic_launcher.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          # 通知栏小图标：App 精灵的白色剪影（Android 状态栏强制按 alpha
+          # 蒙版染色，彩色原图会变成色块；剪影保形，观感与各厂商一致）
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p android/app/src/main/res/drawable-$d
+            cp branding/android/notification/drawable-$d/ic_stat_omi.png \
+               android/app/src/main/res/drawable-$d/ic_stat_omi.png
+          done
 
       - name: Patch Android config (cleartext HTTP / cutout fullscreen / PiP / notification)
         run: |
@@ -728,9 +735,12 @@ jobs:
                   s.isActive = true
 
                   val b = NotificationCompat.Builder(this, CH_ID)
-                      // 小图标必须能画成纯 alpha：直接给应用的自适应图标
-                      // （mipmap-anydpi-v26）在部分 ROM 上画不出来，整条通知不显示
-                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      // 小图标用 App 精灵的白色剪影（ic_stat_omi，CI 注入
+                      // drawable-*dpi）：系统会按 alpha 蒙版染色，状态栏/
+                      // 通知栏顶上就是自家图标的形状，不再是通用播放三角。
+                      // 不能直接给自适应图标（mipmap-anydpi-v26），部分 ROM
+                      // 画不出来，整条通知不显示
+                      .setSmallIcon(R.drawable.ic_stat_omi)
                       .setContentTitle(name)
                       .setContentText(program)
                       .setLargeIcon(logo)
@@ -1077,6 +1087,13 @@ jobs:
           cp branding/android/mipmap-xhdpi/ic_launcher.png   android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
           cp branding/android/mipmap-xxhdpi/ic_launcher.png  android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
           cp branding/android/mipmap-xxxhdpi/ic_launcher.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          # 通知栏小图标：App 精灵的白色剪影（Android 状态栏强制按 alpha
+          # 蒙版染色，彩色原图会变成色块；剪影保形，观感与各厂商一致）
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p android/app/src/main/res/drawable-$d
+            cp branding/android/notification/drawable-$d/ic_stat_omi.png \
+               android/app/src/main/res/drawable-$d/ic_stat_omi.png
+          done
 
       - name: Patch Android config (cleartext HTTP / cutout fullscreen / PiP / notification)
         run: |
@@ -1742,9 +1759,12 @@ jobs:
                   s.isActive = true
 
                   val b = NotificationCompat.Builder(this, CH_ID)
-                      // 小图标必须能画成纯 alpha：直接给应用的自适应图标
-                      // （mipmap-anydpi-v26）在部分 ROM 上画不出来，整条通知不显示
-                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      // 小图标用 App 精灵的白色剪影（ic_stat_omi，CI 注入
+                      // drawable-*dpi）：系统会按 alpha 蒙版染色，状态栏/
+                      // 通知栏顶上就是自家图标的形状，不再是通用播放三角。
+                      // 不能直接给自适应图标（mipmap-anydpi-v26），部分 ROM
+                      // 画不出来，整条通知不显示
+                      .setSmallIcon(R.drawable.ic_stat_omi)
                       .setContentTitle(name)
                       .setContentText(program)
                       .setLargeIcon(logo)
