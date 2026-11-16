@@ -38,6 +38,7 @@ jobs:
             echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
             exit 1
           fi
+        shell: bash
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -989,6 +990,7 @@ jobs:
             echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
             exit 1
           fi
+        shell: bash
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -1940,6 +1942,7 @@ jobs:
             echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
             exit 1
           fi
+        shell: bash
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -1995,6 +1998,7 @@ jobs:
             echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
             exit 1
           fi
+        shell: bash
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -2518,6 +2522,7 @@ jobs:
             echo "::error::版本号错位: pubspec.yaml=$PUB, app_version.dart=$APP（发版时必须同步）"
             exit 1
           fi
+        shell: bash
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
