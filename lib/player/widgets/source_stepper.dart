@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/menu_nav_flag.dart';
 import '../../core/theme/app_density.dart';
 import '../../core/theme/app_typography.dart';
 import '../../core/widgets/ghost_button.dart';
@@ -132,8 +133,13 @@ class SourceStepper extends StatelessWidget {
     if (box == null || overlay == null) return;
     final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
     final width = box.size.width.clamp(160.0, 240.0);
-    final chosen = await showMenu<int>(
+    // 遥控器放行 + 当前线路聚焦（与音效选单同一套，见 menu_nav_flag）
+    menuNavActive.value = true;
+    int? chosen;
+    try {
+      chosen = await showMenu<int>(
       context: context,
+      initialValue: index,
       position: RelativeRect.fromLTRB(
         origin.dx,
         origin.dy - (count * (d.listRowHeight * 0.8) + 16),
@@ -185,7 +191,10 @@ class SourceStepper extends StatelessWidget {
             ),
           ),
       ],
-    );
+      );
+    } finally {
+      menuNavActive.value = false;
+    }
     if (chosen != null && chosen != index) onSelect?.call(chosen);
   }
 }

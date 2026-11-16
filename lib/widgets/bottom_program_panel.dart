@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/epg_program.dart';
+import '../core/menu_nav_flag.dart';
 import '../core/theme/app_colors.dart';
 import '../core/widgets/audio_wave.dart';
 import '../core/widgets/channel_badge.dart';
@@ -757,8 +758,14 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     const width = 230.0;
     // 8 个固定档 + 自定义均衡器，共 9 行
     final menuH = (order.length + 1) * rowH + 16;
-    final chosen = await showMenu<String>(
+    // 遥控器放行（见 menu_nav_flag）：菜单开着时播放页不再吞方向键/OK，
+    // 交给 Flutter 菜单自带焦点遍历；initialValue 让焦点落在当前档
+    menuNavActive.value = true;
+    String? chosen;
+    try {
+      chosen = await showMenu<String>(
       context: context,
+      initialValue: current,
       position: RelativeRect.fromLTRB(
         origin.dx.clamp(8.0, overlay.size.width - width - 8),
         (origin.dy - menuH).clamp(8.0, double.infinity),
@@ -804,7 +811,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             ),
           ),
       ],
-    );
+      );
+    } finally {
+      menuNavActive.value = false;
+    }
     if (chosen != null && chosen != current) await c.setAudioPreset(chosen);
   }
 

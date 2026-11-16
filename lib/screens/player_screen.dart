@@ -15,6 +15,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../core/theme/app_colors.dart';
 import '../core/app_version.dart';
+import '../core/menu_nav_flag.dart';
 import '../core/widgets/standby_shell.dart';
 import '../models/channel.dart';
 import '../services/exit_guard.dart';
@@ -267,6 +268,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // Windows：低级键盘钩子转发数字键与动作键（网页 HWND 吞焦点时也有效）
     _winHotkeys.setDigitHandler(_onNumberKey);
     _winHotkeys.setActionHandler(_onNativeAction);
+    // 音效/线路小菜单开关时联动钩子捕获（开着=关捕获让键进 Flutter）
+    menuNavActive.addListener(_syncRemoteCapture);
     // 通知卡片 ❌：controller 负责停内核/收服务，界面层负责结束
     // Activity + 杀进程（与退出卡片「退出」同一条流程）。
     // 存引用：dispose 里不能再 context.read
@@ -592,6 +595,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onGlobalKeyEvent);
+    menuNavActive.removeListener(_syncRemoteCapture);
     setBackHandler(null);
     _winHotkeys.setDigitHandler(null);
     _winHotkeys.setActionHandler(null);
@@ -1681,6 +1685,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 这里若按「弹层统一收口」处理，方向键会被吞掉、OK 还会直接把弹窗
     // 关掉——遥控器根本没法在里面选台加台。放行给它自己的焦点树处理。
     if (RadioSearchDialog.active) return false;
+    // 音效/线路小菜单（showMenu）：自带 closedLoop 焦点遍历，放行给
+    // 它的焦点树；select/gameButtonA（遥控器 OK 常见键值）Flutter
+    // 默认不绑激活，这里翻译成 ActivateIntent
+    if (menuNavActive.value) {
+      if (k == LogicalKeyboardKey.select ||
+          k == LogicalKeyboardKey.gameButtonA) {
+        if (isDown) {
+          final f = FocusManager.instance.primaryFocus?.context;
+          if (f != null) Actions.invoke(f, const ActivateIntent());
+        }
+        return true;
+      }
+      return false;
+    }
     // 设置编辑弹窗（编辑播放列表/编辑 EPG）：自带行导航，放行
     if (settingsEditDialogOpen) return false;
     // 定时关闭卡片 / 时间选择卡片：按键统一从 `_onGlobalKeyEvent`
@@ -2166,8 +2184,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 面板关掉捕获后一直是好的——所以卡片打开期间直接关捕获，让键走
   /// Flutter 那条被验证过的路（本页 `_onGlobalKeyEvent`）。
   void _syncRemoteCapture() {
-    unawaited(_winHotkeys
-        .setCapture(!_settingsOpen && !_sleepCardOpen && !_timePickOpen));
+    unawaited(_winHotkeys.setCapture(
+        !_settingsOpen && !_sleepCardOpen && !_timePickOpen &&
+        // 音效/线路小菜单开着：关掉捕获让键进 Flutter，交给菜单焦点树
+        !menuNavActive.value));
   }
 
   /// 打开定时关闭卡片。替代旧的 showSleepTimerDialog：卡片是纯视觉，
@@ -2630,6 +2650,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 在线电台弹窗（可能从设置面板里打开）自带完整的焦点与按键逻辑：
     // 所有按键一律交给它，否则按返回会把底下的设置面板关掉
     if (RadioSearchDialog.active) return false;
+    // 音效/线路小菜单：放行给菜单焦点树（select/gameButtonA 翻译激活，
+    // 详见 _handleKeyWhileModal 同名分支）
+    if (menuNavActive.value) {
+      if (isDown &&
+          (k == LogicalKeyboardKey.select ||
+              k == LogicalKeyboardKey.gameButtonA)) {
+        final f = FocusManager.instance.primaryFocus?.context;
+        if (f != null) Actions.invoke(f, const ActivateIntent());
+        return true;
+      }
+      return false;
+    }
 
     // 设置面板里有输入框（URL、数字等）：仅返回/菜单键负责关面板，
     // 其余按键放行给输入框
@@ -3865,6 +3897,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 对话框（二维码/退出确认等）打开：统一收口；抬起边沿复位配对状态，
     // 绝不能落到 _handleBackPressed（否则会退全屏/缩小窗口）
     if (_modalRouteOpen) {
+      // 音效/线路小菜单：钩子捕获已由 menuNavActive 联动关闭，键走
+      // Flutter 进菜单焦点树；这条通道（若仍有投递）不重复处理
+      if (menuNavActive.value) return;
       if (!isDown) {
         if (action == 'ok') {
           _okHeld = false;
