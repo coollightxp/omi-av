@@ -630,12 +630,12 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       _btn(byId('playpause'), big: true),
       _groupDivider(d),
     ];
-    // 截录/旋转中间组：有内容才连「前后两条」分隔线一起加。
-    // 【双竖线 bug】v2.3.36 只把前导 divider 挪进了 if，后面那条仍然无条件
-    // 加：中间组为空时（电台桌面档：无截图/录制/旋转）它紧挨着 playpause
-    // 后面那条，暂停键与静音键之间出现两条竖线（2026-11-17 用户再次截图）。
-    // 正确口径：空组不留任何痕迹（前导+后接都随组走），单条线由 playpause
-    // 后面那条承担。
+    // 截录/旋转中间组：前后各需要一条组间线，但**不能各加一条**——
+    // 暂停键后面那条 divider 已经充当了组前分隔，这里只补组后一条。
+    // 历史两处双线都出在这：
+    //   · 电台（中间组为空）：无条件补的「组后」线与暂停后那条相邻 → 双线；
+    //   · 视频（中间组非空）：组前再补一条，与暂停后那条相邻 → 双线。
+    // 口径：组前一律用暂停键后的既有那条；组为空时什么都不加。
     final mid = <Widget>[];
     if (c.isDesktop && !isRadio) {
       mid.addAll([
@@ -645,7 +645,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     }
     if (!isRadio) mid.add(_btn(byId('rotate')));
     if (mid.isNotEmpty) {
-      children.add(_groupDivider(d));
       children.addAll(mid);
       children.add(_groupDivider(d));
     }
