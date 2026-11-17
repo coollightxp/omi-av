@@ -3704,6 +3704,22 @@ class PlayerController extends ChangeNotifier {
   /// （实测：网页直播里遥控器 OK 全屏，0xc0000005 直接退进程）
   bool _fsToggling = false;
 
+  /// 进入全屏前的 Windows 前置动作：清掉 frameless 标志。
+  ///
+  /// window_manager 的原生 `SetFullScreen()` 里，整段「设置全屏尺寸/样式」
+  /// 的逻辑被 `if (!is_frameless_)` 包着——**frameless 窗口调它是空操作**。
+  /// 本应用为了去掉窗口四周残留的 8px 系统描边，启动时调了
+  /// `setAsFrameless()`（v2.3.36），结果双击画面、控制栏全屏按钮全部失效
+  /// （v2.3.36 实测回归）。`setTitleBarStyle()` 内部第一行就是
+  /// `is_frameless_ = false`，所以每次进入全屏前先走一遍 hidden，
+  /// 让原生全屏分支重新可用。
+  Future<void> _prepareFullscreenEnter() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) return;
+    try {
+      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+    } catch (_) {}
+  }
+
   Future<void> toggleFullscreen() async {
     if (!isDesktop) return;
     if (_fsToggling) return; // 切换未落地前的连按全部忽略
@@ -3720,6 +3736,7 @@ class PlayerController extends ChangeNotifier {
         return;
       }
       _isFullscreen = !_isFullscreen;
+      if (_isFullscreen) await _prepareFullscreenEnter();
       await windowManager.setFullScreen(_isFullscreen);
       // 三个原生窗口操作之间各隔一帧，让 WM_SIZE/WM_STYLECHANGED 消息
       // 排队处理完再动下一个，不再一次性全砸进同一轮消息循环
@@ -3851,6 +3868,7 @@ class PlayerController extends ChangeNotifier {
           _wasMaximizedBeforeMini = false;
           _isFullscreen = true;
           await windowManager.setAlwaysOnTop(false);
+          await _prepareFullscreenEnter();
           await windowManager.setFullScreen(true);
         } else {
           // _sizeBeforeMini 若已被污染成小窗尺寸，退回默认窗口大小
@@ -4216,6 +4234,7 @@ class PlayerController extends ChangeNotifier {
       await Future<void>.delayed(const Duration(milliseconds: 600));
       final already = await windowManager.isFullScreen();
       if (!already) {
+        await _prepareFullscreenEnter();
         await windowManager.setFullScreen(true);
       }
       _isFullscreen = true;
