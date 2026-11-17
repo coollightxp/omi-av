@@ -220,6 +220,18 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     } catch (e) {
       debugPrint('[OmiVideo] err_detect failed: $e');
     }
+    // 网络读超时（对齐 MDK 内核的 avio.rw_timeout=15s）。
+    // mpv 的 network-timeout 默认 0 = 永不超时：TCP 半开/上游断流时读
+    // 循环无限等，无 error 无 EOF——电台表现为「无声假活」：UI 一切
+    // 正常（playing、波形在摆、无错误卡片）就是没声，点一下暂停再
+    // 播放才能踢活（云梦音乐台 64k.mp3 实测，2026-11-17）。
+    // 15 秒读不到数据抛错误，落进上层软错误复检/自动重载兜底，
+    // 自动重连后从直播流当前实时位置续播。
+    try {
+      await platform.setProperty('network-timeout', '15');
+    } catch (e) {
+      debugPrint('[OmiVideo] network-timeout failed: $e');
+    }
   }
 
   /// 原地换源：不新建 Player/VideoController，只让现有 mpv 换一路流。

@@ -867,6 +867,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       // 最后 60 秒弹大卡片提示并可按返回键取消——电台画面里
                       // 台名一行已有同款徽标，那边不再重复
                       if (!mini) SleepBadgeOverlay(onTap: _openSleepCard),
+                      if (!mini) const MuteBadgeOverlay(),
                       if (!mini) const SleepFinalCard(),
 
                       // 移动端：屏幕分三区，单击左/中/右分别呼出频道菜单/
@@ -8184,6 +8185,64 @@ class _BootSplash extends StatelessWidget {
 ///
 /// 电台画面在台名一行已经有同款徽标，这里只服务视频/直播；点一下
 /// 直接打开定时设置，方便躺床上改时间或取消。
+/// 静音常驻角标：静音期间一直挂在画面右上角，点一下取消静音。
+///
+/// 「一闪而过的 OSD 看漏了就没了」——状态类提示必须常驻（待办 H）。
+/// 样式与定时关闭徽标同款（黑底胶囊），位置在其下方一行：
+/// 开时钟时 top 100 / 关时钟 64，与定时徽标（56/20 + 高约 26）不重叠。
+/// 锁屏态不显示（锁屏下一切覆盖层都收起）。点击直接解除静音。
+class MuteBadgeOverlay extends StatelessWidget {
+  const MuteBadgeOverlay({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.read<PlayerController>();
+    return ListenableBuilder(
+      listenable: c,
+      builder: (context, _) {
+        if (!c.isMuted || c.locked) return const SizedBox.shrink();
+        return ValueListenableBuilder<bool>(
+          valueListenable: c.clockVisible,
+          builder: (context, clockOn, __) => Positioned(
+            top: clockOn ? 100 : 64,
+            right: 28,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: c.toggleMute,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.42),
+                  borderRadius: BorderRadius.circular(20),
+                  border:
+                      Border.all(color: Colors.white.withValues(alpha: 0.22)),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.volume_off, size: 13, color: Color(0xCCFFFFFF)),
+                    SizedBox(width: 5),
+                    Text(
+                      '已静音',
+                      style: TextStyle(
+                        color: Color(0xE6FFFFFF),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class SleepBadgeOverlay extends StatelessWidget {
   const SleepBadgeOverlay({super.key, this.onTap});
 

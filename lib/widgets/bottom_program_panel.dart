@@ -630,13 +630,22 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       _btn(byId('playpause'), big: true),
       _groupDivider(d),
     ];
+    // 截录/旋转中间组：有内容才连组分隔线一起加。
+    // 【双竖线 bug】以前这条 divider 无条件加：电台桌面档中间组为空
+    // （无截图/录制/旋转），它和 playpause 后面那条相邻，暂停键和
+    // 静音键之间出现两条竖线（2026-11-17 用户截图）
+    final mid = <Widget>[];
     if (c.isDesktop && !isRadio) {
-      children.addAll([
+      mid.addAll([
         _btn(byId('screenshot')),
         _btn(byId('record'), big: true),
       ]);
     }
-    if (!isRadio) children.add(_btn(byId('rotate')));
+    if (!isRadio) mid.add(_btn(byId('rotate')));
+    if (mid.isNotEmpty) {
+      children.add(_groupDivider(d));
+      children.addAll(mid);
+    }
     children.add(_groupDivider(d));
 
     void addById(String id) {

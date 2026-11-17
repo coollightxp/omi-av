@@ -3638,10 +3638,13 @@ class PlayerController extends ChangeNotifier {
       // 恢复到静音前的音量；之前音量接近 0 则恢复默认
       final restore = _volumeBeforeMute <= 0.01 ? 0.8 : _volumeBeforeMute;
       await setVolume(restore);
+      // 面板平时是隐藏的，按键切换必须给即时反馈（待办 H 上半）
+      OsdBus.show('已取消静音', icon: Icons.volume_up);
     } else {
       _volumeBeforeMute = _volume;
       _isMuted = true;
       await setVolume(0.0);
+      OsdBus.show('已静音（画面右上角有常驻提示）', icon: Icons.volume_off);
     }
     notifyListeners();
   }

@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
+// 仅用于 OSD 提示图标（Icons.cast_connected）；本文件其余部分纯 dart:io
+import 'package:flutter/material.dart' show Icons;
+
 import 'cast_log.dart';
+import 'osd_bus.dart';
 
 /// 投屏流本地中转代理。
 ///
@@ -69,7 +73,9 @@ class CastStreamProxy {
     try {
       for (var attempt = 1;; attempt++) {
         final client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 15);
+          // 连接超时 15s→8s：连不上时早点失败早点重试，最坏黑洞时间
+          // 从 45s（15×3）压到 ~17s（8+2+8+退避+...）
+          ..connectionTimeout = const Duration(seconds: 8);
         try {
           final outReq = await client.getUrl(Uri.parse(target));
           // 裸请求转发（只带 Range）：实测给视频号 CDN 补 UA/Referer
@@ -100,18 +106,23 @@ class CastStreamProxy {
             CastLog.write(
                 'cast proxy ok range=${range ?? "-"} bytes=$sent attempt=$attempt');
           }
+          _abortStreak = 0; // 这一路走通了，连续断流计数清零
           break;
         } catch (e) {
           if (sent == 0 && attempt < 3) {
-            // 还没向内核输出任何字节：安全地换全新连接整请求重试
+            // 还没向内核输出任何字节：安全地换全新连接整请求重试。
+            // 重试间加退避（0.5s/2s），不在 CDN 最懵的瞬间连撞三次
             CastLog.write(
                 'cast proxy retry#$attempt range=${range ?? "-"}: $e');
+            await Future<void>.delayed(
+                Duration(milliseconds: attempt == 1 ? 500 : 2000));
             continue;
           }
           // 已输出过字节的 body 中途停滞：断开，内核 avio.reconnect
           // 会携当前位置重新经代理请求（全新连接）
           CastLog.write(
               'cast proxy abort range=${range ?? "-"} sent=$sent: $e');
+          _noteAbort();
           break;
         } finally {
           client.close(force: true);
@@ -122,5 +133,28 @@ class CastStreamProxy {
         await req.response.close();
       } catch (_) {}
     }
+  }
+
+  // ==================== 弱网提示（待办 G） ====================
+
+  /// 连续断流计数：每次 abort +1，任意一路走通即清零。
+  int _abortStreak = 0;
+
+  /// 上次提示时刻：触发一次后冷却 30 秒，防止刷屏
+  DateTime? _lastNetWarnAt;
+
+  /// 连续 3 次 body 断流仍拉不通：OSD 明示「网络不稳」，不再静默黑屏。
+  /// 弱网下用户看黑屏不知道是断网还是卡死，明示至少知道在重试。
+  void _noteAbort() {
+    _abortStreak++;
+    if (_abortStreak < 3) return;
+    final now = DateTime.now();
+    final last = _lastNetWarnAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 30)) {
+      return;
+    }
+    _lastNetWarnAt = now;
+    _abortStreak = 0;
+    OsdBus.show('投屏网络不稳，正在自动重试…', icon: Icons.cast_connected);
   }
 }
