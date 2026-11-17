@@ -32,6 +32,10 @@ class BottomProgramPanel extends StatefulWidget {
   /// 重载当前频道（网页卡死/黑屏时手动恢复）
   final VoidCallback? onReload;
 
+  /// 电台「后台收听」：退到后台、音频继续（手机/平板专用）。
+  /// TV/盒子与桌面端不提供，传 null 即不显示该按钮。
+  final VoidCallback? onBackgroundAudio;
+
   /// 遥控器激活「跳转类」按钮（扫码）后通知播放页关闭面板
   final VoidCallback? onDismissRemote;
 
@@ -48,6 +52,7 @@ class BottomProgramPanel extends StatefulWidget {
     required this.onToggleRecord,
     this.onSwitchWebNative,
     this.onReload,
+    this.onBackgroundAudio,
     this.onDismissRemote,
     this.onHoverEnter,
     this.onHoverExit,
@@ -290,10 +295,20 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             const Icon(Icons.cast_connected,
                 size: 14, color: Color(0xFFFFB35C)),
             const SizedBox(width: 6),
-            Text(
-              c.dlnaName.isNotEmpty ? '正在投屏 · ${c.dlnaName}' : '正在投屏',
-              style: TextStyle(color: Colors.white54, fontSize: t.body),
+            Flexible(
+              child: Text(
+                c.dlnaName.isNotEmpty ? '正在投屏 · ${c.dlnaName}' : '正在投屏',
+                style: TextStyle(color: Colors.white54, fontSize: t.body),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
+            // 投屏同样显示分辨率：数据来自本地解码器的视频尺寸，
+            // 播放器 ready 后自动出现（刚接入 0×0 时不显示占位）
+            if (c.resolutionText.isNotEmpty) ...[
+              const SizedBox(width: 10),
+              _badge(c.resolutionText),
+            ],
           ]),
         ],
       );
@@ -573,6 +588,12 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isRadioRecording ? '停止录音' : '录音',
           hasChannel ? c.toggleRadioRecord : null,
         ),
+      // 电台「后台收听」（手机/平板专属）：原来藏在退出卡片里，只有电台
+      // 时才可用，却要「长按返回 → 找耳机按钮」两步；挪到面板上一键直达。
+      // TV/盒子没有后台语义、桌面端本来就没有这项，onBackgroundAudio 为 null。
+      if (isRadio && widget.onBackgroundAudio != null)
+        _KbAction('bgAudio', Icons.headphones, '后台收听',
+            widget.onBackgroundAudio),
     ];
     _actions = actions;
     // 当前高亮的动作若已消失（如断开投屏），清除高亮，等下次方向键重选
@@ -636,10 +657,13 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       children.addAll(tail);
     }
 
-    // 电台录音（电台专属）：边听边录，放尾部与高频操作隔开
+    // 电台尾部组：录音 | 后台收听（手机/平板）。
+    // 【顺序红线】必须与上面 actions 的声明顺序一致（radioRec 在前、
+    // bgAudio 在后），否则遥控器 ←/→ 会从录音直接跳到后台收听再跳回来。
     if (isRadio) {
       children.add(_groupDivider(d));
-      children.add(_btn(byId('radioRec')));
+      addByIdTo(children, 'radioRec');
+      addByIdTo(children, 'bgAudio');
     }
 
     // 定时关闭入口统一收进退出卡片（长按返回/退出键），底部面板不再

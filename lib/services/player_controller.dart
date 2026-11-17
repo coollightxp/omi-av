@@ -124,7 +124,19 @@ class PlayerController extends ChangeNotifier {
   // DLNA 投屏接收服务（接收其它设备推送的视频）
   final DlnaService dlnaService = DlnaService();
   bool _isCasting = false;
-  Channel? _preCastChannel; // 投屏前的频道，用于断开后恢复
+  /// 最近一次**真实播放**的频道（直播/电台/网页），投屏结束后的恢复目标。
+  ///
+  /// 语义必须是"最后一次真实播放的台"，而不是"上一次投屏前那一刻的台"：
+  /// 用户可能连投好几次（换集、换片、断开后再投），每次投屏都会把当前
+  /// 频道换成 `__dlna_cast__` 占位频道——旧逻辑在停止时把这个值取走并
+  /// 置 null，第二次投屏时当前频道已经是占位频道，`??=` 再也记不回来，
+  /// 于是等待超时后"没有可恢复的台"，直接落到「请选择频道」。
+  /// 投屏归投屏、直播归直播：这个字段只由真实播放写入，投屏读它。
+  Channel? _preCastChannel;
+
+  /// 投屏代际号：每次新投屏 +1。用于作废 800ms 恢复延迟里的旧回调
+  /// （发送端连播是 Stop →(几十毫秒)→ SetURI，旧回调不能把新投屏当停止）。
+  int _castGen = 0;
 
   // 局域网 Web 管理服务（手机扫码后增删改直播源/EPG）
   final RemoteAdminService remoteAdminService = RemoteAdminService();
@@ -280,6 +292,14 @@ class PlayerController extends ChangeNotifier {
   /// 剩余秒数；-1 表示「一直等待」
   int _castWaitRemain = 0;
   int get castWaitRemain => _castWaitRemain;
+
+  /// 投屏点播**已播完**且设置为「一直等待下一条投屏」（wait<0）。
+  /// 此时接收画面不该定格在视频最后一帧（难看、还像卡死），
+  /// 界面层用它切换到待机壳（与 castWaiting 同款覆盖层）。
+  /// 注意「等 N 秒连播」的场景不在此列：停在最后一帧是刻意的，
+  /// 下一集几秒内就接上，跳走再跳回反而闪。
+  bool get castEndedWaiting =>
+      _isCasting && _state == PlayerState.ended && _settings.castEndWaitSeconds < 0;
 
   Timer? _castWaitTimer;
 
@@ -1398,10 +1418,15 @@ class PlayerController extends ChangeNotifier {
           'isHls=${lu.contains('.m3u8') || lu.contains('.m3u')} '
           'len=${url.length}');
     } catch (_) {}
-    _preCastChannel ??=
-        (_currentChannel?.id.startsWith('__dlna_cast__') ?? false)
-            ? null
-            : _currentChannel;
+    // 只记录「真实播放的台」。投屏占位频道不覆盖既有记忆——
+    // 连投多次时恢复目标始终是投屏前那台直播/电台。
+    final cur = _currentChannel;
+    if (cur != null && !cur.id.startsWith('__dlna_cast__')) {
+      _preCastChannel = cur;
+    }
+    _castGen++;
+    CastLog.write('cast gen=$_castGen restore='
+        '${_preCastChannel?.name ?? "(none)"}');
     _isCasting = true;
     // 重置卡顿看门狗
     _watchPosMs = -1;
@@ -1432,10 +1457,17 @@ class PlayerController extends ChangeNotifier {
     // 恢复延迟已在途：保持原 timer，不取消/重置。
     // 看门狗或重复点击若不断重置这个 timer，会导致几十秒无法真正断开
     if (_castRestoreTimer != null) return;
+    final gen = _castGen;
     _castEndedTimer?.cancel();
     _castEndedTimer = null;
     _castRestoreTimer = Timer(const Duration(milliseconds: 800), () {
       _castRestoreTimer = null;
+      // 800ms 内又来了一次投屏（连播的 Stop→SetURI）：这次停止属于上一轮，
+      // 不能把新投屏当成本地已停——否则会清掉投屏态、把新片打断
+      if (gen != _castGen) {
+        CastLog.write('cast stop superseded gen=$gen now=$_castGen');
+        return;
+      }
       _doStopCastAndRestore(userInitiated: userInitiated);
     });
   }
@@ -1456,8 +1488,13 @@ class PlayerController extends ChangeNotifier {
     // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
     // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
     dlnaService.kickCastClients();
+    // 注意：**不在这里把 _preCastChannel 置 null**。
+    // 它记的是「最后一次真实播放的台」，投屏可以连投很多次，每次都要能
+    // 回到同一个直播；旧代码在这里取走即清，第二次投屏时当前频道已是
+    // 占位频道、`??=` 记不回来，等待超时就"没有可恢复的台"→ 请选择频道。
     final restore = _preCastChannel;
-    _preCastChannel = null;
+    CastLog.write('cast stop gen=$_castGen restore='
+        '${restore?.name ?? "(none)"} user=$userInitiated');
     // 方案 3.7：投屏结束后按设置进「正在等待投屏」，给发送端连播
     // （电视剧下一集）留窗口；0=马上返回，-1=一直等
     final wait = _settings.castEndWaitSeconds;
@@ -1512,14 +1549,30 @@ class PlayerController extends ChangeNotifier {
     if (!_castWaiting) return;
     _castWaiting = false;
     _castWaitRemain = 0;
-    final restore = _pendingRestoreChannel;
+    // 恢复目标双保险：等待期内记下的优先，其次用「最后一次真实播放的台」。
+    // 等待期间任何一次 playChannel 都会调 _clearCastWait() 把 pending 清掉，
+    // 只靠 pending 会出现"明明有台可回却说没有"。
+    final restore = _pendingRestoreChannel ?? _preCastChannel;
     _pendingRestoreChannel = null;
+    CastLog.write('cast wait exit restore=${restore?.name ?? "(none)"}');
     if (restore != null) {
-      await playChannel(restore);
-    } else {
-      _state = PlayerState.idle;
-      notifyListeners();
+      for (var attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await playChannel(restore);
+          CastLog.write('cast wait restore ok attempt=$attempt');
+          return;
+        } catch (e) {
+          CastLog.write('cast wait restore fail attempt=$attempt err=$e');
+          if (attempt == 1) {
+            await Future<void>.delayed(const Duration(seconds: 1));
+          }
+        }
+      }
+      // 两次都没回去：明确告诉用户，不要留一块空白待选台让人猜
+      OsdBus.show('原频道已失效，请重新选择', icon: Icons.live_tv);
     }
+    _state = PlayerState.idle;
+    notifyListeners();
   }
 
   /// 界面用：等待画面双击返回 → 立刻回直播
@@ -1817,13 +1870,21 @@ class PlayerController extends ChangeNotifier {
     // 再走正常播放流程；投屏内部换片不走这里（由 playCastUrl 处理）
     if (_isCasting && !channel.id.startsWith('__dlna_cast__')) {
       _isCasting = false;
-      _preCastChannel = null;
+      // 用户主动切到了新的台：紧接着下面的记录会把恢复目标更新成新台，
+      // 这里不再置 null（置空会让"刚切完台又投屏、投完想回去"丢失目标）
+      _castGen++;
       _castRestoreTimer?.cancel();
       _castRestoreTimer = null;
       _castEndedTimer?.cancel();
       _castEndedTimer = null;
       unawaited(CastStreamProxy.instance.stop());
       dlnaService.clearCurrentMedia();
+    }
+    // 记录「最后一次真实播放的台」= 投屏结束后的恢复目标。
+    // 只在真实频道上写，投屏占位频道永远不写；这样连投几次屏、
+    // 等待期超时、手动断开，恢复目标始终是投屏前那台直播/电台。
+    if (!channel.id.startsWith('__dlna_cast__')) {
+      _preCastChannel = channel;
     }
     // 无网络时等待网络（开机启动时系统网络可能未就绪）
     if (!await _waitForNetwork()) {
@@ -3664,11 +3725,29 @@ class PlayerController extends ChangeNotifier {
       if (!_isFullscreen) {
         // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
         await Future<void>.delayed(const Duration(milliseconds: 60));
-        await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+        await _restoreHiddenChrome();
       }
       notifyListeners();
     } finally {
       _fsToggling = false;
+    }
+  }
+
+  /// 恢复「无标题栏」窗口外观，并去掉 Windows 的残留描边。
+  ///
+  /// window_manager 的 [TitleBarStyle.hidden] 在 Windows 上是靠 WM_NCCALCSIZE
+  /// 把客户区往下压：顶部不留、**左/右/下各留 8px 非客户区**（那是给拖边
+  /// 缩放留的命中区）。于是窗口化时看起来是「左边、右边、下边有框，上边
+  /// 没有框」。本窗口本来就 `setResizable(false)`（固定 1280×720），这 8px
+  /// 既不承担缩放也无任何用处，纯视觉瑕疵。
+  ///
+  /// [WindowManager.setAsFrameless] 让 WM_NCCALCSIZE 直接返回 0（客户区 =
+  /// 整窗），四周一起干净。**注意**：`setTitleBarStyle()` 内部会把
+  /// `is_frameless_` 重置为 false，所以每次恢复 hidden 之后都必须再调一次。
+  Future<void> _restoreHiddenChrome() async {
+    await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      await windowManager.setAsFrameless();
     }
   }
 
@@ -3683,7 +3762,7 @@ class PlayerController extends ChangeNotifier {
       await _applyAlwaysOnTop();
       // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
       await Future<void>.delayed(const Duration(milliseconds: 60));
-      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      await _restoreHiddenChrome();
       notifyListeners();
       return true;
     } finally {
@@ -3746,7 +3825,7 @@ class PlayerController extends ChangeNotifier {
         if (_wasFullscreenBeforeMini) {
           _isFullscreen = false;
           await windowManager.setFullScreen(false);
-          await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+          await _restoreHiddenChrome();
         }
         if (_wasMaximizedBeforeMini) {
           await windowManager.unmaximize();

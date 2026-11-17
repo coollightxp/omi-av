@@ -102,6 +102,14 @@ void main() async {
         // 窗口固定尺寸（1280×720）：不响应拖边缩放/最大化，
         // 防止面板变形、文字堆叠（小窗模式在控制器里同样锁死尺寸）
         await windowManager.setResizable(false);
+        // Windows：hidden 标题栏靠 WM_NCCALCSIZE 压客户区，顶部不留、
+        // 左/右/下各留 8px 非客户区（给拖边缩放用）——窗口化时看起来就是
+        // 「三边有框、上边没框」。本窗口固定尺寸不需要那 8px，frameless
+        // 让客户区铺满整窗，四周一起干净（与退出全屏后的恢复保持一致，
+        // 见 PlayerController._restoreHiddenChrome）。
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+          await windowManager.setAsFrameless();
+        }
         await windowManager.show();
         await windowManager.focus();
         // 窗口置顶（默认开）：避免被其它窗口抢焦点导致快捷键失灵；

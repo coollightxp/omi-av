@@ -942,6 +942,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           onSwitchWebNative: () =>
                               controller.switchWebNativePlayback(),
                           onReload: controller.reloadCurrentChannel,
+                          onBackgroundAudio: _canBackgroundAudio(controller)
+                              ? _enterBackgroundAudio
+                              : null,
                           onDismissRemote: () {
                             if (_bottomPanelVisible) {
                               setState(() {
@@ -953,10 +956,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           },
                         ),
 
-                      // 待机壳：投屏等待 / 待选台（方案 3.7、第九节）
-                      // 盖住视频层，但让下面的抽屉/面板仍能覆盖它
+                      // 待机壳：投屏等待 / 投屏播完等待下一条 / 待选台
+                      // （方案 3.7、第九节）。播完等待必须盖住视频层：
+                      // mpv 播到 EOF 默认停在最后一帧，配合「等待下一条」
+                      // 的 OSD 像是卡死（用户实测：定格画面不好看）
                       if (!mini &&
                           (controller.castWaiting ||
+                              controller.castEndedWaiting ||
                               controller.awaitingChannelPick))
                         Positioned.fill(
                           child: GestureDetector(
@@ -974,11 +980,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                         : '发送端连播可直接接上',
                                     hint: '双击返回键  返回直播',
                                   )
-                                : const StandbyShell(
-                                    icon: Icons.live_tv,
-                                    title: '请选择频道',
-                                    subtitle: '按 OK 或方向键打开频道列表',
-                                  ),
+                                : controller.castEndedWaiting
+                                    ? const StandbyShell(
+                                        icon: Icons.cast,
+                                        topBadge: '投屏',
+                                        title: '已播完，等待下一条投屏',
+                                        subtitle: '发送端发起新投屏将直接接上',
+                                        hint: '双击返回键  返回直播',
+                                      )
+                                    : const StandbyShell(
+                                        icon: Icons.live_tv,
+                                        title: '请选择频道',
+                                        subtitle: '按 OK 或方向键打开频道列表',
+                                      ),
                           ),
                         ),
 
@@ -1483,25 +1497,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else if (!kIsWeb) {
           final radio = c.currentChannel?.isRadio ?? false;
           if (radio) {
-            // 后台播放全靠通知栏/锁屏那张卡片操作。安卓 13+ 没给
-            // POST_NOTIFICATIONS、或用户把「电台播放」渠道关掉时，
-            // 前台服务照跑但系统把通知吞了——退到后台就是「看不见、
-            // 也控不了」。先申请一次，还不行就说清楚并给去设置的入口。
-            var granted = await notifGranted();
-            if (!granted) granted = await requestNotif();
-            if (!granted && mounted) {
-              final go = await _showNotifGuide();
-              if (go == true) {
-                await openNotifSettings();
-                return;
-              }
-            }
-            if (!mounted) return;
-            final ok = await moveToBackground();
-            if (mounted) {
-              _showOsd(ok ? '已退到后台继续播放' : '当前系统不支持后台播放',
-                  icon: ok ? Icons.headphones : Icons.info_outline);
-            }
+            await _enterBackgroundAudio();
           } else {
             await _enterPip();
           }
@@ -1524,6 +1520,43 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         break;
     }
   }
+
+  /// 电台「后台收听」：退到后台、音频继续，控制交给通知栏/锁屏卡片。
+  ///
+  /// 入口只有一个——底部面板的耳机按钮（手机/平板），原来藏在退出卡片里，
+  /// 要「长按返回 → 找耳机」两步。TV/盒子不提供：那边没有后台语义，
+  /// 退到桌面也没人看；桌面端有窗口置顶小窗，同样不需要。
+  ///
+  /// 通知权限先确认再退：安卓 13+ 没给 POST_NOTIFICATIONS、或用户把
+  /// 「电台播放」渠道关掉时，前台服务照跑但系统把通知吞了——退到后台
+  /// 就是「看不见、也控不了」，所以先说清楚并给去设置的入口。
+  Future<void> _enterBackgroundAudio() async {
+    if (kIsWeb) return;
+    final c = context.read<PlayerController>();
+    if (!(c.currentChannel?.isRadio ?? false)) return;
+    var granted = await notifGranted();
+    if (!granted) granted = await requestNotif();
+    if (!granted && mounted) {
+      final go = await _showNotifGuide();
+      if (go == true) {
+        await openNotifSettings();
+        return;
+      }
+    }
+    if (!mounted) return;
+    final ok = await moveToBackground();
+    if (mounted) {
+      _showOsd(ok ? '已退到后台继续播放' : '当前系统不支持后台播放',
+          icon: ok ? Icons.headphones : Icons.info_outline);
+    }
+  }
+
+  /// 底部面板是否提供「后台收听」：仅移动端（手机/平板）且非 TV/盒子。
+  /// 面板内部还会再按「当前是电台」过滤一次。
+  /// 有遥控器的设备基本就是 TV/盒子，而盒子上退到后台没有意义（没人看
+  /// 那块屏），所以这里一并排除，连按钮都不出现。
+  bool _canBackgroundAudio(PlayerController c) =>
+      !kIsWeb && !c.isDesktop && !c.isTv;
 
   /// 退出框是否提供「关闭系统」：仅 Windows/Linux 原生（Web/安卓/iOS/macOS 不显示）
   bool get _canShutdownSystem =>
@@ -1561,9 +1594,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             c.miniWindow ? '恢复窗口' : '小窗播放',
             Colors.greenAccent,
             'mini'),
-      if (!kIsWeb && !c.isDesktop && !c.isTv)
-        _ExitOption(radio ? Icons.headphones : Icons.picture_in_picture_alt,
-            radio ? '后台播放' : '小窗播放', Colors.greenAccent, 'mini'),
+      // 电台的「后台收听」已挪到底部面板（耳机按钮，一键直达），退出卡片
+      // 不再重复出现；这里只留视频的系统画中画，TV/盒子上两项都没有
+      if (!kIsWeb && !c.isDesktop && !c.isTv && !radio)
+        const _ExitOption(Icons.picture_in_picture_alt, '小窗播放',
+            Colors.greenAccent, 'mini'),
       // Web 扫码管理：局域网管理服务未启动（地址为空）时不显示
       if (c.remoteAdminUrl.isNotEmpty)
         const _ExitOption(
@@ -2157,10 +2192,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
   }
 
-  /// 把遥控器动作分发给底部控制面板，并取消自动隐藏
+  /// 把遥控器动作分发给底部控制面板，并重置自动隐藏倒计时
   void _bottomPanelRemoteKey(String action, bool isDown) {
     _bottomHideTimer?.cancel();
     _bottomPanelKey.currentState?.handleRemoteKey(action, isDown: isDown);
+    // 遥控器没有鼠标 hover，面板不能靠「鼠标移出」收起来。旧代码在此
+    // 只 cancel 不重排：长按 OK 呼出面板后，那次抬手的 OK 恰好走到这里，
+    // 把 _toggleBottomPanel() 刚排好的定时器就地取消，面板于是永久停留
+    // （投屏时必现，因为投屏面板信息区结构不同、没有其它路径重置计时）。
+    // 口径：每按一次键 = 一次操作，倒计时从这次操作重新算，
+    // 连续操作时不会中途消失，停手 autoHideDelay 后自动收起。
+    if (_bottomPanelVisible) _scheduleBottomHide();
   }
 
   /// 全局硬件按键处理（注册在 HardwareKeyboard 上，不依赖焦点）。
@@ -3286,6 +3328,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   void _openDrawer({required bool left}) {
     final c = context.read<PlayerController>();
     if (c.locked) return;
+    // 投屏独占输出（方案 13.1）：遥控器路径（_toggleDrawer）早已锁死，
+    // 鼠标路径（左右边缘热区/顶部按钮走这里）也必须同样锁——
+    // 不然「遥控器呼不出、鼠标却能呼出」，同一规则两条路不一致；
+    // 且投屏中点台会造成本地/接收端状态分裂（换了台画面没变）。
+    // 想换台：双击返回断开投屏（自动恢复原直播）再操作。
+    if (c.isCasting) {
+      OsdBus.show('正在投屏，请先断开', icon: Icons.cast_connected);
+      return;
+    }
+    if (c.castWaiting) {
+      OsdBus.show('投屏等待中，双击返回可退出', icon: Icons.cast);
+      return;
+    }
     setState(() {
       // 打开面板时隐藏悬停标题栏，避免遮挡面板顶部按钮
       _topBarVisible = false;
