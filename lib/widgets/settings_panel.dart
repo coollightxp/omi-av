@@ -122,6 +122,13 @@ class SettingsPanel extends StatefulWidget {
   State<SettingsPanel> createState() => _SettingsPanelState();
 }
 
+/// 歌词偏移显示：0 → 「0 秒」，正负带符号保留一位小数
+String _fmtLyricsOffset(int ms) {
+  if (ms == 0) return '0 秒';
+  final sec = (ms.abs() / 1000).toStringAsFixed(1);
+  return '${ms > 0 ? '+' : '-'}$sec 秒';
+}
+
 class _SettingsPanelState extends State<SettingsPanel>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
@@ -2688,6 +2695,54 @@ class _SystemSettingsTab extends StatelessWidget {
                 activeColor: Colors.blueAccent,
               ),
             ),
+            // 歌词时间微调（2026-11-18 定稿）：不做拖拽校准（歌词块占着
+            // 右半边，拖动会跟音量手势打架），整体挪一点就够用。
+            // 正 = 歌词延后（人声先到、歌词快了就调正）
+            if (s.lyricsEnabled)
+              ListTile(
+                leading: const Icon(Icons.tune, color: Colors.white54),
+                title: const Text('歌词时间微调',
+                    style: TextStyle(color: Colors.white, fontSize: 15)),
+                subtitle: Text(
+                  '歌词比人声快（前奏未完就往前走）→ 点 + 往后挪；'
+                  '歌词慢半拍 → 点 −\n'
+                  '0.5 秒/步，最多 ±10 秒 · 当前 '
+                  '${_fmtLyricsOffset(s.lyricsOffsetMs)}',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: '歌词提前 0.5 秒',
+                      onPressed: s.lyricsOffsetMs > -10000
+                          ? () =>
+                              controller.setLyricsOffset(s.lyricsOffsetMs - 500)
+                          : null,
+                      icon: const Icon(Icons.remove_circle_outline),
+                      color: Colors.white70,
+                    ),
+                    SizedBox(
+                      width: 62,
+                      child: Text(
+                        _fmtLyricsOffset(s.lyricsOffsetMs),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 14),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '歌词延后 0.5 秒',
+                      onPressed: s.lyricsOffsetMs < 10000
+                          ? () =>
+                              controller.setLyricsOffset(s.lyricsOffsetMs + 500)
+                          : null,
+                      icon: const Icon(Icons.add_circle_outline),
+                      color: Colors.white70,
+                    ),
+                  ],
+                ),
+              ),
             // 网页直播支持：关闭后启动不加载 WebView2 运行时环境，
             // 网页频道（webview:// 源）不可用
             ListTile(

@@ -122,6 +122,11 @@ class PlayerSettings {
   /// 逐句滚动；没曲名的台不拉取、不显示。关掉则功能完全不存在。
   final bool lyricsEnabled;
 
+  /// 歌词时间微调（毫秒，正 = 歌词整体延后、负 = 提前）。
+  /// 电台推曲名偏早或前奏长时，歌词会比人声快半拍，这里整体挪一下；
+  /// 步进 0.5s，范围 ±10s（`PlayerController.setLyricsOffset` 夹紧）
+  final int lyricsOffsetMs;
+
   /// 列表里隐藏「探测确认不可用」的内置源频道（默认开）。
   /// 只影响内置电台精选——死台源在清单里保留，恢复后自动回到列表
   final bool hideUnavailableChannels;
@@ -156,6 +161,7 @@ class PlayerSettings {
     this.playEngine = 'mdk',
     this.showWebNativeToggle = false,
     this.lyricsEnabled = false,
+    this.lyricsOffsetMs = 0,
     this.hideUnavailableChannels = true,
   });
 
@@ -189,6 +195,7 @@ class PlayerSettings {
     String? playEngine,
     bool? showWebNativeToggle,
     bool? lyricsEnabled,
+    int? lyricsOffsetMs,
     bool? hideUnavailableChannels,
   }) {
     return PlayerSettings(
@@ -222,6 +229,7 @@ class PlayerSettings {
       playEngine: playEngine ?? this.playEngine,
       showWebNativeToggle: showWebNativeToggle ?? this.showWebNativeToggle,
       lyricsEnabled: lyricsEnabled ?? this.lyricsEnabled,
+      lyricsOffsetMs: lyricsOffsetMs ?? this.lyricsOffsetMs,
       hideUnavailableChannels:
           hideUnavailableChannels ?? this.hideUnavailableChannels,
     );

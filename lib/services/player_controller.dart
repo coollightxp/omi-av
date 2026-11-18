@@ -449,6 +449,7 @@ class PlayerController extends ChangeNotifier {
     await _loadSettings();
     // 歌词开关：状态机自己持有 enabled（UI 直接监听，不重建播放树）
     RadioLyrics.instance.setEnabled(_settings.lyricsEnabled);
+    RadioLyrics.instance.setOffset(_settings.lyricsOffsetMs);
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
     _isTv = await isTvDevice();
     tvModeNotifier.value = _isTv;
@@ -4057,6 +4058,7 @@ class PlayerController extends ChangeNotifier {
   static const _kFishHotkey = 'settings_fish_hotkey';
   static const _kPlayEngine = 'settings_play_engine';
   static const _kLyricsEnabled = 'settings_lyrics_enabled';
+  static const _kLyricsOffset = 'settings_lyrics_offset_ms';
   static const _kShowWebNativeToggle = 'settings_show_web_native_toggle';
   static const _kHideUnavailable = 'settings_hide_unavailable_channels';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
@@ -4108,6 +4110,7 @@ class PlayerController extends ChangeNotifier {
         showWebNativeToggle: p.getBool(_kShowWebNativeToggle) ?? false,
         hideUnavailableChannels: p.getBool(_kHideUnavailable) ?? true,
         lyricsEnabled: p.getBool(_kLyricsEnabled) ?? false,
+        lyricsOffsetMs: p.getInt(_kLyricsOffset) ?? 0,
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -4200,6 +4203,7 @@ class PlayerController extends ChangeNotifier {
       await putBool(
           _kHideUnavailable, _settings.hideUnavailableChannels);
       await putBool(_kLyricsEnabled, _settings.lyricsEnabled);
+      await putInt(_kLyricsOffset, _settings.lyricsOffsetMs);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
@@ -4269,11 +4273,16 @@ class PlayerController extends ChangeNotifier {
     final remoteAdminChanged =
         settings.remoteAdminEnabled != _settings.remoteAdminEnabled;
     final webChanged = settings.webEnabled != _settings.webEnabled;
+    final lyricsOffsetChanged =
+        settings.lyricsOffsetMs != _settings.lyricsOffsetMs;
     _settings = settings;
     _settingsDirty = true;
     _scheduleSaveSettings();
     // 歌词开关：同步给歌词状态机（UI 直接监听它，不走整树重建）
     if (lyricsChanged) RadioLyrics.instance.setEnabled(settings.lyricsEnabled);
+    if (lyricsOffsetChanged) {
+      RadioLyrics.instance.setOffset(settings.lyricsOffsetMs);
+    }
     if (launchChanged && isDesktop) {
       setAutoLaunchEnabled(settings.launchAtStartup);
     }
@@ -4442,6 +4451,15 @@ class PlayerController extends ChangeNotifier {
   void setLyricsEnabled(bool v) {
     if (_settings.lyricsEnabled == v) return;
     updateSettings(_settings.copyWith(lyricsEnabled: v));
+  }
+
+  /// 歌词时间微调（毫秒，正 = 歌词延后）：±10s，UI 按 0.5s 步进
+  int get lyricsOffsetMs => _settings.lyricsOffsetMs;
+
+  void setLyricsOffset(int ms) {
+    final v = ms.clamp(-10000, 10000);
+    if (_settings.lyricsOffsetMs == v) return;
+    updateSettings(_settings.copyWith(lyricsOffsetMs: v));
   }
 
   /// 切换「隐藏不可用频道」：立刻按新口径重建两个列表，不用重启

@@ -177,11 +177,23 @@ class RadioLyrics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 歌词时间微调（毫秒，正 = 歌词整体延后、负 = 提前）。
+  /// 设置在「电台歌词显示」下面调，用来补偿电台推曲名偏早/偏晚、
+  /// 长前奏等情况；不放拖拽校准（会跟音量手势打架）。
+  int _offsetMs = 0;
+  int get offsetMs => _offsetMs;
+
+  void setOffset(int ms) {
+    if (_offsetMs == ms) return;
+    _offsetMs = ms;
+    notifyListeners();
+  }
+
   /// 当前该点亮第几行（-1 = 不点亮）
   int indexAt(Duration pos) {
     final d = _doc;
     if (d == null || !d.synced || !_hasAnchor) return -1;
-    var elapsed = pos - _anchorPos;
+    var elapsed = pos - _anchorPos - Duration(milliseconds: _offsetMs);
     // 直播流的位置偶尔会倒回一点（重连），夹到 0 起步，别把整页跳走
     if (elapsed.isNegative) elapsed = Duration.zero;
     final lines = d.lines;
@@ -194,23 +206,6 @@ class RadioLyrics extends ChangeNotifier {
       }
     }
     return idx;
-  }
-
-  /// 手动校准（手机拨动 / 鼠标拖拽）：认为第 [lineIndex] 行正在唱，
-  /// 把锚点改到「现在位置 − 该行时间」，从此按新锚点自动同步。
-  ///
-  /// 用到场景：有长前奏、或电台推曲名比音乐真正开始早/晚时，自动锚点
-  /// 会整体偏移——用户把歌词拨到当前唱的那句，就以此为新起点。
-  void realign(int lineIndex, Duration now) {
-    final d = _doc;
-    if (d == null || d.lines.isEmpty) return;
-    final i = lineIndex.clamp(0, d.lines.length - 1);
-    _hasAnchor = true;
-    _midJoined = false;
-    // 允许负锚点（用户把还没唱到的句子提前对齐时），indexAt 里已经
-    // 把负 elapsed 夹到 0，不会跳页
-    _anchorPos = now - d.lines[i].time;
-    notifyListeners();
   }
 
   // ==================== 查词 ====================

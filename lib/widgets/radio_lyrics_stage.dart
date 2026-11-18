@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../services/player_controller.dart';
@@ -8,15 +7,17 @@ import '../services/radio_lyrics.dart';
 
 /// 电台歌词块（待办 L · 分栏版式定稿）。
 ///
-/// 不再独占整屏：作为右侧的一块圆角面板，放在原中央信息卡（现在靠左）
-/// 旁边——左"台"右"词"，互不遮挡。面板自身不满屏，尺寸由
-/// [video_player_widget] 的分栏布局（`_lyricsSplit`）给定，窄屏随
-/// 整版等比缩小。之前的顶栏（左上角台名/右上角"歌词"小字）已按
-/// 用户要求去掉——台名在左侧信息卡里本来就有，不重复占地方。
+/// 右侧一块圆角面板，与左侧的中央信息卡并排——左"台"右"词"，互不遮挡。
+/// 面板尺寸由 [video_player_widget] 的分栏布局（`_lyricsSplit`）给定，
+/// 窄屏随整版等比缩小。
 ///
-/// 对齐：用 [RadioLyrics.indexAt] 把「播放位置 − 曲名变化时刻」映射到
-/// LRC 时间轴。进台第一首没有锚点（不知道唱到哪儿），此时只展示不点亮，
-/// 面板内给一行说明；下一首起自动精确同步。
+/// **纯显示**（用户 2026-11-18 定稿）：不响应拖动、不给微调按钮——
+/// 播放页左侧上滑调亮度、右侧上滑调音量，歌词块正占着右半边，任何
+/// 拖动都会跟音量手势打架。时间对不准走设置里的「歌词时间微调」。
+///
+/// 对齐：用 [RadioLyrics.indexAt] 把「播放位置 − 曲名变化时刻 + 微调偏移」
+/// 映射到 LRC 时间轴。进台第一首没有锚点（不知道唱到哪儿），此时只展示
+/// 不点亮，面板内给一行说明；下一首起自动精确同步。
 class RadioLyricsStage extends StatefulWidget {
   const RadioLyricsStage({super.key, required this.controller});
 
@@ -34,21 +35,12 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
   Timer? _tick;
   int _index = -1;
 
-  /// 用户正在手动拨动/拖拽歌词：期间暂停自动跟随与自动滚动，
-  /// 松手后以视口中央那一行为准重新对时（不抢用户的手）
-  bool _manual = false;
-
-  /// 刚校准完的两秒提示
-  bool _aligned = false;
-  Timer? _alignedTimer;
-
   @override
   void initState() {
     super.initState();
     // 300ms 一刷：歌词行跨度为秒级，这个频率既跟得上又不费电
     _tick = Timer.periodic(const Duration(milliseconds: 300), (_) {
       if (!mounted) return;
-      if (_manual) return; // 手在拨：不抢、不跳
       final i = RadioLyrics.instance.indexAt(widget.controller.position);
       if (i != _index) {
         setState(() => _index = i);
@@ -60,7 +52,6 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
   @override
   void dispose() {
     _tick?.cancel();
-    _alignedTimer?.cancel();
     _scroll.dispose();
     super.dispose();
   }
@@ -75,44 +66,6 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
       duration: const Duration(milliseconds: 420),
       curve: Curves.easeOutCubic,
     );
-  }
-
-  /// 手动拨动开始 → 冻结自动跟随；松手 → 以中间那行重新对时。
-  ///
-  /// 只为「用户主动拖」触发：自动 animateTo 的 start/end 通知不带
-  /// dragDetails，不会被误判成手动。
-  bool _onScroll(ScrollNotification n) {
-    if (n is ScrollStartNotification && n.dragDetails != null) {
-      _manual = true;
-    } else if (n is ScrollEndNotification && _manual) {
-      _manual = false;
-      _alignToCenter();
-    }
-    return false;
-  }
-
-  /// 把视口正中间那一行当作「此刻正在唱的句子」，重设锚点。
-  /// 长前奏/推流时间偏的情况，用户拨到正确那句松手即可，之后自动跟。
-  void _alignToCenter() {
-    final lyrics = RadioLyrics.instance;
-    final doc = lyrics.doc;
-    if (doc == null || !doc.synced || doc.lines.isEmpty) return;
-    if (!_scroll.hasClients) return;
-    final center =
-        _scroll.offset + _scroll.position.viewportDimension / 2 - _topPad;
-    final i = (center / _lineHeight)
-        .floor()
-        .clamp(0, doc.lines.length - 1);
-    lyrics.realign(i, widget.controller.position);
-    if (!mounted) return;
-    setState(() {
-      _index = i;
-      _aligned = true;
-    });
-    _alignedTimer?.cancel();
-    _alignedTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _aligned = false);
-    });
   }
 
   @override
@@ -175,62 +128,46 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               if (lyrics.midJoined)
                 const _TipChip(text: '已中途加入 · 下一首起自动同步'),
               if (!doc.synced) const _TipChip(text: '这首没有时间轴 · 整段展示'),
-              if (_aligned) const _TipChip(text: '已对齐 · 从此继续自动同步'),
               Expanded(
                 child: ScrollConfiguration(
-                  // ① dragDevices 加上 mouse：桌面端默认鼠标拖不动列表，
-                  //    加上后 Windows 能直接拽歌词；② scrollbars: false
-                  //    去掉滚动时旁边冒出来的滑条（用户要求）
-                  behavior: ScrollConfiguration.of(context).copyWith(
-                    dragDevices: {
-                      PointerDeviceKind.touch,
-                      PointerDeviceKind.mouse,
-                      PointerDeviceKind.stylus,
-                      PointerDeviceKind.trackpad,
-                    },
-                    scrollbars: false,
-                  ),
-                  child: NotificationListener<ScrollNotification>(
-                    onNotification: _onScroll,
-                    child: ListView.builder(
-                      controller: _scroll,
-                      padding: const EdgeInsets.symmetric(vertical: _topPad),
-                      itemCount: doc.lines.length,
-                      itemExtent: _lineHeight,
-                      // 可拖校准只在桌面（Windows 鼠标拖拽）。
-                      // 手机上关闭：整个屏幕右侧上滑是调音量、左侧调亮度，
-                      // 歌词块占了右半边，若在这里滚歌词会跟音量手势打架
-                      // （用户定稿：手机不做校准，桌面保留）
-                      physics: widget.controller.isDesktop
-                          ? const ClampingScrollPhysics()
-                          : const NeverScrollableScrollPhysics(),
-                      itemBuilder: (context, i) {
-                    final line = doc.lines[i];
-                    final active = doc.synced && lyrics.hasAnchor && i == _index;
-                    final near = _index >= 0 && (i - _index).abs() <= 1;
-                    return Center(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Text(
-                          line.text,
-                          maxLines: 2,
-                          textAlign: TextAlign.center,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: active
-                                ? Colors.white
-                                : Colors.white.withValues(
-                                    alpha: near ? 0.55 : 0.26),
-                            fontSize: active ? 19 : 15,
-                            height: 1.35,
-                            fontWeight:
-                                active ? FontWeight.w700 : FontWeight.w400,
+                  // 关掉滚动时冒出来的滑条（用户要求：一定不显示）
+                  behavior: ScrollConfiguration.of(context)
+                      .copyWith(scrollbars: false),
+                  child: ListView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.symmetric(vertical: _topPad),
+                    itemCount: doc.lines.length,
+                    itemExtent: _lineHeight,
+                    // 纯显示：禁止用户拖动（拖动会跟右侧音量手势打架）。
+                    // 自动跟随走 ScrollController.animateTo，不受影响
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemBuilder: (context, i) {
+                      final line = doc.lines[i];
+                      final active =
+                          doc.synced && lyrics.hasAnchor && i == _index;
+                      final near = _index >= 0 && (i - _index).abs() <= 1;
+                      return Center(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            line.text,
+                            maxLines: 2,
+                            textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: active
+                                  ? Colors.white
+                                  : Colors.white.withValues(
+                                      alpha: near ? 0.55 : 0.26),
+                              fontSize: active ? 19 : 15,
+                              height: 1.35,
+                              fontWeight:
+                                  active ? FontWeight.w700 : FontWeight.w400,
+                            ),
                           ),
                         ),
-                      ),
-                    );
-                      },
-                    ),
+                      );
+                    },
                   ),
                 ),
               ),
