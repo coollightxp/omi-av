@@ -10,6 +10,8 @@ import '../core/theme/app_colors.dart';
 import '../core/widgets/audio_wave.dart';
 import '../services/exit_guard.dart';
 import '../services/player_controller.dart';
+import '../services/radio_lyrics.dart';
+import 'radio_lyrics_stage.dart';
 
 /// 视频播放器显示组件
 class VideoPlayerWidget extends StatelessWidget {
@@ -230,6 +232,28 @@ class _RadioStage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final lyrics = RadioLyrics.instance;
+    return AnimatedBuilder(
+      animation: lyrics,
+      builder: (context, _) {
+        // 歌词页与中央信息卡互斥（待办 L）：开着歌词时这块整体让位，
+        // 关掉原样回到台标/台名/波形，不叠加、不挤占其它布局。
+        // 台还没推过任何曲名（新闻/纯转播台）→ 维持信息卡，不拉取、
+        // 不显示空歌词页——「没有就不显示」。
+        if (lyrics.enabled &&
+            lyrics.visible &&
+            (lyrics.hasTrack || lyrics.querying || lyrics.notFound)) {
+          return RadioLyricsStage(
+            controller: controller,
+            stationName: controller.displayTitle(channel),
+          );
+        }
+        return _infoCard(context);
+      },
+    );
+  }
+
+  Widget _infoCard(BuildContext context) {
     final ch = channel;
     final name = controller.displayTitle(ch);
 

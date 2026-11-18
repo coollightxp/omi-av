@@ -644,6 +644,8 @@ function renderRadio(){
   // 死台处理：默认隐藏但保留在清单里，恢复后下次检测自动回到列表
   html+=switchCard('hideUnavailableChannels','隐藏检测为不可用的台',
     '默认开。死台只是不显示，清单里仍保留；哪天恢复，检测通过就自动回来');
+  html+=switchCard('lyricsEnabled','电台歌词显示',
+    '开着时播电台自动用曲目名查歌词并逐句显示；查不到提示「查无歌词」，不提供曲目信息的台不拉取');
   if(b.exists){
     html+='<div class="card'+(b.current?' is-cur':'')+'">'
       +'<div class="card-head"><div class="name">内置电台精选</div>'

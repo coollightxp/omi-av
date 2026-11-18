@@ -2667,6 +2667,27 @@ class _SystemSettingsTab extends StatelessWidget {
                 activeColor: Colors.blueAccent,
               ),
             ),
+            // 电台歌词（待办 L）：开了之后播电台自动拿 ICY 曲名查歌词，
+            // 查到就逐句滚动；没曲名的台不拉取、不显示
+            ListTile(
+              leading: Icon(Icons.lyrics_outlined,
+                  color: s.lyricsEnabled
+                      ? Colors.greenAccent
+                      : Colors.white54),
+              title: const Text('电台歌词显示',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: const Text(
+                '开启后，播电台时自动用曲目名查询歌词并逐句显示；'
+                '查不到会提示「查无歌词」，不提供曲目信息的电台不拉取\n'
+                '底部面板的「歌词」按钮可随时临时收起/再打开',
+                style: TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              trailing: Switch(
+                value: s.lyricsEnabled,
+                onChanged: controller.setLyricsEnabled,
+                activeColor: Colors.blueAccent,
+              ),
+            ),
             // 网页直播支持：关闭后启动不加载 WebView2 运行时环境，
             // 网页频道（webview:// 源）不可用
             ListTile(

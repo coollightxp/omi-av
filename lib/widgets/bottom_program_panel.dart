@@ -12,6 +12,7 @@ import '../core/theme/app_typography.dart';
 import '../core/widgets/ghost_button.dart';
 import '../player/widgets/source_stepper.dart';
 import '../services/player_controller.dart';
+import '../services/radio_lyrics.dart';
 import 'scaled_panel.dart';
 
 /// 底部信息/控制面板
@@ -36,6 +37,10 @@ class BottomProgramPanel extends StatefulWidget {
   /// TV/盒子与桌面端不提供，传 null 即不显示该按钮。
   final VoidCallback? onBackgroundAudio;
 
+  /// 电台歌词（待办 L）：开关打开时由播放页传入，点一下切换歌词页显示。
+  /// 传 null = 设置里没开这个功能，按钮不出现。
+  final VoidCallback? onToggleLyrics;
+
   /// 遥控器激活「跳转类」按钮（扫码）后通知播放页关闭面板
   final VoidCallback? onDismissRemote;
 
@@ -53,6 +58,7 @@ class BottomProgramPanel extends StatefulWidget {
     this.onSwitchWebNative,
     this.onReload,
     this.onBackgroundAudio,
+    this.onToggleLyrics,
     this.onDismissRemote,
     this.onHoverEnter,
     this.onHoverExit,
@@ -594,6 +600,17 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       if (isRadio && widget.onBackgroundAudio != null)
         _KbAction('bgAudio', Icons.headphones, '后台收听',
             widget.onBackgroundAudio),
+      // 电台歌词（待办 L）：开关打开才出现。台还没推过有效曲名时置灰
+      // （那是台的能力缺失，按了也查不到东西），推了曲名才可点。
+      if (isRadio && widget.onToggleLyrics != null)
+        _KbAction(
+          'lyrics',
+          RadioLyrics.instance.visible
+              ? Icons.lyrics
+              : Icons.lyrics_outlined,
+          RadioLyrics.instance.visible ? '关闭歌词' : '歌词',
+          RadioLyrics.instance.hasTrack ? widget.onToggleLyrics : null,
+        ),
     ];
     _actions = actions;
     // 当前高亮的动作若已消失（如断开投屏），清除高亮，等下次方向键重选
@@ -674,6 +691,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       children.add(_groupDivider(d));
       addByIdTo(children, 'radioRec');
       addByIdTo(children, 'bgAudio');
+      addByIdTo(children, 'lyrics');
     }
 
     // 定时关闭入口统一收进退出卡片（长按返回/退出键），底部面板不再

@@ -26,6 +26,7 @@ import 'cast_stream_proxy.dart';
 import 'dlna_service.dart';
 import 'win_hotkeys.dart';
 import 'cast_log.dart';
+import 'radio_lyrics.dart';
 import 'web_diag.dart';
 import 'format_hint.dart';
 import 'net_warm.dart';
@@ -446,6 +447,8 @@ class PlayerController extends ChangeNotifier {
     final bootClock = Stopwatch()..start();
     _boot('正在读取设置…');
     await _loadSettings();
+    // 歌词开关：状态机自己持有 enabled（UI 直接监听，不重建播放树）
+    RadioLyrics.instance.setEnabled(_settings.lyricsEnabled);
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
     _isTv = await isTvDevice();
     tvModeNotifier.value = _isTv;
@@ -1116,6 +1119,7 @@ class PlayerController extends ChangeNotifier {
         'playEngine': s.playEngine,
         'showWebNativeToggle': s.showWebNativeToggle,
         'hideUnavailableChannels': s.hideUnavailableChannels,
+        'lyricsEnabled': s.lyricsEnabled,
         // 网页端没有引擎可用性上下文，不再暴露
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
@@ -1244,6 +1248,7 @@ class PlayerController extends ChangeNotifier {
           rb('showWebNativeToggle') ?? cur.showWebNativeToggle;
       final hideUnavailable =
           rb('hideUnavailableChannels') ?? cur.hideUnavailableChannels;
+      final lyricsEnabled = rb('lyricsEnabled') ?? cur.lyricsEnabled;
       final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
       final resumeLast = rb('resumeLastChannel') ?? cur.resumeLastChannel;
       final closeToTray = kIsWindowsDesktop
@@ -1321,6 +1326,7 @@ class PlayerController extends ChangeNotifier {
           webEnabled != _settings.webEnabled ||
           webNative != _settings.showWebNativeToggle ||
           hideUnavailable != _settings.hideUnavailableChannels ||
+          lyricsEnabled != _settings.lyricsEnabled ||
           retryTimes != _settings.retryTimes ||
           castEndWait != _settings.castEndWaitSeconds ||
           uiScaleAuto != _settings.uiScaleAuto ||
@@ -1345,6 +1351,7 @@ class PlayerController extends ChangeNotifier {
           webEnabled: webEnabled,
           showWebNativeToggle: webNative,
           hideUnavailableChannels: hideUnavailable,
+          lyricsEnabled: lyricsEnabled,
           retryTimes: retryTimes,
           castEndWaitSeconds: castEndWait,
           uiScaleAuto: uiScaleAuto,
@@ -1850,6 +1857,8 @@ class PlayerController extends ChangeNotifier {
     if (_currentChannel?.id != channel.id) {
       _radioTracks.clear();
       _lastMediaTitle = '';
+      // 歌词数据随台清空（显示意图保留，见 RadioLyrics）
+      RadioLyrics.instance.onChannelChanged(channel.id);
     }
     // 主动播放（点台/换台/重播同一台）：即使之前按过卡片上的 ❌，
     // 也应该重新出卡片。以前只在「换到另一台」时复位，从列表里点回
@@ -3022,6 +3031,8 @@ class PlayerController extends ChangeNotifier {
         _radioTracks.remove(track);
         _radioTracks.insert(0, track);
         if (_radioTracks.length > 20) _radioTracks.removeLast();
+        // 歌词锚点：曲名变化那一刻的播放位置 = 这首歌的第 0 秒
+        RadioLyrics.instance.onTrack(track, position);
         notifyListeners();
       }
     }
@@ -4045,6 +4056,7 @@ class PlayerController extends ChangeNotifier {
   static const _kCloseToTray = 'settings_close_to_tray';
   static const _kFishHotkey = 'settings_fish_hotkey';
   static const _kPlayEngine = 'settings_play_engine';
+  static const _kLyricsEnabled = 'settings_lyrics_enabled';
   static const _kShowWebNativeToggle = 'settings_show_web_native_toggle';
   static const _kHideUnavailable = 'settings_hide_unavailable_channels';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
@@ -4095,6 +4107,7 @@ class PlayerController extends ChangeNotifier {
         playEngine: p.getString(_kPlayEngine) ?? 'mdk',
         showWebNativeToggle: p.getBool(_kShowWebNativeToggle) ?? false,
         hideUnavailableChannels: p.getBool(_kHideUnavailable) ?? true,
+        lyricsEnabled: p.getBool(_kLyricsEnabled) ?? false,
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -4186,6 +4199,7 @@ class PlayerController extends ChangeNotifier {
       await putBool(_kShowWebNativeToggle, _settings.showWebNativeToggle);
       await putBool(
           _kHideUnavailable, _settings.hideUnavailableChannels);
+      await putBool(_kLyricsEnabled, _settings.lyricsEnabled);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
@@ -4245,6 +4259,7 @@ class PlayerController extends ChangeNotifier {
 
   /// 更新设置并持久化（开机启动项会同步到系统）
   void updateSettings(PlayerSettings settings) {
+    final lyricsChanged = settings.lyricsEnabled != _settings.lyricsEnabled;
     final launchChanged = settings.launchAtStartup != _settings.launchAtStartup;
     final topChanged = settings.alwaysOnTop != _settings.alwaysOnTop;
     final closeToTrayChanged = settings.closeToTray != _settings.closeToTray;
@@ -4257,6 +4272,8 @@ class PlayerController extends ChangeNotifier {
     _settings = settings;
     _settingsDirty = true;
     _scheduleSaveSettings();
+    // 歌词开关：同步给歌词状态机（UI 直接监听它，不走整树重建）
+    if (lyricsChanged) RadioLyrics.instance.setEnabled(settings.lyricsEnabled);
     if (launchChanged && isDesktop) {
       setAutoLaunchEnabled(settings.launchAtStartup);
     }
@@ -4418,6 +4435,14 @@ class PlayerController extends ChangeNotifier {
 
   /// 是否隐藏探测确认不可用的内置频道（死台在清单里保留，恢复即回来）
   bool get hideUnavailableChannels => _settings.hideUnavailableChannels;
+
+  /// 电台歌词开关（设置面板 / 扫码页共用）
+  bool get lyricsEnabled => _settings.lyricsEnabled;
+
+  void setLyricsEnabled(bool v) {
+    if (_settings.lyricsEnabled == v) return;
+    updateSettings(_settings.copyWith(lyricsEnabled: v));
+  }
 
   /// 切换「隐藏不可用频道」：立刻按新口径重建两个列表，不用重启
   Future<void> setHideUnavailableChannels(bool v) async {

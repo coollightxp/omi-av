@@ -116,6 +116,12 @@ class PlayerSettings {
   /// 挤占遥控器焦点路径（用户要求收进设置，开关控制显隐）
   final bool showWebNativeToggle;
 
+  /// 电台逐句歌词（默认关，待办 L）。
+  ///
+  /// 开着时：播电台若推了 ICY 曲名，自动拿曲名去 LRCLIB 查歌词并显示
+  /// 逐句滚动；没曲名的台不拉取、不显示。关掉则功能完全不存在。
+  final bool lyricsEnabled;
+
   /// 列表里隐藏「探测确认不可用」的内置源频道（默认开）。
   /// 只影响内置电台精选——死台源在清单里保留，恢复后自动回到列表
   final bool hideUnavailableChannels;
@@ -149,6 +155,7 @@ class PlayerSettings {
     this.fishHotkey = true,
     this.playEngine = 'mdk',
     this.showWebNativeToggle = false,
+    this.lyricsEnabled = false,
     this.hideUnavailableChannels = true,
   });
 
@@ -181,6 +188,7 @@ class PlayerSettings {
     bool? fishHotkey,
     String? playEngine,
     bool? showWebNativeToggle,
+    bool? lyricsEnabled,
     bool? hideUnavailableChannels,
   }) {
     return PlayerSettings(
@@ -213,6 +221,7 @@ class PlayerSettings {
       fishHotkey: fishHotkey ?? this.fishHotkey,
       playEngine: playEngine ?? this.playEngine,
       showWebNativeToggle: showWebNativeToggle ?? this.showWebNativeToggle,
+      lyricsEnabled: lyricsEnabled ?? this.lyricsEnabled,
       hideUnavailableChannels:
           hideUnavailableChannels ?? this.hideUnavailableChannels,
     );

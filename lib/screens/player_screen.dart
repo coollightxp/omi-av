@@ -21,6 +21,7 @@ import '../models/channel.dart';
 import '../services/exit_guard.dart';
 import '../services/osd_bus.dart';
 import '../services/pip.dart';
+import '../services/radio_lyrics.dart';
 import '../services/player_controller.dart';
 import '../services/system_power.dart';
 import '../services/tray_service.dart';
@@ -946,6 +947,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           onBackgroundAudio: _canBackgroundAudio(controller)
                               ? _enterBackgroundAudio
                               : null,
+                          // 电台歌词：设置开关打开才传（不传 = 按钮不存在）
+                          onToggleLyrics: controller.lyricsEnabled
+                              ? _toggleLyrics
+                              : null,
                           onDismissRemote: () {
                             if (_bottomPanelVisible) {
                               setState(() {
@@ -1531,6 +1536,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 通知权限先确认再退：安卓 13+ 没给 POST_NOTIFICATIONS、或用户把
   /// 「电台播放」渠道关掉时，前台服务照跑但系统把通知吞了——退到后台
   /// 就是「看不见、也控不了」，所以先说清楚并给去设置的入口。
+  /// 电台歌词显示/隐藏（待办 L）。
+  ///
+  /// 只是「当次看不看」，跨台记忆：关了就一直是关的，切台也不会自己弹
+  /// 回来；开着切到没曲名的台会自动让位（RadioLyrics 内部处理）。
+  void _toggleLyrics() {
+    RadioLyrics.instance.toggleVisible();
+    setState(() {});
+  }
+
   Future<void> _enterBackgroundAudio() async {
     if (kIsWeb) return;
     final c = context.read<PlayerController>();
