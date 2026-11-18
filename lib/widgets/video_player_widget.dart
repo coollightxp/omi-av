@@ -447,35 +447,41 @@ class _RadioStage extends StatelessWidget {
           colors: [Color(0xFF1A1209), Color(0xFF000000)],
         ),
       ),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 1180 * 1.25,
-            maxHeight: 600 * 1.25,
-          ),
-          child: FittedBox(
-            fit: BoxFit.contain,
-            child: SizedBox(
-              width: 1180,
-              height: 600,
-              child: Row(
-                children: [
-                  // 左：台标/台名/波形（原中央信息卡内容，距左边留 56）
-                  const SizedBox(width: 56),
-                  SizedBox(
-                    width: 500,
-                    child: Center(child: _infoColumn(0.92)),
-                  ),
-                  // 中缝：两块之间留出呼吸距离
-                  const SizedBox(width: 96),
-                  // 右：歌词块（不满屏，距右边留 56）
-                  SizedBox(
-                    width: 472,
-                    height: 520,
-                    child: RadioLyricsStage(controller: controller),
-                  ),
-                  const SizedBox(width: 56),
-                ],
+      child: SafeArea(
+        // 安卓沉浸式下 stage 顶到状态栏：歌词块右上角会跟系统时钟
+        // 叠在一起（用户截图），顶部让出安全区；底部面板自己处理
+        top: true,
+        bottom: false,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              maxWidth: 1180 * 1.25,
+              maxHeight: 600 * 1.25,
+            ),
+            child: FittedBox(
+              fit: BoxFit.contain,
+              child: SizedBox(
+                width: 1180,
+                height: 600,
+                child: Row(
+                  children: [
+                    // 左：台标/台名/波形（原中央信息卡内容，距左边留 56）
+                    const SizedBox(width: 56),
+                    SizedBox(
+                      width: 500,
+                      child: Center(child: _infoColumn(0.92)),
+                    ),
+                    // 中缝：两块之间留出呼吸距离
+                    const SizedBox(width: 96),
+                    // 右：歌词块（不满屏，距右边留 56）
+                    SizedBox(
+                      width: 472,
+                      height: 520,
+                      child: RadioLyricsStage(controller: controller),
+                    ),
+                    const SizedBox(width: 56),
+                  ],
+                ),
               ),
             ),
           ),
