@@ -125,6 +125,9 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
           final doc = lyrics.doc!;
           body = Column(
             children: [
+              // 有非零偏移时挂个角标：关掉设置面板后也能确认微调还在生效
+              if (lyrics.offsetMs != 0 && doc.synced && lyrics.hasAnchor)
+                _TipChip(text: '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}'),
               if (lyrics.midJoined)
                 const _TipChip(text: '已中途加入 · 下一首起自动同步'),
               if (!doc.synced) const _TipChip(text: '这首没有时间轴 · 整段展示'),
@@ -187,6 +190,11 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
       },
     );
   }
+}
+
+String _fmtOffsetSec(int ms) {
+  final sec = (ms.abs() / 1000).toStringAsFixed(ms % 1000 == 0 ? 0 : 1);
+  return '${ms > 0 ? '+' : '-'}$sec 秒';
 }
 
 class _TipChip extends StatelessWidget {

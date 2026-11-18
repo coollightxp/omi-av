@@ -17,6 +17,7 @@ import 'radio_search_dialog.dart';
 import '../models/player_settings.dart';
 import '../models/playlist_source.dart';
 import '../services/osd_bus.dart';
+import '../services/radio_lyrics.dart';
 import '../services/pip.dart' show notifGranted, requestNotif, openNotifSettings;
 import '../services/builtin_epg.dart';
 import '../services/player_controller.dart';
@@ -127,6 +128,73 @@ String _fmtLyricsOffset(int ms) {
   if (ms == 0) return '0 秒';
   final sec = (ms.abs() / 1000).toStringAsFixed(1);
   return '${ms > 0 ? '+' : '-'}$sec 秒';
+}
+
+/// 微调实时回显：按**当前偏移**算出的那一句歌词。
+///
+/// 为什么需要它：设置面板是从底部滑上来的全屏页，调的时候歌词块被盖住，
+/// 而"整体平移"在视觉上只有跨过一行才看得出来——用户点了几下发现画面没
+/// 变化，就会以为没生效。这里直接回显"现在会亮哪一句"，点一次 1 秒就能
+/// 看出句子变了，生效与否一目了然。
+class _LyricsOffsetPreview extends StatefulWidget {
+  const _LyricsOffsetPreview({required this.controller});
+
+  final PlayerController controller;
+
+  @override
+  State<_LyricsOffsetPreview> createState() => _LyricsOffsetPreviewState();
+}
+
+class _LyricsOffsetPreviewState extends State<_LyricsOffsetPreview> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = RadioLyrics.instance;
+    final doc = l.doc;
+    // 没时间轴 / 中途进台那首没有锚点：这时候微调本来就不参与运算，
+    // 必须说清楚，否则用户会一直加一直没反应
+    if (doc == null || !doc.synced || !l.hasAnchor) {
+      return const Text(
+        '当前这首没有可用的时间基准（无同步歌词，或进台第一首），'
+        '微调对它不生效',
+        style: TextStyle(color: Color(0xFFFFB74D), fontSize: 12),
+      );
+    }
+    final i = l.indexAt(widget.controller.position);
+    final text = (i >= 0 && i < doc.lines.length)
+        ? doc.lines[i].text.trim()
+        : '（前奏 / 间奏）';
+    return Row(
+      children: [
+        const Icon(Icons.subtitles_outlined,
+            size: 13, color: Color(0xFF7FD3A0)),
+        const SizedBox(width: 5),
+        Expanded(
+          child: Text(
+            '立即生效 · 当前句：$text',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Color(0xFF7FD3A0), fontSize: 12),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _SettingsPanelState extends State<SettingsPanel>
@@ -2703,21 +2771,31 @@ class _SystemSettingsTab extends StatelessWidget {
                 leading: const Icon(Icons.tune, color: Colors.white54),
                 title: const Text('歌词时间微调',
                     style: TextStyle(color: Colors.white, fontSize: 15)),
-                subtitle: Text(
-                  '歌词比人声快（前奏未完就往前走）→ 点 + 往后挪；'
-                  '歌词慢半拍 → 点 −\n'
-                  '0.5 秒/步，最多 ±10 秒 · 当前 '
-                  '${_fmtLyricsOffset(s.lyricsOffsetMs)}',
-                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      // 按「看到的现象」说，不按「快/慢」说：
+                      // 用户实际是听着声音看屏幕判断的，讲快慢容易绕反
+                      '屏幕上还停在前一句、声音已经唱过去了 → 点 − 往前赶；'
+                      '屏幕上已经唱过去了、声音还没到 → 点 + 等一等\n'
+                      '1 秒/步，最多 ±10 秒 · 改完立刻生效，不用等下一首',
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    const SizedBox(height: 4),
+                    // 调的时候面板挡着歌词，看不见效果——这里直接回显
+                    // 「按当前偏移会亮哪一句」，点一下就能看出有没有生效
+                    _LyricsOffsetPreview(controller: controller),
+                  ],
                 ),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
-                      tooltip: '歌词提前 0.5 秒',
+                      tooltip: '歌词往前赶 1 秒',
                       onPressed: s.lyricsOffsetMs > -10000
                           ? () =>
-                              controller.setLyricsOffset(s.lyricsOffsetMs - 500)
+                              controller.setLyricsOffset(s.lyricsOffsetMs - 1000)
                           : null,
                       icon: const Icon(Icons.remove_circle_outline),
                       color: Colors.white70,
@@ -2732,10 +2810,10 @@ class _SystemSettingsTab extends StatelessWidget {
                       ),
                     ),
                     IconButton(
-                      tooltip: '歌词延后 0.5 秒',
+                      tooltip: '歌词往后等 1 秒',
                       onPressed: s.lyricsOffsetMs < 10000
                           ? () =>
-                              controller.setLyricsOffset(s.lyricsOffsetMs + 500)
+                              controller.setLyricsOffset(s.lyricsOffsetMs + 1000)
                           : null,
                       icon: const Icon(Icons.add_circle_outline),
                       color: Colors.white70,
