@@ -197,8 +197,13 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
                       padding: const EdgeInsets.symmetric(vertical: _topPad),
                       itemCount: doc.lines.length,
                       itemExtent: _lineHeight,
-                      // 始终可拖：有锚点也能手动校准（原先是禁止滚动）
-                      physics: const ClampingScrollPhysics(),
+                      // 可拖校准只在桌面（Windows 鼠标拖拽）。
+                      // 手机上关闭：整个屏幕右侧上滑是调音量、左侧调亮度，
+                      // 歌词块占了右半边，若在这里滚歌词会跟音量手势打架
+                      // （用户定稿：手机不做校准，桌面保留）
+                      physics: widget.controller.isDesktop
+                          ? const ClampingScrollPhysics()
+                          : const NeverScrollableScrollPhysics(),
                       itemBuilder: (context, i) {
                     final line = doc.lines[i];
                     final active = doc.synced && lyrics.hasAnchor && i == _index;
