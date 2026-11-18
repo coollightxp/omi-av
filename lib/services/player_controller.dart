@@ -1121,6 +1121,8 @@ class PlayerController extends ChangeNotifier {
         'showWebNativeToggle': s.showWebNativeToggle,
         'hideUnavailableChannels': s.hideUnavailableChannels,
         'lyricsEnabled': s.lyricsEnabled,
+        // 歌词时间微调（毫秒，正 = 往后等 / 负 = 往前赶）
+        'lyricsOffsetMs': s.lyricsOffsetMs,
         // 网页端没有引擎可用性上下文，不再暴露
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
@@ -1250,6 +1252,9 @@ class PlayerController extends ChangeNotifier {
       final hideUnavailable =
           rb('hideUnavailableChannels') ?? cur.hideUnavailableChannels;
       final lyricsEnabled = rb('lyricsEnabled') ?? cur.lyricsEnabled;
+      int lyricsOffset = cur.lyricsOffsetMs;
+      final loRaw = ri('lyricsOffsetMs');
+      if (loRaw != null) lyricsOffset = loRaw.clamp(-10000, 10000);
       final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
       final resumeLast = rb('resumeLastChannel') ?? cur.resumeLastChannel;
       final closeToTray = kIsWindowsDesktop
@@ -1328,6 +1333,7 @@ class PlayerController extends ChangeNotifier {
           webNative != _settings.showWebNativeToggle ||
           hideUnavailable != _settings.hideUnavailableChannels ||
           lyricsEnabled != _settings.lyricsEnabled ||
+          lyricsOffset != _settings.lyricsOffsetMs ||
           retryTimes != _settings.retryTimes ||
           castEndWait != _settings.castEndWaitSeconds ||
           uiScaleAuto != _settings.uiScaleAuto ||
@@ -1353,6 +1359,7 @@ class PlayerController extends ChangeNotifier {
           showWebNativeToggle: webNative,
           hideUnavailableChannels: hideUnavailable,
           lyricsEnabled: lyricsEnabled,
+          lyricsOffsetMs: lyricsOffset,
           retryTimes: retryTimes,
           castEndWaitSeconds: castEndWait,
           uiScaleAuto: uiScaleAuto,

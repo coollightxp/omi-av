@@ -646,6 +646,12 @@ function renderRadio(){
     '默认开。死台只是不显示，清单里仍保留；哪天恢复，检测通过就自动回来');
   html+=switchCard('lyricsEnabled','电台歌词显示',
     '开着时播电台自动用曲目名查歌词并逐句显示；查不到提示「查无歌词」，不提供曲目信息的台不拉取');
+  // 歌词时间微调：与电脑设置里同一项。按「看到的现象」说方向，别讲快慢
+  if(state.settings&&state.settings.lyricsEnabled){
+    html+=rangeCard('lyricsOffsetSec','歌词时间微调',
+      '屏幕上还停在前一句、声音已经唱过去了 → 往左（往前赶）；屏幕上已经唱过去了、声音还没到 → 往右（等一等）。1 秒/步，最多 ±10 秒',
+      -10,10,1,Math.round((state.settings.lyricsOffsetMs||0)/1000),0,' 秒');
+  }
   if(b.exists){
     html+='<div class="card'+(b.current?' is-cur':'')+'">'
       +'<div class="card-head"><div class="name">内置电台精选</div>'
@@ -905,6 +911,7 @@ function onRange(key,v,dec,suf){
   if(!state.settings)state.settings={};
   var num=parseFloat(v);
   if(key==='autoHideDelaySec')state.settings.autoHideDelay=Math.round(num*1000);
+  else if(key==='lyricsOffsetSec')state.settings.lyricsOffsetMs=Math.round(num*1000);
   else state.settings[key]=num;
   var lab=el('rg-'+key+'-v');
   if(lab)lab.textContent=num.toFixed(dec)+suf;
