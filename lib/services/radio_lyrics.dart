@@ -196,6 +196,23 @@ class RadioLyrics extends ChangeNotifier {
     return idx;
   }
 
+  /// 手动校准（手机拨动 / 鼠标拖拽）：认为第 [lineIndex] 行正在唱，
+  /// 把锚点改到「现在位置 − 该行时间」，从此按新锚点自动同步。
+  ///
+  /// 用到场景：有长前奏、或电台推曲名比音乐真正开始早/晚时，自动锚点
+  /// 会整体偏移——用户把歌词拨到当前唱的那句，就以此为新起点。
+  void realign(int lineIndex, Duration now) {
+    final d = _doc;
+    if (d == null || d.lines.isEmpty) return;
+    final i = lineIndex.clamp(0, d.lines.length - 1);
+    _hasAnchor = true;
+    _midJoined = false;
+    // 允许负锚点（用户把还没唱到的句子提前对齐时），indexAt 里已经
+    // 把负 elapsed 夹到 0，不会跳页
+    _anchorPos = now - d.lines[i].time;
+    notifyListeners();
+  }
+
   // ==================== 查词 ====================
 
   Future<void> _ensureFetch() async {
@@ -242,7 +259,7 @@ class RadioLyrics extends ChangeNotifier {
     }
     // 三级：关键词模糊（曲名格式古怪时的兜底）
     if (rows.isEmpty) {
-      rows = await _search(q: '$rawTitle'.trim());
+      rows = await _search(q: rawTitle.trim());
     }
     if (rows.isEmpty) return null;
 

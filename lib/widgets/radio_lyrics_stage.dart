@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../services/player_controller.dart';
@@ -27,10 +28,19 @@ class RadioLyricsStage extends StatefulWidget {
 
 class _RadioLyricsStageState extends State<RadioLyricsStage> {
   static const double _lineHeight = 48;
+  static const double _topPad = 16;
 
   final ScrollController _scroll = ScrollController();
   Timer? _tick;
   int _index = -1;
+
+  /// 用户正在手动拨动/拖拽歌词：期间暂停自动跟随与自动滚动，
+  /// 松手后以视口中央那一行为准重新对时（不抢用户的手）
+  bool _manual = false;
+
+  /// 刚校准完的两秒提示
+  bool _aligned = false;
+  Timer? _alignedTimer;
 
   @override
   void initState() {
@@ -38,6 +48,7 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
     // 300ms 一刷：歌词行跨度为秒级，这个频率既跟得上又不费电
     _tick = Timer.periodic(const Duration(milliseconds: 300), (_) {
       if (!mounted) return;
+      if (_manual) return; // 手在拨：不抢、不跳
       final i = RadioLyrics.instance.indexAt(widget.controller.position);
       if (i != _index) {
         setState(() => _index = i);
@@ -49,6 +60,7 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
   @override
   void dispose() {
     _tick?.cancel();
+    _alignedTimer?.cancel();
     _scroll.dispose();
     super.dispose();
   }
@@ -63,6 +75,44 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
       duration: const Duration(milliseconds: 420),
       curve: Curves.easeOutCubic,
     );
+  }
+
+  /// 手动拨动开始 → 冻结自动跟随；松手 → 以中间那行重新对时。
+  ///
+  /// 只为「用户主动拖」触发：自动 animateTo 的 start/end 通知不带
+  /// dragDetails，不会被误判成手动。
+  bool _onScroll(ScrollNotification n) {
+    if (n is ScrollStartNotification && n.dragDetails != null) {
+      _manual = true;
+    } else if (n is ScrollEndNotification && _manual) {
+      _manual = false;
+      _alignToCenter();
+    }
+    return false;
+  }
+
+  /// 把视口正中间那一行当作「此刻正在唱的句子」，重设锚点。
+  /// 长前奏/推流时间偏的情况，用户拨到正确那句松手即可，之后自动跟。
+  void _alignToCenter() {
+    final lyrics = RadioLyrics.instance;
+    final doc = lyrics.doc;
+    if (doc == null || !doc.synced || doc.lines.isEmpty) return;
+    if (!_scroll.hasClients) return;
+    final center =
+        _scroll.offset + _scroll.position.viewportDimension / 2 - _topPad;
+    final i = (center / _lineHeight)
+        .floor()
+        .clamp(0, doc.lines.length - 1);
+    lyrics.realign(i, widget.controller.position);
+    if (!mounted) return;
+    setState(() {
+      _index = i;
+      _aligned = true;
+    });
+    _alignedTimer?.cancel();
+    _alignedTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _aligned = false);
+    });
   }
 
   @override
@@ -125,16 +175,31 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               if (lyrics.midJoined)
                 const _TipChip(text: '已中途加入 · 下一首起自动同步'),
               if (!doc.synced) const _TipChip(text: '这首没有时间轴 · 整段展示'),
+              if (_aligned) const _TipChip(text: '已对齐 · 从此继续自动同步'),
               Expanded(
-                child: ListView.builder(
-                  controller: _scroll,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  itemCount: doc.lines.length,
-                  itemExtent: _lineHeight,
-                  physics: lyrics.hasAnchor
-                      ? const NeverScrollableScrollPhysics()
-                      : const BouncingScrollPhysics(),
-                  itemBuilder: (context, i) {
+                child: ScrollConfiguration(
+                  // ① dragDevices 加上 mouse：桌面端默认鼠标拖不动列表，
+                  //    加上后 Windows 能直接拽歌词；② scrollbars: false
+                  //    去掉滚动时旁边冒出来的滑条（用户要求）
+                  behavior: ScrollConfiguration.of(context).copyWith(
+                    dragDevices: {
+                      PointerDeviceKind.touch,
+                      PointerDeviceKind.mouse,
+                      PointerDeviceKind.stylus,
+                      PointerDeviceKind.trackpad,
+                    },
+                    scrollbars: false,
+                  ),
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: _onScroll,
+                    child: ListView.builder(
+                      controller: _scroll,
+                      padding: const EdgeInsets.symmetric(vertical: _topPad),
+                      itemCount: doc.lines.length,
+                      itemExtent: _lineHeight,
+                      // 始终可拖：有锚点也能手动校准（原先是禁止滚动）
+                      physics: const ClampingScrollPhysics(),
+                      itemBuilder: (context, i) {
                     final line = doc.lines[i];
                     final active = doc.synced && lyrics.hasAnchor && i == _index;
                     final near = _index >= 0 && (i - _index).abs() <= 1;
@@ -159,7 +224,9 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
                         ),
                       ),
                     );
-                  },
+                      },
+                    ),
+                  ),
                 ),
               ),
             ],
