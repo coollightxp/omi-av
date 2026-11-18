@@ -243,10 +243,7 @@ class _RadioStage extends StatelessWidget {
         if (lyrics.enabled &&
             lyrics.visible &&
             (lyrics.hasTrack || lyrics.querying || lyrics.notFound)) {
-          return RadioLyricsStage(
-            controller: controller,
-            stationName: controller.displayTitle(channel),
-          );
+          return _lyricsSplit(context);
         }
         return _infoCard(context);
       },
@@ -254,9 +251,6 @@ class _RadioStage extends StatelessWidget {
   }
 
   Widget _infoCard(BuildContext context) {
-    final ch = channel;
-    final name = controller.displayTitle(ch);
-
     return Container(
       // 与启动页同一套暖黑底，避免纯黑发灰
       decoration: const BoxDecoration(
@@ -281,156 +275,210 @@ class _RadioStage extends StatelessWidget {
               fit: BoxFit.scaleDown,
               child: SizedBox(
                 width: target,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _logo(ch, s),
-                    SizedBox(height: 26 * s),
-                    Text(
-                      name,
-                      maxLines: 1,
-                      textAlign: TextAlign.center,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 26 * s,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1,
-                      ),
+                child: _infoColumn(s),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// 中央信息卡版面：台标/台名/状态行/曲目/波形。
+  /// 普通模式（居中）与歌词分栏模式（靠左）共用同一份内容。
+  Widget _infoColumn(double s) {
+    final ch = channel;
+    final name = controller.displayTitle(ch);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _logo(ch, s),
+        SizedBox(height: 26 * s),
+        Text(
+          name,
+          maxLines: 1,
+          textAlign: TextAlign.center,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 26 * s,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 1,
+          ),
+        ),
+        SizedBox(height: 10 * s),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _LiveDot(playing: controller.uiShowsPlaying),
+            const SizedBox(width: 8),
+            Text(
+              controller.uiShowsPlaying ? '正在收听' : '已暂停',
+              style: TextStyle(
+                color: const Color(0xCCFFFFFF),
+                fontSize: 14 * s,
+              ),
+            ),
+            // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
+            const SizedBox(width: 10),
+            _AudioTag(
+              playing: controller.uiShowsPlaying,
+            ),
+            // 定时关闭实时倒计时（每秒走字，到点自动暂停）
+            ValueListenableBuilder<Duration?>(
+              valueListenable: controller.sleepCountdown,
+              builder: (context, remain, _) {
+                if (remain == null) return const SizedBox.shrink();
+                final m = remain.inMinutes;
+                final sec = remain.inSeconds % 60;
+                return Padding(
+                  padding: const EdgeInsets.only(left: 10),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.22)),
                     ),
-                    SizedBox(height: 10 * s),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        _LiveDot(playing: controller.uiShowsPlaying),
-                        const SizedBox(width: 8),
+                        const Icon(Icons.bedtime_outlined,
+                            size: 12, color: Color(0xB3FFFFFF)),
+                        const SizedBox(width: 4),
                         Text(
-                          controller.uiShowsPlaying ? '正在收听' : '已暂停',
-                          style: TextStyle(
-                            color: const Color(0xCCFFFFFF),
-                            fontSize: 14 * s,
-                          ),
+                          '$m:${sec.toString().padLeft(2, '0')}',
+                          style: const TextStyle(
+                              color: Color(0xCCFFFFFF), fontSize: 12),
                         ),
-                        // 音频流标识：一眼看出这是"只有声音"的台，不是画面没出
-                        const SizedBox(width: 10),
-                        _AudioTag(
-                          playing: controller.uiShowsPlaying,
-                        ),
-                        // 定时关闭实时倒计时（每秒走字，到点自动暂停）
-                        ValueListenableBuilder<Duration?>(
-                          valueListenable: controller.sleepCountdown,
-                          builder: (context, remain, _) {
-                            if (remain == null) return const SizedBox.shrink();
-                            final m = remain.inMinutes;
-                            final sec = remain.inSeconds % 60;
-                            return Padding(
-                              padding: const EdgeInsets.only(left: 10),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withValues(alpha: 0.08),
-                                  borderRadius: BorderRadius.circular(20),
-                                  border: Border.all(
-                                      color:
-                                          Colors.white.withValues(alpha: 0.22)),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(Icons.bedtime_outlined,
-                                        size: 12, color: Color(0xB3FFFFFF)),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      '$m:${sec.toString().padLeft(2, '0')}',
-                                      style: const TextStyle(
-                                          color: Color(0xCCFFFFFF),
-                                          fontSize: 12),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                        // 录音中徽标：红点 + 已录时长（每秒走字）
-                        if (controller.isRadioRecording)
-                          ValueListenableBuilder<Duration>(
-                            valueListenable: controller.radioRecElapsed,
-                            builder: (context, el, _) {
-                              final h = el.inHours;
-                              final m = el.inMinutes % 60;
-                              final s = el.inSeconds % 60;
-                              final two =
-                                  (int v) => v.toString().padLeft(2, '0');
-                              return Padding(
-                                padding: const EdgeInsets.only(left: 10),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: Colors.red.withValues(alpha: 0.14),
-                                    borderRadius: BorderRadius.circular(20),
-                                    border: Border.all(
-                                        color: Colors.redAccent
-                                            .withValues(alpha: 0.55)),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.fiber_manual_record,
-                                          size: 11, color: Colors.redAccent),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        'REC ${h > 0 ? '${two(h)}:' : ''}'
-                                        '${two(m)}:${two(s)}',
-                                        style: const TextStyle(
-                                            color: Color(0xE6FFFFFF),
-                                            fontSize: 12),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
                       ],
                     ),
-                    // 正在播的曲目/节目：优先 ICY 实时元数据（歌名会在
-                    // 副歌换歌时自己变），其次 EPG 节目名。单独订阅播放器值，
-                    // 避免整屏跟着 position 每 100ms 重建
-                    AnimatedBuilder(
-                      animation: Listenable.merge([controller.videoController]),
-                      builder: (context, _) {
-                        final now = _nowText();
-                        if (now.isEmpty || now == name) {
-                          return SizedBox(height: 6 * s);
-                        }
-                        return Padding(
-                          padding: EdgeInsets.only(top: 12 * s),
-                          child: Text(
-                            now,
-                            maxLines: 2,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: const Color(0xCCFFFFFF),
-                              fontSize: 15 * s,
-                              height: 1.4,
-                            ),
+                  ),
+                );
+              },
+            ),
+            // 录音中徽标：红点 + 已录时长（每秒走字）
+            if (controller.isRadioRecording)
+              ValueListenableBuilder<Duration>(
+                valueListenable: controller.radioRecElapsed,
+                builder: (context, el, _) {
+                  final h = el.inHours;
+                  final m = el.inMinutes % 60;
+                  final sec = el.inSeconds % 60;
+                  final two = (int v) => v.toString().padLeft(2, '0');
+                  return Padding(
+                    padding: const EdgeInsets.only(left: 10),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                            color: Colors.redAccent.withValues(alpha: 0.55)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.fiber_manual_record,
+                              size: 11, color: Colors.redAccent),
+                          const SizedBox(width: 4),
+                          Text(
+                            'REC ${h > 0 ? '${two(h)}:' : ''}'
+                            '${two(m)}:${two(sec)}',
+                            style: const TextStyle(
+                                color: Color(0xE6FFFFFF), fontSize: 12),
                           ),
-                        );
-                      },
+                        ],
+                      ),
                     ),
-                    // 波形压轴：离上面的信息远一点、横贯整个版面，像舞台前
-                    // 的一道声浪，而不是挤在台标底下的小装饰
-                    SizedBox(height: 44 * s),
-                    _wave(s),
-                  ],
+                  );
+                },
+              ),
+          ],
+        ),
+        // 正在播的曲目/节目：优先 ICY 实时元数据（歌名会在
+        // 副歌换歌时自己变），其次 EPG 节目名。单独订阅播放器值，
+        // 避免整屏跟着 position 每 100ms 重建
+        AnimatedBuilder(
+          animation: Listenable.merge([controller.videoController]),
+          builder: (context, _) {
+            final now = _nowText();
+            if (now.isEmpty || now == name) {
+              return SizedBox(height: 6 * s);
+            }
+            return Padding(
+              padding: EdgeInsets.only(top: 12 * s),
+              child: Text(
+                now,
+                maxLines: 2,
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: const Color(0xCCFFFFFF),
+                  fontSize: 15 * s,
+                  height: 1.4,
                 ),
               ),
             );
           },
+        ),
+        // 波形压轴：离上面的信息远一点、横贯整个版面，像舞台前
+        // 的一道声浪，而不是挤在台标底下的小装饰
+        SizedBox(height: 44 * s),
+        _wave(s),
+      ],
+    );
+  }
+
+  /// 歌词分栏版式（用户定稿）：
+  /// 左侧 = 原中央信息卡内容，整体靠左、距左边留出边距；
+  /// 右侧 = 歌词块，不满屏（上下留空）、距右边也有距离。
+  /// 整版按设计稿 1180×600 等比缩放：大屏最多放大 1.25 倍不无限撑满，
+  /// 窄屏（安卓手机）自动同步缩小，不裁不溢。
+  Widget _lyricsSplit(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: RadialGradient(
+          center: Alignment(0, -0.2),
+          radius: 1.2,
+          colors: [Color(0xFF1A1209), Color(0xFF000000)],
+        ),
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(
+            maxWidth: 1180 * 1.25,
+            maxHeight: 600 * 1.25,
+          ),
+          child: FittedBox(
+            fit: BoxFit.contain,
+            child: SizedBox(
+              width: 1180,
+              height: 600,
+              child: Row(
+                children: [
+                  // 左：台标/台名/波形（原中央信息卡内容，距左边留 56）
+                  const SizedBox(width: 56),
+                  SizedBox(
+                    width: 500,
+                    child: Center(child: _infoColumn(0.92)),
+                  ),
+                  // 中缝：两块之间留出呼吸距离
+                  const SizedBox(width: 96),
+                  // 右：歌词块（不满屏，距右边留 56）
+                  SizedBox(
+                    width: 472,
+                    height: 520,
+                    child: RadioLyricsStage(controller: controller),
+                  ),
+                  const SizedBox(width: 56),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
