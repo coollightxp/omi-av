@@ -250,6 +250,24 @@ class RadioLyrics extends ChangeNotifier {
     );
   }
 
+  /// 时间轴此刻是否可信（UI 据此决定「跟时间轴」还是「整段提词器滚动」）。
+  ///
+  /// 两种情况不可信：
+  /// - **中途加入**：进台第一首没锚点，不知道唱到第几秒；
+  /// - **位置跑飞**：播放位置已越过歌词末行 15 秒以上（切台重连、
+  ///   查词回来时歌已过半），锚点对不上。
+  ///
+  /// 不可信时不点亮任何行、改按纯文本那套自动滚动——用户要求：
+  /// 「没法按时间轴处理，就按通用歌词随便滚，别一动不动」。
+  bool axisUsable(Duration pos) {
+    final d = _doc;
+    if (d == null || !d.synced || d.lines.isEmpty) return false;
+    if (!_hasAnchor) return false;
+    var elapsed = pos - _anchorPos - Duration(milliseconds: _offsetMs);
+    if (elapsed.isNegative) elapsed = Duration.zero;
+    return elapsed <= d.lines.last.time + const Duration(seconds: 15);
+  }
+
   /// 当前该点亮第几行（-1 = 不点亮）
   int indexAt(Duration pos) {
     final d = _doc;
@@ -352,16 +370,97 @@ class RadioLyrics extends ChangeNotifier {
     return [icy, IcyTitle(icy.artist, icy.track)];
   }
 
+  /// ICY 前缀（歌手栏）→ 候选人名段。
+  ///
+  /// 电台很少老老实实只写歌手：实际见得多的是「煻(许佳慧)」
+  /// 「G.E.M. 邓紫棋」「许佳慧 / 某某 / 群星」——台标、节目名、真名
+  /// 用各种符号串成一坨。这里**把任何非文字字符都当分隔符**切开，
+  /// 每一段都是一个候选人名，逐段去和条目歌手模糊比对，有一段对上
+  /// 就认定是同一个人。
+  ///
+  /// 单字母/单字段直接丢（「G.E.M.」会切出 G/E/M，都是噪声）；
+  /// 台名/音质词（FM、音乐台、高清…）也丢，它们不是人名。
+  static List<String> _artistSegments(String raw) {
+    final out = <String>[];
+    for (final part in raw.split(RegExp(r'[^\u4e00-\u9fa5A-Za-z0-9]+'))) {
+      final v = part.trim().toLowerCase();
+      if (v.length < 2) continue;
+      if (v.endsWith('版')) continue; // 现场版/伴奏版/女声版…
+      if (_noiseWordRe.hasMatch(v)) continue;
+      if (!out.contains(v)) out.add(v);
+    }
+    return out;
+  }
+
+  /// 前缀段里的「非人名」词：台名/音质/节目形态
+  static final RegExp _noiseWordRe = RegExp(
+    r'^(fm|am|dj|hd|hq|hifi|hi-fi|live|remix|inst|instrumental|acoustic|'
+    r'cover|karaoke|demo|remaster|music|radio|'
+    r'音乐台|电台|广播|之声|频道|在线|网络|直播|节目|精选|经典|流行|'
+    r'怀旧|高清|超清|无损|原唱|伴奏|翻唱|纯音乐)$',
+    caseSensitive: false,
+  );
+
+  /// 歌名清洗：剥掉一切特殊字符，只留中文/字母/数字（用户定的规则：
+  /// 完全匹配不上就去掉括号/书名号/引号等特殊符号再匹配一次）。
+  /// 查询用（二级半）与选词打分的第二层比较共用
+  static String _cleanTrack(String t) =>
+      t.toLowerCase().replaceAll(RegExp(r'[^\u4e00-\u9fa5A-Za-z0-9]'), '');
+
+  /// 版本标注括号：词库条目歌名常写成「逆风明媚(Live)」「某某(伴奏)」
+  /// 「某某【钢琴版】」——查询与比较时剥掉（LDDC 同款做法）
+  static final RegExp _versionParenRe = RegExp(
+    r'[\(（\[【][^)）\]】]*'
+    r'(?:live|remix|inst|instrumental|acoustic|cover|karaoke|demo|remaster|'
+    r'伴奏|翻唱|现场|纯音乐|钢琴|吉他|弹唱|和声|版)'
+    r'[^)）\]】]*[\)）\]】]',
+    caseSensitive: false,
+  );
+
+  /// 歌名查询变体（逐级放宽，LDDC/网易系工具的通用做法）：
+  /// 原文 → 剥版本括号 → 全清洗（只留文字）
+  static List<String> _trackVariants(String track) {
+    final out = <String>[];
+    void add(String v) {
+      v = v.trim();
+      if (v.isNotEmpty && !out.contains(v)) out.add(v);
+    }
+
+    add(track);
+    add(track.replaceAll(_versionParenRe, ' ').replaceAll(RegExp(r'\s{2,}'), ' '));
+    final clean = _cleanTrack(track);
+    if (clean.isNotEmpty) add(clean);
+    return out;
+  }
+
   /// LRCLIB 三姿势：歌名+歌手 → 只按歌名 → 关键词模糊。
   /// 每个请求 4 秒超时，慢网不拖死整链
   static Future<List<Map<String, dynamic>>> _lrclibSearch(IcyTitle icy) async {
-    // 一级：歌名 + 歌手（LRCLIB 最准的姿势）
-    var rows = await _search(track: icy.track, artist: icy.artist)
-        .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+    // 一级：歌名 + 歌手（LRCLIB 最准的姿势）。歌手用前缀切出来的段
+    // ——「煻(许佳慧)」整串传进去词库查不到，取「许佳慧」才命中；
+    // 段按出现顺序试前两个，真名不一定排第一
+    final segs = _artistSegments(icy.artist);
+    final artists = segs.isEmpty ? const [''] : segs.take(2).toList();
+    var rows = const <Map<String, dynamic>>[];
+    for (final a in artists) {
+      if (a.isEmpty) continue;
+      rows = await _search(track: icy.track, artist: a)
+          .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+      if (rows.isNotEmpty) break;
+    }
     // 二级：只按歌名，结果里靠歌手相似度挑
     if (rows.isEmpty && icy.artist.isNotEmpty) {
       rows = await _search(track: icy.track)
           .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+    }
+    // 二级半：歌名逐级放宽查（业界做法，LDDC 同款）：剥版本括号 →
+    // 全清洗（只留文字）。词库条目歌名常带 (Live)/(伴奏)/书名号
+    if (rows.isEmpty) {
+      for (final v in _trackVariants(icy.track).skip(1)) {
+        rows = await _search(track: v)
+            .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+        if (rows.isNotEmpty) break;
+      }
     }
     // 三级：关键词模糊（曲名格式古怪时的兜底）
     if (rows.isEmpty) {
@@ -423,18 +522,21 @@ class RadioLyrics extends ChangeNotifier {
 
   /// 歌手名宽松比对：完全包含、或共享连续两字（中文）都算沾边——
   /// 「胡夏」vs「胡夏&郁可唯」通过，「S.H.E」vs「小谭同学」不通过
+  /// 错歌防护用的歌手比对：两边都按符号切段，任一段对上就算同一人。
+  /// 前缀段与对方歌手段互相包含、或共享连续两个字（「许佳慧」vs
+  /// 「许佳慧(女)」）都放行；两边都提不出人名段时不拦（信息不足，
+  /// 宁可信其有——真正的错歌由歌名分来压）
   static bool _artistLooselyMatches(String a, String b) {
-    String norm(String v) =>
-        v.toLowerCase().replaceAll(RegExp(r'[\s.·・&+/、,，+]'), '');
-    final x = norm(a);
-    final y = norm(b);
+    final x = _artistSegments(a);
+    final y = _artistSegments(b);
     if (x.isEmpty || y.isEmpty) return true;
-    if (x.contains(y) || y.contains(x)) return true;
-    for (var i = 0; i + 2 <= y.length; i++) {
-      if (x.contains(y.substring(i, i + 2))) return true;
-    }
-    for (var i = 0; i + 2 <= x.length; i++) {
-      if (y.contains(x.substring(i, i + 2))) return true;
+    for (final xs in x) {
+      for (final ys in y) {
+        if (xs.contains(ys) || ys.contains(xs)) return true;
+        for (var i = 0; i + 2 <= ys.length; i++) {
+          if (xs.contains(ys.substring(i, i + 2))) return true;
+        }
+      }
     }
     return false;
   }
@@ -444,15 +546,16 @@ class RadioLyrics extends ChangeNotifier {
   static final RegExp _creditLineRe = RegExp(
       r'^(作词|作詞|作曲|填詞|编曲|編曲|制作人|製作人|混音|母带|母帶|录音|錄音|'
       r'吉他|贝斯|貝斯|键盘|鼓|和声|和聲|弦乐|弦樂|监制|監製|统筹|統籌|出品|发行|'
-      r'發行|OP|SP|出版|MV|和音|配唱|录音室|錄音室)[：:]');
+      r'發行|OP|SP|出版|MV|和音|配唱|录音室|錄音室)\s*[：:]');
 
   static Future<LyricsDoc?> _fetchFromLrcApi(IcyTitle icy) async {
     if (icy.artist.isEmpty) return _lrcApiOnce(icy.track, '');
-    // 两个拆分假设并行问（「歌手 - 歌名」优先），先有结果的算数。
-    // 实测 G.E.M.《句号》：拆反了以后 LrcAPI 按 title=G.E.M. 邓紫棋
-    // 也问不出本尊；两个姿势都试才稳
+    // 主假设：歌名 + 前缀切出的第一个人名（「煻(许佳慧)」→ 许佳慧，
+    // 整串传进去查不到）；互换假设保留原串，兜「歌名 - 歌手」反写的台
+    final segs = _artistSegments(icy.artist);
+    final artist = segs.isNotEmpty ? segs.first : icy.artist;
     final results = await Future.wait([
-      _lrcApiOnce(icy.track, icy.artist),
+      _lrcApiOnce(icy.track, artist),
       _lrcApiOnce(icy.artist, icy.track),
     ]);
     return results[0] ?? results[1];
@@ -572,32 +675,63 @@ class RadioLyrics extends ChangeNotifier {
   /// 谁排前面就选谁——必须先按歌名筛，对不上直接强压制。
   static Map<String, dynamic>? _pick(
       List<Map<String, dynamic>> rows, IcyTitle icy) {
+    String syncedOf(Map<String, dynamic> r) =>
+        (r['syncedLyrics'] as String?)?.trim() ?? '';
+    String plainOf(Map<String, dynamic> r) =>
+        (r['plainLyrics'] as String?)?.trim() ?? '';
+
+    // 歌名先定生死：搜索结果只有一条有效条目（有词的）就是它，不再比
+    // 歌手——名先确认，歌手只用于「多条同名/近似」时的甄别。“逆风
+    // 明媚”就是这种：歌手栏被台标污染，但歌名唯一，直接认
+    final usable = [
+      for (final r in rows)
+        if (syncedOf(r).isNotEmpty || plainOf(r).isNotEmpty) r
+    ];
+    if (usable.length == 1) return usable.first;
+
     Map<String, dynamic>? best;
     var bestScore = -1;
-    final want = icy.artist.toLowerCase().trim();
+    // 歌手前缀切段（「煻(许佳慧)」→ 许佳慧），逐段比对
+    final wants = _artistSegments(icy.artist);
     final wantTrack = icy.track.toLowerCase().trim();
-    String norm(String v) => v
-        .toLowerCase()
-        .replaceAll(RegExp(r'[\s.·・&+/、,，+\-–—_]'), '');
-    final wantTrackNorm = norm(wantTrack);
     for (final r in rows) {
       var score = 0;
-      final a = ((r['artistName'] as String?) ?? '').toLowerCase();
-      if (want.isNotEmpty) {
-        if (a == want) {
-          score += 4;
-        } else if (a.contains(want) || want.contains(a)) {
-          score += 2;
+      // 歌手匹配：条目歌手名也切段，双向包含比，任一段命中即算。
+      // 相等 +4、包含 +2（取最高，别叠加）
+      final a = (r['artistName'] as String?) ?? '';
+      if (wants.isNotEmpty) {
+        final aSegs = _artistSegments(a);
+        final pool = aSegs.isEmpty ? [a.toLowerCase().trim()] : aSegs;
+        var aScore = 0;
+        for (final w in wants) {
+          for (final s in pool) {
+            if (s.isEmpty) continue;
+            if (s == w) {
+              aScore = 4;
+              break;
+            }
+            if (aScore < 2 && (s.contains(w) || w.contains(s))) aScore = 2;
+          }
+          if (aScore == 4) break;
         }
+        score += aScore;
       }
-      // 歌名匹配（同歌手不同歌防护）：条目歌名与请求歌名（去掉版本
-      // 后缀如「 - Full Stop」后再比）相等 +5、包含 +3、完全不沾 -2
-      final t = norm(((r['trackName'] as String?) ?? ''));
-      if (wantTrackNorm.isNotEmpty) {
-        if (t == wantTrackNorm) {
+      // 歌名匹配（同歌手不同歌防护），层层放宽（业界做法）：
+      // ① 原文精确相等 +5；② 剥特殊字符后相等 +4（含繁简归一——
+      // 港台条目是繁体名，用 OpenCC 都转简体再比；词表未加载时
+      // convert 原样返回，无害）；③ 互相包含 +3；完全不沾 -2
+      final tRaw = ((r['trackName'] as String?) ?? '').toLowerCase().trim();
+      final t = ChineseVariantConverter.instance
+          .convert(_cleanTrack(tRaw), ChineseVariantConverter.modeSimplified);
+      final wantClean = ChineseVariantConverter.instance
+          .convert(_cleanTrack(wantTrack), ChineseVariantConverter.modeSimplified);
+      if (wantTrack.isNotEmpty) {
+        if (tRaw == wantTrack) {
           score += 5;
-        } else if (t.contains(wantTrackNorm) ||
-            wantTrackNorm.contains(t)) {
+        } else if (wantClean.isNotEmpty && t == wantClean) {
+          score += 4;
+        } else if (wantClean.isNotEmpty &&
+            (t.contains(wantClean) || wantClean.contains(t))) {
           score += 3;
         } else {
           score -= 2;
@@ -638,8 +772,11 @@ class RadioLyrics extends ChangeNotifier {
     var s = raw.trim();
     // 【xxx】前缀标签（很多台这么写）
     s = s.replaceAll(RegExp(r'【[^】]*】'), ' ');
-    // 去掉括号里的版本标注：查询时不需要，反而降低命中率
-    s = s.replaceAll(RegExp(r'[（(][^）)]*[）)]'), ' ');
+    // 括号不能连内容一起删：不少台写成「煻(许佳慧) - 逆风明媚」，
+    // 歌手真名就在括号里，删了就只剩台标「煻」。括号本身当分隔符
+    // （换成空格），内容留给歌手候选切段；Live/伴奏/xx版 这类版本
+    // 标注由 _artistSegments 的词表过滤掉
+    s = s.replaceAll(RegExp(r'[（()）]'), ' ');
     s = s.replaceAll(RegExp(r'\s{2,}'), ' ').trim();
 
     for (final sep in const [' - ', ' – ', ' — ', '-', '－', '–', '—', '|']) {
@@ -648,7 +785,21 @@ class RadioLyrics extends ChangeNotifier {
       final left = s.substring(0, i).trim();
       final right = s.substring(i + sep.length).trim();
       if (left.isEmpty || right.isEmpty) continue;
-      return IcyTitle(_tidy(right), _tidy(left));
+      // feat 剥离（业界做法）：「晴天 (feat. 王力宏)」里 feat 后面的
+      // 人是合作者不是歌名的一部分——归入歌手栏，切段后参与比对
+      var track = _tidy(right);
+      var artist = _tidy(left);
+      final fm = RegExp(
+              r'[\s]*[\(（\[【]?\s*(?:feat\.?|ft\.?|featuring)\s*[:：]?\s*'
+              r'([^)）\]】]+)[\)）\]】]?\s*$',
+              caseSensitive: false)
+          .firstMatch(track);
+      if (fm != null) {
+        final featName = fm.group(1)!.trim();
+        track = _tidy(track.substring(0, fm.start));
+        if (featName.isNotEmpty) artist = _tidy('$artist $featName');
+      }
+      return IcyTitle(track, artist);
     }
     return IcyTitle(_tidy(s), '');
   }
@@ -677,6 +828,10 @@ class RadioLyrics extends ChangeNotifier {
       var text = raw.replaceAll(tagRe, '').trim();
       if (text.isEmpty) continue;
       text = _stripInlineTranslation(text);
+      // 制作名单行：LrcAPI 的词源自酷狗/网易，开头常挂「作词 : 月落」
+      // 「作曲 : xxx」一串，带时间轴时会被当成正常歌词行显示——
+      // 实测《逆风明媚》前 10 行全是这个，正片从 0:28 才开始
+      if (_creditLineRe.hasMatch(text)) continue;
       for (final m in matches) {
         final min = int.tryParse(m.group(1)!) ?? 0;
         final sec = int.tryParse(m.group(2)!) ?? 0;

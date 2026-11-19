@@ -48,7 +48,11 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
     // 300ms 一刷：歌词行跨度为秒级，这个频率既跟得上又不费电
     _tick = Timer.periodic(const Duration(milliseconds: 300), (_) {
       if (!mounted) return;
-      final i = RadioLyrics.instance.indexAt(widget.controller.position);
+      final lyrics = RadioLyrics.instance;
+      // 时间轴不可信（中途加入/位置跑飞）：不点亮，交给提词器滚动
+      final i = lyrics.axisUsable(widget.controller.position)
+          ? lyrics.indexAt(widget.controller.position)
+          : -1;
       if (i != _index) {
         setState(() => _index = i);
         _scrollTo(i);
@@ -79,9 +83,13 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
   /// 纯文本歌词（没有时间轴、无从点亮）自动慢慢往下走，像提词器。
   /// 一屏装不下一整首，用户（尤其手机上不能拖）靠它看全全文。
   /// 用户刚手动滚过（桌面鼠标拖）就先让路 4 秒；滚到底停 3 秒回顶循环。
+  /// 带时间轴但**锚点不可信**（中途加入 / 位置跑飞）也走这套——
+  /// 用户定的规则：没法对时间轴就按通用歌词滚，别一动不动。
   void _autoScrollPlain() {
-    final doc = RadioLyrics.instance.doc;
-    if (doc == null || doc.synced) return;
+    final lyrics = RadioLyrics.instance;
+    final doc = lyrics.doc;
+    if (doc == null) return;
+    if (doc.synced && lyrics.axisUsable(widget.controller.position)) return;
     if (!_scroll.hasClients) return;
     final pos = _scroll.position;
     final max = pos.maxScrollExtent;
@@ -160,10 +168,14 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
           );
         } else {
           final doc = lyrics.doc!;
+          // 时间轴此刻能不能用：中途加入（进台第一首不知道唱到哪）、
+          // 位置跑飞（越过末行）时不能用，走整段提词器滚动
+          final axisOk =
+              doc.synced && lyrics.axisUsable(widget.controller.position);
           body = Column(
             children: [
               // 有非零偏移时挂个角标：关掉设置面板后也能确认微调还在生效
-              if (lyrics.offsetMs != 0 && doc.synced && lyrics.hasAnchor)
+              if (lyrics.offsetMs != 0 && axisOk)
                 _TipChip(text: '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}'),
               // 简繁档位角标：确认「设置里的简繁转换」真的到了歌词层。
               // 词表没加载出来时明确说出来（正常是随包资源秒加载；
@@ -171,7 +183,9 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               if (lyrics.variant != 0)
                 _TipChip(text: _variantChipText(lyrics.variant)),
               if (lyrics.midJoined)
-                const _TipChip(text: '已中途加入 · 下一首起自动同步'),
+                const _TipChip(text: '已中途加入 · 自动滚动，下一首起按时间轴同步')
+              else if (!axisOk && doc.synced)
+                const _TipChip(text: '位置未知 · 自动滚动'),
               if (!doc.synced) const _TipChip(text: '这首没有时间轴 · 整段展示'),
               Expanded(
                 child: ScrollConfiguration(
@@ -191,24 +205,23 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
                     padding: const EdgeInsets.symmetric(vertical: _topPad),
                     itemCount: doc.lines.length,
                     itemExtent: _lineHeight,
-                    // 带时间轴：纯显示，禁止拖动（拖动会跟右侧音量手势
-                    // 打架），自动跟随走 animateTo 不受影响。
-                    // 纯文本（无时间轴）：桌面放开拖动/滚轮——用户要
+                    // 带时间轴且位置可信：纯显示，禁止拖动（拖动会跟
+                    // 右侧音量手势打架），自动跟随走 animateTo 不受影响。
+                    // 无时间轴/位置不可信：桌面放开拖动/滚轮——用户要
                     // 看全一整首；手机仍锁（右半边是音量手势区），
                     // 靠上面的自动滚动浏览全文
-                    physics: doc.synced
+                    physics: axisOk
                         ? const NeverScrollableScrollPhysics()
                         : (widget.controller.isDesktop
                             ? const ClampingScrollPhysics()
                             : const NeverScrollableScrollPhysics()),
                     itemBuilder: (context, i) {
                       final line = doc.lines[i];
-                      final active =
-                          doc.synced && lyrics.hasAnchor && i == _index;
+                      final active = axisOk && i == _index;
                       final near = _index >= 0 && (i - _index).abs() <= 1;
-                      // 纯文本（无时间轴）整首都要能读：用亮的常规样式，
-                      // 不走「上下句淡化」那套（那套是为了突出当前句）
-                      final plain = !doc.synced;
+                      // 整段展示（无时间轴 / 时间轴不可信）整首都要能读：
+                      // 用亮的常规样式，不走「上下句淡化」那套
+                      final plain = !axisOk;
                       return Center(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 16),
