@@ -332,6 +332,24 @@ class RadioLyrics extends ChangeNotifier {
   /// 界面走「查无歌词」，不影响播放。
   static const String _lrcApiBase = 'https://api.lrc.cx/lyrics';
 
+  /// 歌手名宽松比对：完全包含、或共享连续两字（中文）都算沾边——
+  /// 「胡夏」vs「胡夏&郁可唯」通过，「S.H.E」vs「小谭同学」不通过
+  static bool _artistLooselyMatches(String a, String b) {
+    String norm(String v) =>
+        v.toLowerCase().replaceAll(RegExp(r'[\s.·・&+/、,，+]'), '');
+    final x = norm(a);
+    final y = norm(b);
+    if (x.isEmpty || y.isEmpty) return true;
+    if (x.contains(y) || y.contains(x)) return true;
+    for (var i = 0; i + 2 <= y.length; i++) {
+      if (x.contains(y.substring(i, i + 2))) return true;
+    }
+    for (var i = 0; i + 2 <= x.length; i++) {
+      if (y.contains(x.substring(i, i + 2))) return true;
+    }
+    return false;
+  }
+
   /// 制作名单行：作词/作曲/编曲…开头的元信息行，纯文本歌词里整段
   /// 展示时不需要（电台场景用户只想看歌词本身）
   static final RegExp _creditLineRe = RegExp(
@@ -369,6 +387,20 @@ class RadioLyrics extends ChangeNotifier {
       // 解析失败 = 普通文本/LRC，继续
     }
     final lines = parseLrc(body);
+    // 错歌防护：LrcAPI 有时只按标题匹配，返回**同名的另一首歌**
+    // （实测：请求 S.H.E《怎么办》，返回小谭同学《怎么办》，词曲全对
+    // 不上）。这类 LRC 首行往往是「歌名 - 歌手」形态，歌手与请求的
+    // 对不上 → 视为错歌弃用，宁可查无也不放错词。
+    if (lines.isNotEmpty && icy.artist.isNotEmpty) {
+      final m = RegExp(r'^(.{1,40}?)\s*[-–—]\s*(.{1,30})$')
+          .firstMatch(lines.first.text.trim());
+      if (m != null &&
+          !_artistLooselyMatches(icy.artist, m.group(2)!.trim())) {
+        debugPrint('[Lyrics] LrcAPI 疑似错歌: ${lines.first.text} (要: '
+            '${icy.artist} - ${icy.track})');
+        return null;
+      }
+    }
     if (lines.isEmpty) {
       // 纯文本歌词：LrcAPI 用 `[!text]` 前缀标记无时间轴版本（如
       // 枯木逢春《我们总会在夏天相遇》）。整段展示（与 LRCLIB 纯文本
