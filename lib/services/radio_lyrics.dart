@@ -229,7 +229,9 @@ class RadioLyrics extends ChangeNotifier {
     notifyListeners();
     LyricsDoc? doc;
     try {
-      doc = await fetchLyrics(t).timeout(const Duration(seconds: 8));
+      // 并行架构下最长路径 = LRCLIB 三姿势各 4s = 12s；LrcAPI 兜底
+      // 自身 5s 必出结果，总闸放到 15s 保证兜底总能被等到
+      doc = await fetchLyrics(t).timeout(const Duration(seconds: 15));
     } catch (e) {
       debugPrint('[Lyrics] query failed: $e');
       doc = null;
@@ -244,26 +246,49 @@ class RadioLyrics extends ChangeNotifier {
   }
 
   /// 曲名 → 歌词（供测试/调试直接调用）
+  ///
+  /// 两路**并行**：LRCLIB 主路（三个姿势）+ LrcAPI 兜底路同时出发。
+  /// 旧版是串行「LRCLIB 问完才轮到 LrcAPI」，而整个链条共享 8 秒总
+  /// 超时——LRCLIB 在国内访问经常慢，三个请求一卡 8 秒就烧完，直接
+  /// 判「查无」，兜底根本轮不到跑。并行后 LrcAPI 先到就先算数；主路
+  /// 命中时优先主路（带时间轴、质量更高）。
   static Future<LyricsDoc?> fetchLyrics(String rawTitle) async {
     final icy = parseIcyTitle(rawTitle);
     if (icy.track.isEmpty) return null;
 
-    // 一级：歌名 + 歌手（LRCLIB 最准的姿势）
-    var rows = await _search(track: icy.track, artist: icy.artist);
-    // 二级：只按歌名，结果里靠歌手相似度挑
-    if (rows.isEmpty && icy.artist.isNotEmpty) {
-      rows = await _search(track: icy.track);
-    }
-    // 三级：关键词模糊（曲名格式古怪时的兜底）
-    if (rows.isEmpty) {
-      rows = await _search(q: rawTitle.trim());
-    }
-    // LRCLIB 三个姿势都没搜到：兜底 LrcAPI（中文覆盖好得多）
-    if (rows.isEmpty) return _fetchFromLrcApi(icy);
+    // 兜底路立刻出发，不等主路
+    final fallback = _fetchFromLrcApi(icy);
 
-    final best = _pick(rows, icy.artist);
-    if (best == null) return _fetchFromLrcApi(icy);
+    LyricsDoc? fromLrclib;
+    try {
+      // 一级：歌名 + 歌手（LRCLIB 最准的姿势）
+      var rows = await _search(track: icy.track, artist: icy.artist)
+          .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+      // 二级：只按歌名，结果里靠歌手相似度挑
+      if (rows.isEmpty && icy.artist.isNotEmpty) {
+        rows = await _search(track: icy.track)
+            .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+      }
+      // 三级：关键词模糊（曲名格式古怪时的兜底）
+      if (rows.isEmpty) {
+        rows = await _search(q: rawTitle.trim())
+            .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+      }
+      if (rows.isNotEmpty) {
+        final best = _pick(rows, icy.artist);
+        if (best != null) fromLrclib = _docFromLrclibRow(best, icy);
+      }
+    } catch (_) {
+      // LRCLIB 网络层挂了：不拖累整体，还有并行在跑的 LrcAPI
+      fromLrclib = null;
+    }
+    if (fromLrclib != null && fromLrclib.lines.isNotEmpty) return fromLrclib;
+    return fallback;
+  }
 
+  /// LRCLIB 行 → 歌词文档（fetchLyrics 与调用方解耦出的纯转换）
+  static LyricsDoc? _docFromLrclibRow(
+      Map<String, dynamic> best, IcyTitle icy) {
     final synced = (best['syncedLyrics'] as String?)?.trim() ?? '';
     final plain = (best['plainLyrics'] as String?)?.trim() ?? '';
     final durSec = (best['duration'] as num?)?.toInt();
@@ -278,8 +303,9 @@ class RadioLyrics extends ChangeNotifier {
         duration: durSec == null ? null : Duration(seconds: durSec),
       );
     }
-    // LRCLIB 有条目但没歌词（空壳/纯音乐标记）：同样兜底 LrcAPI
-    if (synced.isEmpty && plain.isEmpty) return _fetchFromLrcApi(icy);
+    // LRCLIB 有条目但没歌词（空壳/纯音乐标记）：返回 null，
+    // 由 fetchLyrics 统一落到并行的 LrcAPI 兜底
+    if (synced.isEmpty && plain.isEmpty) return null;
     if (plain.isNotEmpty) {
       final lines = [
         for (final l in const LineSplitter().convert(plain))
