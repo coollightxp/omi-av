@@ -313,31 +313,30 @@ class RadioLyrics extends ChangeNotifier {
   /// 超时——LRCLIB 在国内访问经常慢，三个请求一卡 8 秒就烧完，直接
   /// 判「查无」，兜底根本轮不到跑。并行后 LrcAPI 先到就先算数；主路
   /// 命中时优先主路（带时间轴、质量更高）。
+  ///
+  /// 拆分假设（v2.3.55）：ICY 拆分一律按「歌手 - 歌名」解析，但个别
+  /// 台是「歌名 - 歌手」反着推的——主假设三级查完仍无结果时，把歌
+  /// 名/歌手**左右互换**再查一轮（[G.E.M.《句号》那次就是拆分错位
+  /// 导致的同歌手错歌]）。
   static Future<LyricsDoc?> fetchLyrics(String rawTitle) async {
     final icy = parseIcyTitle(rawTitle);
     if (icy.track.isEmpty) return null;
 
-    // 兜底路立刻出发，不等主路
+    // 兜底路立刻出发，不等主路（两个拆分假设都试，先有结果的算数）
     final fallback = _fetchFromLrcApi(icy);
 
     LyricsDoc? fromLrclib;
     try {
-      // 一级：歌名 + 歌手（LRCLIB 最准的姿势）
-      var rows = await _search(track: icy.track, artist: icy.artist)
-          .timeout(const Duration(seconds: 4), onTimeout: () => const []);
-      // 二级：只按歌名，结果里靠歌手相似度挑
-      if (rows.isEmpty && icy.artist.isNotEmpty) {
-        rows = await _search(track: icy.track)
-            .timeout(const Duration(seconds: 4), onTimeout: () => const []);
-      }
-      // 三级：关键词模糊（曲名格式古怪时的兜底）
-      if (rows.isEmpty) {
-        rows = await _search(q: rawTitle.trim())
-            .timeout(const Duration(seconds: 4), onTimeout: () => const []);
-      }
-      if (rows.isNotEmpty) {
-        final best = _pick(rows, icy.artist);
-        if (best != null) fromLrclib = _docFromLrclibRow(best, icy);
+      for (final cand in _icyCandidates(icy)) {
+        final rows = await _lrclibSearch(cand);
+        if (rows.isEmpty) continue;
+        final best = _pick(rows, cand);
+        if (best == null) continue;
+        final doc = _docFromLrclibRow(best, cand);
+        if (doc != null && doc.lines.isNotEmpty) {
+          fromLrclib = doc;
+          break;
+        }
       }
     } catch (_) {
       // LRCLIB 网络层挂了：不拖累整体，还有并行在跑的 LrcAPI
@@ -345,6 +344,34 @@ class RadioLyrics extends ChangeNotifier {
     }
     if (fromLrclib != null && fromLrclib.lines.isNotEmpty) return fromLrclib;
     return fallback;
+  }
+
+  /// 拆分假设列表：主假设（歌手 - 歌名）优先，互换假设兜底
+  static List<IcyTitle> _icyCandidates(IcyTitle icy) {
+    if (icy.artist.isEmpty || icy.artist == icy.track) return [icy];
+    return [icy, IcyTitle(icy.artist, icy.track)];
+  }
+
+  /// LRCLIB 三姿势：歌名+歌手 → 只按歌名 → 关键词模糊。
+  /// 每个请求 4 秒超时，慢网不拖死整链
+  static Future<List<Map<String, dynamic>>> _lrclibSearch(IcyTitle icy) async {
+    // 一级：歌名 + 歌手（LRCLIB 最准的姿势）
+    var rows = await _search(track: icy.track, artist: icy.artist)
+        .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+    // 二级：只按歌名，结果里靠歌手相似度挑
+    if (rows.isEmpty && icy.artist.isNotEmpty) {
+      rows = await _search(track: icy.track)
+          .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+    }
+    // 三级：关键词模糊（曲名格式古怪时的兜底）
+    if (rows.isEmpty) {
+      final q = icy.artist.isEmpty
+          ? icy.track
+          : '${icy.artist} - ${icy.track}';
+      rows = await _search(q: q)
+          .timeout(const Duration(seconds: 4), onTimeout: () => const []);
+    }
+    return rows;
   }
 
   /// LRCLIB 行 → 歌词文档（fetchLyrics 与调用方解耦出的纯转换）
@@ -420,9 +447,21 @@ class RadioLyrics extends ChangeNotifier {
       r'發行|OP|SP|出版|MV|和音|配唱|录音室|錄音室)[：:]');
 
   static Future<LyricsDoc?> _fetchFromLrcApi(IcyTitle icy) async {
-    if (icy.track.isEmpty) return null;
-    final params = <String, String>{'title': icy.track};
-    if (icy.artist.isNotEmpty) params['artist'] = icy.artist;
+    if (icy.artist.isEmpty) return _lrcApiOnce(icy.track, '');
+    // 两个拆分假设并行问（「歌手 - 歌名」优先），先有结果的算数。
+    // 实测 G.E.M.《句号》：拆反了以后 LrcAPI 按 title=G.E.M. 邓紫棋
+    // 也问不出本尊；两个姿势都试才稳
+    final results = await Future.wait([
+      _lrcApiOnce(icy.track, icy.artist),
+      _lrcApiOnce(icy.artist, icy.track),
+    ]);
+    return results[0] ?? results[1];
+  }
+
+  static Future<LyricsDoc?> _lrcApiOnce(String title, String artist) async {
+    if (title.isEmpty) return null;
+    final params = <String, String>{'title': title};
+    if (artist.isNotEmpty) params['artist'] = artist;
     final uri = Uri.parse(_lrcApiBase).replace(queryParameters: params);
     final http.Response resp;
     try {
@@ -453,13 +492,13 @@ class RadioLyrics extends ChangeNotifier {
     // （实测：请求 S.H.E《怎么办》，返回小谭同学《怎么办》，词曲全对
     // 不上）。这类 LRC 首行往往是「歌名 - 歌手」形态，歌手与请求的
     // 对不上 → 视为错歌弃用，宁可查无也不放错词。
-    if (lines.isNotEmpty && icy.artist.isNotEmpty) {
+    if (lines.isNotEmpty && artist.isNotEmpty) {
       final m = RegExp(r'^(.{1,40}?)\s*[-–—]\s*(.{1,30})$')
           .firstMatch(lines.first.text.trim());
       if (m != null &&
-          !_artistLooselyMatches(icy.artist, m.group(2)!.trim())) {
+          !_artistLooselyMatches(artist, m.group(2)!.trim())) {
         debugPrint('[Lyrics] LrcAPI 疑似错歌: ${lines.first.text} (要: '
-            '${icy.artist} - ${icy.track})');
+            '$artist - $title)');
         return null;
       }
     }
@@ -477,22 +516,22 @@ class RadioLyrics extends ChangeNotifier {
       }
       if (plain.isEmpty) return null;
       return LyricsDoc(
-          title: icy.track, artist: icy.artist, lines: plain, synced: false);
+          title: title, artist: artist, lines: plain, synced: false);
     }
-    var title = icy.track;
-    var artist = icy.artist;
+    var docTitle = title;
+    var docArtist = artist;
     for (final l in const LineSplitter().convert(body)) {
       final m = RegExp(r'^\[(ti|ar):(.*)\]\s*$').firstMatch(l.trim());
       if (m == null) continue;
       final v = m.group(2)!.trim();
       if (v.isEmpty) continue;
       if (m.group(1) == 'ti') {
-        title = v;
+        docTitle = v;
       } else {
-        artist = v;
+        docArtist = v;
       }
     }
-    return LyricsDoc(title: title, artist: artist, lines: lines);
+    return LyricsDoc(title: docTitle, artist: docArtist, lines: lines);
   }
 
   static Future<List<Map<String, dynamic>>> _search({
@@ -526,13 +565,21 @@ class RadioLyrics extends ChangeNotifier {
     ];
   }
 
-  /// 挑最优：带时间轴 > 歌手匹配 > 时长有值（可做版本甄别）。
-  /// 时长在这里没有对照物（直播流没有「本曲总长」），只作为质量权重。
+  /// 挑最优：**歌名匹配 > 带时间轴 > 歌手匹配 > 时长有值**。
+  ///
+  /// 歌名匹配是 v2.3.55 加的第一道闸（G.E.M.《句号》显示成《泡沫》
+  /// 的教训）：按歌手搜出来一串同歌手的歌时，歌手分大家都一样高，
+  /// 谁排前面就选谁——必须先按歌名筛，对不上直接强压制。
   static Map<String, dynamic>? _pick(
-      List<Map<String, dynamic>> rows, String artist) {
+      List<Map<String, dynamic>> rows, IcyTitle icy) {
     Map<String, dynamic>? best;
     var bestScore = -1;
-    final want = artist.toLowerCase().trim();
+    final want = icy.artist.toLowerCase().trim();
+    final wantTrack = icy.track.toLowerCase().trim();
+    String norm(String v) => v
+        .toLowerCase()
+        .replaceAll(RegExp(r'[\s.·・&+/、,，+\-–—_]'), '');
+    final wantTrackNorm = norm(wantTrack);
     for (final r in rows) {
       var score = 0;
       final a = ((r['artistName'] as String?) ?? '').toLowerCase();
@@ -541,6 +588,19 @@ class RadioLyrics extends ChangeNotifier {
           score += 4;
         } else if (a.contains(want) || want.contains(a)) {
           score += 2;
+        }
+      }
+      // 歌名匹配（同歌手不同歌防护）：条目歌名与请求歌名（去掉版本
+      // 后缀如「 - Full Stop」后再比）相等 +5、包含 +3、完全不沾 -2
+      final t = norm(((r['trackName'] as String?) ?? ''));
+      if (wantTrackNorm.isNotEmpty) {
+        if (t == wantTrackNorm) {
+          score += 5;
+        } else if (t.contains(wantTrackNorm) ||
+            wantTrackNorm.contains(t)) {
+          score += 3;
+        } else {
+          score -= 2;
         }
       }
       final synced = (r['syncedLyrics'] as String?)?.trim() ?? '';
@@ -567,6 +627,13 @@ class RadioLyrics extends ChangeNotifier {
   ///
   /// 处理：去【】标签、括号里的版本标注（Live/伴奏/DJ 版）不参与查询
   /// 但也不算错误、多个分隔符都认、压缩空白。
+  ///
+  /// 拆分一律按「左 = 歌手、右 = 歌名」处理（v2.3.55 定稿）。旧版有
+  /// 个「左边短右边长才算歌手-歌名」的长度启发式，在**歌手名比歌名
+  /// 长得多**时会判反（实测 G.E.M.《句号》：「G.E.M. 邓紫棋 - 句号」
+  /// 9 字 > 2+6 → 歌名当成了歌手、歌手当成了歌名，查不到本尊，
+  /// 按歌手乱挑选中了《泡沫》——同歌手错歌）。判断反了不要紧：
+  /// [fetchLyrics] 里还有第二个假设（左右互换）兜着。
   static IcyTitle parseIcyTitle(String raw) {
     var s = raw.trim();
     // 【xxx】前缀标签（很多台这么写）
@@ -581,11 +648,7 @@ class RadioLyrics extends ChangeNotifier {
       final left = s.substring(0, i).trim();
       final right = s.substring(i + sep.length).trim();
       if (left.isEmpty || right.isEmpty) continue;
-      // 左边短、右边长 → 多半是「歌手 - 歌名」
-      if (left.length <= right.length + 6) {
-        return IcyTitle(_tidy(right), _tidy(left));
-      }
-      return IcyTitle(_tidy(left), _tidy(right));
+      return IcyTitle(_tidy(right), _tidy(left));
     }
     return IcyTitle(_tidy(s), '');
   }
