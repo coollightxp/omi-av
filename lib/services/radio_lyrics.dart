@@ -51,7 +51,9 @@ class IcyTitle {
 /// 电台逐句歌词（待办 L）。
 ///
 /// 设计要点（2026-11-18 与用户逐条定稿）：
-/// - **词源**：LRCLIB（免费、无 Key、带 LRC 时间轴），单源，查不到就明示「查无歌词」；
+/// - **词源**：两级，查到即停——LRCLIB（免费、无 Key、带 LRC 时间轴）
+///   查不到/只有空壳时，兜底 LrcAPI 公共实例 `api.lrc.cx`（聚合酷狗/
+///   网易云/咪咕，中文覆盖好，实测能查到 LRCLIB 空壳的中文歌）；
 /// - **锚点**：曲名变化那一刻记下播放位置 = 新歌第 0 秒，误差偏慢、不累积；
 /// - **中途进台**：进台第一首不知道唱到哪，歌词照显示但不点亮，下一首起精确同步；
 /// - **切台**：显示意图跨台记忆（想不想看是用户选择），歌词数据随台清空；
@@ -256,10 +258,11 @@ class RadioLyrics extends ChangeNotifier {
     if (rows.isEmpty) {
       rows = await _search(q: rawTitle.trim());
     }
-    if (rows.isEmpty) return null;
+    // LRCLIB 三个姿势都没搜到：兜底 LrcAPI（中文覆盖好得多）
+    if (rows.isEmpty) return _fetchFromLrcApi(icy);
 
     final best = _pick(rows, icy.artist);
-    if (best == null) return null;
+    if (best == null) return _fetchFromLrcApi(icy);
 
     final synced = (best['syncedLyrics'] as String?)?.trim() ?? '';
     final plain = (best['plainLyrics'] as String?)?.trim() ?? '';
@@ -275,6 +278,8 @@ class RadioLyrics extends ChangeNotifier {
         duration: durSec == null ? null : Duration(seconds: durSec),
       );
     }
+    // LRCLIB 有条目但没歌词（空壳/纯音乐标记）：同样兜底 LrcAPI
+    if (synced.isEmpty && plain.isEmpty) return _fetchFromLrcApi(icy);
     if (plain.isNotEmpty) {
       final lines = [
         for (final l in const LineSplitter().convert(plain))
@@ -290,6 +295,55 @@ class RadioLyrics extends ChangeNotifier {
       );
     }
     return null;
+  }
+
+  /// 兜底词源：LrcAPI（HisAtri/LrcApi 开源聚合项目，公共实例
+  /// `api.lrc.cx`）。`GET /lyrics?title=&artist=` 直接返回 LRC 全文，
+  /// 空响应/404 = 没有。返回的是整段 LRC 文本，[ar:][ti:] 头没有时间
+  /// 戳，parseLrc 会自动跳过；曲名/歌手从头部捞，捞不到用 ICY 拆的。
+  ///
+  /// 这个源是社区项目，公共实例可能限流或下线——失败静默返回 null，
+  /// 界面走「查无歌词」，不影响播放。
+  static const String _lrcApiBase = 'https://api.lrc.cx/lyrics';
+
+  static Future<LyricsDoc?> _fetchFromLrcApi(IcyTitle icy) async {
+    if (icy.track.isEmpty) return null;
+    final params = <String, String>{'title': icy.track};
+    if (icy.artist.isNotEmpty) params['artist'] = icy.artist;
+    final uri = Uri.parse(_lrcApiBase).replace(queryParameters: params);
+    final http.Response resp;
+    try {
+      resp = await http
+          .get(uri, headers: {'User-Agent': _ua})
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      return null;
+    }
+    if (resp.statusCode != 200) {
+      debugPrint('[Lyrics] LrcAPI ${resp.statusCode} for $uri');
+      return null;
+    }
+    final body = utf8.decode(resp.bodyBytes).trim();
+    // 200 但返回 JSON 错误体/空串：不算歌词
+    if (body.isEmpty || body.startsWith('{') || body.startsWith('[')) {
+      return null;
+    }
+    final lines = parseLrc(body);
+    if (lines.isEmpty) return null;
+    var title = icy.track;
+    var artist = icy.artist;
+    for (final l in const LineSplitter().convert(body)) {
+      final m = RegExp(r'^\[(ti|ar):(.*)\]\s*$').firstMatch(l.trim());
+      if (m == null) continue;
+      final v = m.group(2)!.trim();
+      if (v.isEmpty) continue;
+      if (m.group(1) == 'ti') {
+        title = v;
+      } else {
+        artist = v;
+      }
+    }
+    return LyricsDoc(title: title, artist: artist, lines: lines);
   }
 
   static Future<List<Map<String, dynamic>>> _search({
