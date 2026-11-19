@@ -324,9 +324,16 @@ class RadioLyrics extends ChangeNotifier {
       return null;
     }
     final body = utf8.decode(resp.bodyBytes).trim();
-    // 200 但返回 JSON 错误体/空串：不算歌词
-    if (body.isEmpty || body.startsWith('{') || body.startsWith('[')) {
-      return null;
+    if (body.isEmpty) return null;
+    // 200 但返回 JSON 错误体（如 {"error":...}）：不算歌词。
+    // 不能用 startsWith('[') 判断——LRC 歌词本身就以 [Verse]/[ti:] 这类
+    // 方括号标签开头（v2.3.47 曾因此把整源歌词全部误杀，用户两首歌
+    // 「两个词源都查不到」就是它干的），这里改为真的 JSON 解析成功才算错
+    try {
+      jsonDecode(body);
+      return null; // 能被解析成 JSON = 错误体，不是歌词
+    } on FormatException {
+      // 解析失败 = 普通文本/LRC，继续
     }
     final lines = parseLrc(body);
     if (lines.isEmpty) return null;
