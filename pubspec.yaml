@@ -1,7 +1,7 @@
 name: omi
 description: 欧米视听 (Omi) — 跨平台直播视听应用：电视直播、电台、投屏接收。
 publish_to: 'none'
-version: 2.3.52+123
+version: 2.3.53+124
 
 environment:
   sdk: '>=3.10.0 <4.0.0'
@@ -115,6 +115,9 @@ flutter:
     - assets/cctv/
     # Windows 系统托盘图标（后台播放/摸鱼模式）
     - assets/tray/
+    # 歌词简繁转换词表（OpenCC，Apache-2.0）：词组表优先最长匹配，
+    # 字表单字兜底，避免「头发→頭發」这类一简对多繁的错字
+    - assets/opencc/
 
 # fork 的 media_kit_video 锁 wakelock_plus 1.3.3（win32 5.x），与
 # share_plus 13（win32 6.x）冲突；wakelock 1.8.2 用的也是 win32 6，

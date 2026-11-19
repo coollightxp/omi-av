@@ -2821,6 +2821,36 @@ class _SystemSettingsTab extends StatelessWidget {
                   ],
                 ),
               ),
+            // 歌词简繁转换（0 原文 / 1 简体 / 2 繁体）：很多词源只放
+            // 繁体 LRC，转简体好认；喜欢繁体的也能把简体歌词转成繁体。
+            // 只加工已查到的歌词文本，切换即时生效，不动词源请求。
+            // 样式对齐「自动重试次数」的分段按钮
+            if (s.lyricsEnabled)
+              ListTile(
+                leading: const Icon(Icons.translate, color: Colors.white54),
+                title: const Text('歌词简繁转换',
+                    style: TextStyle(color: Colors.white, fontSize: 15)),
+                subtitle: const Text(
+                  '很多词源只放繁体歌词，可以转成简体看；喜欢繁体的也能把简体歌词转成繁体\n'
+                  '词组优先转换（OpenCC 词表随包发布），「头发」不会转成「頭發」；'
+                  '改完立刻生效，不用等下一首',
+                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                trailing: SegmentedButton<int>(
+                  showSelectedIcon: false,
+                  style: const ButtonStyle(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  segments: const [
+                    ButtonSegment(value: 0, label: Text('原文')),
+                    ButtonSegment(value: 1, label: Text('简体')),
+                    ButtonSegment(value: 2, label: Text('繁体')),
+                  ],
+                  selected: {s.lyricsVariant.clamp(0, 2)},
+                  onSelectionChanged: (sel) =>
+                      controller.setLyricsVariant(sel.first),
+                ),
+              ),
             // 网页直播支持：关闭后启动不加载 WebView2 运行时环境，
             // 网页频道（webview:// 源）不可用
             ListTile(

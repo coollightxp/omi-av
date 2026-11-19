@@ -127,6 +127,12 @@ class PlayerSettings {
   /// 步进 0.5s，范围 ±10s（`PlayerController.setLyricsOffset` 夹紧）
   final int lyricsOffsetMs;
 
+  /// 歌词简繁转换（0 = 原文，1 = 转简体，2 = 转繁体）。
+  /// 很多词源只放繁体 LRC，转成简体好认；喜欢繁体的也能把简体歌词
+  /// 转成繁体看。词组优先转换（OpenCC 词表随包发布），避免
+  /// 「头发→頭發」这类一简对多繁的错字
+  final int lyricsVariant;
+
   /// 列表里隐藏「探测确认不可用」的内置源频道（默认开）。
   /// 只影响内置电台精选——死台源在清单里保留，恢复后自动回到列表
   final bool hideUnavailableChannels;
@@ -162,6 +168,7 @@ class PlayerSettings {
     this.showWebNativeToggle = false,
     this.lyricsEnabled = false,
     this.lyricsOffsetMs = 0,
+    this.lyricsVariant = 0,
     this.hideUnavailableChannels = true,
   });
 
@@ -196,6 +203,7 @@ class PlayerSettings {
     bool? showWebNativeToggle,
     bool? lyricsEnabled,
     int? lyricsOffsetMs,
+    int? lyricsVariant,
     bool? hideUnavailableChannels,
   }) {
     return PlayerSettings(
@@ -230,6 +238,7 @@ class PlayerSettings {
       showWebNativeToggle: showWebNativeToggle ?? this.showWebNativeToggle,
       lyricsEnabled: lyricsEnabled ?? this.lyricsEnabled,
       lyricsOffsetMs: lyricsOffsetMs ?? this.lyricsOffsetMs,
+      lyricsVariant: lyricsVariant ?? this.lyricsVariant,
       hideUnavailableChannels:
           hideUnavailableChannels ?? this.hideUnavailableChannels,
     );

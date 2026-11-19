@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'chinese_variant.dart';
+
 /// 一行歌词（时间轴 = 歌词内标注的「第几秒唱」）
 @immutable
 class LyricsLine {
@@ -81,6 +83,10 @@ class RadioLyrics extends ChangeNotifier {
   LyricsDoc? _doc;
   LyricsDoc? get doc => _doc;
 
+  /// 原始歌词文档（词源给的原文）——[_doc] 是按简繁转换设置加工后
+  /// 的显示版本，转换设置变化时从它重新生成，不重新查词
+  LyricsDoc? _rawDoc;
+
   bool _querying = false;
   bool get querying => _querying;
 
@@ -145,6 +151,7 @@ class RadioLyrics extends ChangeNotifier {
     _channelId = channelId;
     _gen++;
     _doc = null;
+    _rawDoc = null;
     _querying = false;
     _notFound = false;
     _raw = '';
@@ -174,6 +181,7 @@ class RadioLyrics extends ChangeNotifier {
       _anchorPos = pos;
     }
     _doc = null;
+    _rawDoc = null;
     _notFound = false;
     if (_enabled && _visible) unawaited(_ensureFetch());
     notifyListeners();
@@ -189,6 +197,57 @@ class RadioLyrics extends ChangeNotifier {
     if (_offsetMs == ms) return;
     _offsetMs = ms;
     notifyListeners();
+  }
+
+  /// 歌词简繁转换（0 = 原文，1 = 转简体，2 = 转繁体）。
+  /// 与设置面板/扫码管理页的「歌词简繁转换」同一份数据；切换时
+  /// 只对已查到的歌词重新加工，不重新发词源请求
+  int _variant = 0;
+  int get variant => _variant;
+
+  void setVariant(int v) {
+    final nv = v.clamp(0, 2);
+    if (_variant == nv) return;
+    _variant = nv;
+    _applyVariant();
+    notifyListeners();
+  }
+
+  /// 按 [_variant] 把原始歌词文档加工成显示文档。
+  /// 词表尚未加载完时先显示原文顶着（词表随包发布，只读一次），
+  /// 加载完成后自动换成转换结果
+  void _applyVariant() {
+    final raw = _rawDoc;
+    if (raw == null || _variant == ChineseVariantConverter.modeOriginal) {
+      _doc = raw;
+      return;
+    }
+    final cv = ChineseVariantConverter.instance;
+    if (cv.loaded) {
+      _doc = _convertDoc(raw);
+      return;
+    }
+    _doc = raw;
+    unawaited(cv.ensureLoaded().then((_) {
+      if (_rawDoc == null || _variant == ChineseVariantConverter.modeOriginal) {
+        return;
+      }
+      _doc = _convertDoc(_rawDoc!);
+      notifyListeners();
+    }));
+  }
+
+  LyricsDoc _convertDoc(LyricsDoc d) {
+    return LyricsDoc(
+      title: d.title,
+      artist: d.artist,
+      lines: [
+        for (final l in d.lines)
+          LyricsLine(l.time, ChineseVariantConverter.instance.convert(l.text, _variant)),
+      ],
+      synced: d.synced,
+      duration: d.duration,
+    );
   }
 
   /// 当前该点亮第几行（-1 = 不点亮）
@@ -217,7 +276,8 @@ class RadioLyrics extends ChangeNotifier {
     if (t.isEmpty) return;
     if (_cache.containsKey(t)) {
       final cached = _cache[t];
-      _doc = cached;
+      _rawDoc = cached;
+      _applyVariant();
       _notFound = cached == null;
       _querying = false;
       notifyListeners();
@@ -238,7 +298,8 @@ class RadioLyrics extends ChangeNotifier {
     }
     if (gen != _gen) return; // 已经切台/切歌，结果作废
     _querying = false;
-    _doc = doc;
+    _rawDoc = doc;
+    _applyVariant();
     _notFound = doc == null;
     if (_cache.length >= _cacheLimit) _cache.clear();
     _cache[t] = doc;

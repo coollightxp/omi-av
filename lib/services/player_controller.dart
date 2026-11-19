@@ -1123,6 +1123,8 @@ class PlayerController extends ChangeNotifier {
         'lyricsEnabled': s.lyricsEnabled,
         // 歌词时间微调（毫秒，正 = 往后等 / 负 = 往前赶）
         'lyricsOffsetMs': s.lyricsOffsetMs,
+        // 歌词简繁转换（0 = 原文，1 = 转简体，2 = 转繁体）
+        'lyricsVariant': s.lyricsVariant,
         // 网页端没有引擎可用性上下文，不再暴露
         'gestureSensitivity': s.gestureSensitivity,
         'autoHideDelay': s.autoHideDelay,
@@ -1255,6 +1257,9 @@ class PlayerController extends ChangeNotifier {
       int lyricsOffset = cur.lyricsOffsetMs;
       final loRaw = ri('lyricsOffsetMs');
       if (loRaw != null) lyricsOffset = loRaw.clamp(-10000, 10000);
+      int lyricsVariant = cur.lyricsVariant;
+      final lvRaw = ri('lyricsVariant');
+      if (lvRaw != null) lyricsVariant = lvRaw.clamp(0, 2);
       final uiScaleAuto = rb('uiScaleAuto') ?? cur.uiScaleAuto;
       final resumeLast = rb('resumeLastChannel') ?? cur.resumeLastChannel;
       final closeToTray = kIsWindowsDesktop
@@ -1334,6 +1339,7 @@ class PlayerController extends ChangeNotifier {
           hideUnavailable != _settings.hideUnavailableChannels ||
           lyricsEnabled != _settings.lyricsEnabled ||
           lyricsOffset != _settings.lyricsOffsetMs ||
+          lyricsVariant != _settings.lyricsVariant ||
           retryTimes != _settings.retryTimes ||
           castEndWait != _settings.castEndWaitSeconds ||
           uiScaleAuto != _settings.uiScaleAuto ||
@@ -1360,6 +1366,7 @@ class PlayerController extends ChangeNotifier {
           hideUnavailableChannels: hideUnavailable,
           lyricsEnabled: lyricsEnabled,
           lyricsOffsetMs: lyricsOffset,
+          lyricsVariant: lyricsVariant,
           retryTimes: retryTimes,
           castEndWaitSeconds: castEndWait,
           uiScaleAuto: uiScaleAuto,
@@ -4082,6 +4089,7 @@ class PlayerController extends ChangeNotifier {
   static const _kPlayEngine = 'settings_play_engine';
   static const _kLyricsEnabled = 'settings_lyrics_enabled';
   static const _kLyricsOffset = 'settings_lyrics_offset_ms';
+  static const _kLyricsVariant = 'settings_lyrics_variant';
   static const _kShowWebNativeToggle = 'settings_show_web_native_toggle';
   static const _kHideUnavailable = 'settings_hide_unavailable_channels';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
@@ -4134,6 +4142,7 @@ class PlayerController extends ChangeNotifier {
         hideUnavailableChannels: p.getBool(_kHideUnavailable) ?? true,
         lyricsEnabled: p.getBool(_kLyricsEnabled) ?? false,
         lyricsOffsetMs: p.getInt(_kLyricsOffset) ?? 0,
+        lyricsVariant: p.getInt(_kLyricsVariant) ?? 0,
       );
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
@@ -4227,6 +4236,7 @@ class PlayerController extends ChangeNotifier {
           _kHideUnavailable, _settings.hideUnavailableChannels);
       await putBool(_kLyricsEnabled, _settings.lyricsEnabled);
       await putInt(_kLyricsOffset, _settings.lyricsOffsetMs);
+      await putInt(_kLyricsVariant, _settings.lyricsVariant);
       await putBool(_kAutoPlayNext, _settings.autoPlayNext);
       await putDouble(_kSensitivity, _settings.gestureSensitivity);
       await putInt(_kAutoHide, _settings.autoHideDelay);
@@ -4298,6 +4308,8 @@ class PlayerController extends ChangeNotifier {
     final webChanged = settings.webEnabled != _settings.webEnabled;
     final lyricsOffsetChanged =
         settings.lyricsOffsetMs != _settings.lyricsOffsetMs;
+    final lyricsVariantChanged =
+        settings.lyricsVariant != _settings.lyricsVariant;
     _settings = settings;
     _settingsDirty = true;
     _scheduleSaveSettings();
@@ -4305,6 +4317,9 @@ class PlayerController extends ChangeNotifier {
     if (lyricsChanged) RadioLyrics.instance.setEnabled(settings.lyricsEnabled);
     if (lyricsOffsetChanged) {
       RadioLyrics.instance.setOffset(settings.lyricsOffsetMs);
+    }
+    if (lyricsVariantChanged) {
+      RadioLyrics.instance.setVariant(settings.lyricsVariant);
     }
     if (launchChanged && isDesktop) {
       setAutoLaunchEnabled(settings.launchAtStartup);
@@ -4483,6 +4498,16 @@ class PlayerController extends ChangeNotifier {
     final v = ms.clamp(-10000, 10000);
     if (_settings.lyricsOffsetMs == v) return;
     updateSettings(_settings.copyWith(lyricsOffsetMs: v));
+  }
+
+  /// 歌词简繁转换（0 = 原文，1 = 转简体，2 = 转繁体），
+  /// 与扫码管理页的「歌词简繁转换」同一份数据
+  int get lyricsVariant => _settings.lyricsVariant;
+
+  void setLyricsVariant(int v) {
+    final nv = v.clamp(0, 2);
+    if (_settings.lyricsVariant == nv) return;
+    updateSettings(_settings.copyWith(lyricsVariant: nv));
   }
 
   /// 切换「隐藏不可用频道」：立刻按新口径重建两个列表，不用重启
