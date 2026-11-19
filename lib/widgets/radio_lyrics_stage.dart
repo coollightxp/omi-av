@@ -35,6 +35,12 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
   Timer? _tick;
   int _index = -1;
 
+  // ---- 纯文本歌词（无时间轴）的自动滚动 ----
+  /// 上次用户手动滚动的时刻：4 秒内自动滚动让路，不打架
+  DateTime? _lastUserScroll;
+  /// 到尾后停留片刻再回顶（像读一篇文章，翻到底停一停）
+  int _endHoldMs = 0;
+
   @override
   void initState() {
     super.initState();
@@ -46,6 +52,7 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
         setState(() => _index = i);
         _scrollTo(i);
       }
+      _autoScrollPlain();
     });
   }
 
@@ -66,6 +73,35 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
       duration: const Duration(milliseconds: 420),
       curve: Curves.easeOutCubic,
     );
+  }
+
+  /// 纯文本歌词（没有时间轴、无从点亮）自动慢慢往下走，像提词器。
+  /// 一屏装不下一整首，用户（尤其手机上不能拖）靠它看全全文。
+  /// 用户刚手动滚过（桌面鼠标拖）就先让路 4 秒；滚到底停 3 秒回顶循环。
+  void _autoScrollPlain() {
+    final doc = RadioLyrics.instance.doc;
+    if (doc == null || doc.synced) return;
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final max = pos.maxScrollExtent;
+    if (max <= 0) return; // 一屏装得下，不用滚
+    // 用户 4 秒内滚过：不打架
+    if (_lastUserScroll != null &&
+        DateTime.now().difference(_lastUserScroll!) <
+            const Duration(seconds: 4)) {
+      return;
+    }
+    if (pos.pixels >= max - 0.5) {
+      // 到底：停 3 秒回顶
+      _endHoldMs += 300;
+      if (_endHoldMs >= 3000) {
+        _endHoldMs = 0;
+        _scroll.jumpTo(0);
+      }
+      return;
+    }
+    // 20px/秒：一行 48px 约 2.4 秒，阅读节奏
+    _scroll.jumpTo((pos.pixels + 6).clamp(0.0, max));
   }
 
   @override
@@ -136,19 +172,37 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
                   // 关掉滚动时冒出来的滑条（用户要求：一定不显示）
                   behavior: ScrollConfiguration.of(context)
                       .copyWith(scrollbars: false),
-                  child: ListView.builder(
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (n) {
+                      if (n is ScrollUpdateNotification &&
+                          n.dragDetails != null) {
+                        _lastUserScroll = DateTime.now();
+                      }
+                      return false;
+                    },
+                    child: ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.symmetric(vertical: _topPad),
                     itemCount: doc.lines.length,
                     itemExtent: _lineHeight,
-                    // 纯显示：禁止用户拖动（拖动会跟右侧音量手势打架）。
-                    // 自动跟随走 ScrollController.animateTo，不受影响
-                    physics: const NeverScrollableScrollPhysics(),
+                    // 带时间轴：纯显示，禁止拖动（拖动会跟右侧音量手势
+                    // 打架），自动跟随走 animateTo 不受影响。
+                    // 纯文本（无时间轴）：桌面放开拖动/滚轮——用户要
+                    // 看全一整首；手机仍锁（右半边是音量手势区），
+                    // 靠上面的自动滚动浏览全文
+                    physics: doc.synced
+                        ? const NeverScrollableScrollPhysics()
+                        : (widget.controller.isDesktop
+                            ? const ClampingScrollPhysics()
+                            : const NeverScrollableScrollPhysics()),
                     itemBuilder: (context, i) {
                       final line = doc.lines[i];
                       final active =
                           doc.synced && lyrics.hasAnchor && i == _index;
                       final near = _index >= 0 && (i - _index).abs() <= 1;
+                      // 纯文本（无时间轴）整首都要能读：用亮的常规样式，
+                      // 不走「上下句淡化」那套（那套是为了突出当前句）
+                      final plain = !doc.synced;
                       return Center(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -161,16 +215,22 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
                               color: active
                                   ? Colors.white
                                   : Colors.white.withValues(
-                                      alpha: near ? 0.55 : 0.26),
-                              fontSize: active ? 19 : 15,
+                                      alpha: plain
+                                          ? 0.85
+                                          : near
+                                              ? 0.55
+                                              : 0.26),
+                              fontSize: active ? 19 : (plain ? 16.5 : 15),
                               height: 1.35,
-                              fontWeight:
-                                  active ? FontWeight.w700 : FontWeight.w400,
+                              fontWeight: active
+                                  ? FontWeight.w700
+                                  : (plain ? FontWeight.w500 : FontWeight.w400),
                             ),
                           ),
                         ),
                       );
                     },
+                    ),
                   ),
                 ),
               ),
