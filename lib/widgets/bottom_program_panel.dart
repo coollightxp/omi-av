@@ -384,13 +384,17 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           AnimatedBuilder(
             animation: Listenable.merge([c.videoController]),
             builder: (context, _) {
+              // 垃圾过滤要跟电视屏那条路对齐：不少台的 ICY 元数据就是
+              // 流文件名（HLS 转码源尤其常见，如「64.m3u8?transcode=ts」），
+              // 拿它当曲目显示，用户还以为解析坏了。过滤后回退到分组名
               final icy = (c.videoController?.value.mediaTitle ?? '').trim();
-              final text = icy.isNotEmpty ? '♪ $icy' : radioGroup;
+              final hasTrack = icy.isNotEmpty && !PlayerController.isJunkTrack(icy);
+              final text = hasTrack ? '♪ $icy' : radioGroup;
               if (text.isEmpty) return const SizedBox.shrink();
               return Text(
                 text,
                 style: TextStyle(
-                  color: icy.isNotEmpty
+                  color: hasTrack
                       ? Colors.white70
                       : AppColors.wave.withValues(alpha: 0.66),
                   fontSize: t.caption,
