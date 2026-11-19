@@ -370,7 +370,8 @@ class RadioLyrics extends ChangeNotifier {
     if (plain.isNotEmpty) {
       final lines = [
         for (final l in const LineSplitter().convert(plain))
-          if (l.trim().isNotEmpty) LyricsLine(Duration.zero, l.trim()),
+          if (_stripInlineTranslation(l.trim()).isNotEmpty)
+            LyricsLine(Duration.zero, _stripInlineTranslation(l.trim())),
       ];
       if (lines.isEmpty) return null;
       return LyricsDoc(
@@ -469,7 +470,7 @@ class RadioLyrics extends ChangeNotifier {
       final text = body.replaceFirst(RegExp(r'^\[!text\]\s*'), '');
       final plain = <LyricsLine>[];
       for (final l in const LineSplitter().convert(text)) {
-        final t = l.trim();
+        final t = _stripInlineTranslation(l.trim());
         if (t.isEmpty) continue;
         if (_creditLineRe.hasMatch(t)) continue;
         plain.add(LyricsLine(Duration.zero, t));
@@ -594,6 +595,15 @@ class RadioLyrics extends ChangeNotifier {
       .replaceAll(RegExp(r'[\s\-–—_|/]+$'), '')
       .trim();
 
+  /// 双语对照行剥离：LRCLIB 部分条目行内用 tab 挂英文翻译
+  /// （实测《香水有毒》：「我曾經愛過這樣一個男人^I once loved
+  /// such a man」）。歌词块一句一行大字，混着英文没法看——
+  /// 只保留 tab 前的正文；正常 LRC 行内不会出现 tab，无副作用
+  static String _stripInlineTranslation(String t) {
+    final i = t.indexOf('\t');
+    return i > 0 ? t.substring(0, i).trim() : t;
+  }
+
   /// LRC → 带时间轴的歌词行。忽略 `[ar:]` 一类元数据标签、空行。
   static List<LyricsLine> parseLrc(String lrc) {
     final tagRe = RegExp(r'\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]');
@@ -601,8 +611,9 @@ class RadioLyrics extends ChangeNotifier {
     for (final raw in const LineSplitter().convert(lrc)) {
       final matches = tagRe.allMatches(raw);
       if (matches.isEmpty) continue;
-      final text = raw.replaceAll(tagRe, '').trim();
+      var text = raw.replaceAll(tagRe, '').trim();
       if (text.isEmpty) continue;
+      text = _stripInlineTranslation(text);
       for (final m in matches) {
         final min = int.tryParse(m.group(1)!) ?? 0;
         final sec = int.tryParse(m.group(2)!) ?? 0;

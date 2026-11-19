@@ -450,6 +450,9 @@ class PlayerController extends ChangeNotifier {
     // 歌词开关：状态机自己持有 enabled（UI 直接监听，不重建播放树）
     RadioLyrics.instance.setEnabled(_settings.lyricsEnabled);
     RadioLyrics.instance.setOffset(_settings.lyricsOffsetMs);
+    // 简繁档位也要同步：RadioLyrics 是独立单例，不经过这里它就
+    // 永远停在默认「原文」，重启后用户设的「简体/繁体」会静默丢失
+    RadioLyrics.instance.setVariant(_settings.lyricsVariant);
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
     _isTv = await isTvDevice();
     tvModeNotifier.value = _isTv;

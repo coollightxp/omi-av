@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../services/chinese_variant.dart';
 import '../services/player_controller.dart';
 import '../services/radio_lyrics.dart';
 
@@ -164,6 +165,11 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               // 有非零偏移时挂个角标：关掉设置面板后也能确认微调还在生效
               if (lyrics.offsetMs != 0 && doc.synced && lyrics.hasAnchor)
                 _TipChip(text: '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}'),
+              // 简繁档位角标：确认「设置里的简繁转换」真的到了歌词层。
+              // 词表没加载出来时明确说出来（正常是随包资源秒加载；
+              // 若一直显示未就绪 = 资产没进包，另查）
+              if (lyrics.variant != 0)
+                _TipChip(text: _variantChipText(lyrics.variant)),
               if (lyrics.midJoined)
                 const _TipChip(text: '已中途加入 · 下一首起自动同步'),
               if (!doc.synced) const _TipChip(text: '这首没有时间轴 · 整段展示'),
@@ -250,6 +256,14 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
       },
     );
   }
+}
+
+/// 简繁档位角标文本：词表没就绪时如实说（显示原文），别让用户
+/// 以为开关坏了或没保存
+String _variantChipText(int v) {
+  final cv = ChineseVariantConverter.instance;
+  if (!cv.loaded) return '简繁词表未就绪 · 暂显示原文';
+  return v == 1 ? '已转简体' : '已转繁体';
 }
 
 String _fmtOffsetSec(int ms) {
