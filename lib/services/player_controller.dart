@@ -3603,6 +3603,22 @@ class PlayerController extends ChangeNotifier {
       await _videoController!.pause();
       _state = PlayerState.paused;
     } else {
+      // 电台直播流：从暂停/出错恢复一律整段重载，不走 unpause（待办 M）。
+      //
+      // 断流（网络抖动）之后到服务器的连接其实已经死了，`play()` 只是
+      // 把 mpv 的 pause 拍回去——它拿着一条不存在的连接干等，恢复无声；
+      // 切到别的台有声（全新 loadfile），切回原台再按播放还是无声（同
+      // 一条死连接）。用户实测「网络重载重新载入就有声」实锤了这条路。
+      //
+      // 直播流本来就没有「接着暂停前的位置听」的概念——暂停期间直播
+      // 已经走到前面去了，重载就是重新接上当前直播，语义完全一致。
+      // 电视频道不动：暂停放视频是常见操作，恢复不能把画面拉回直播头。
+      final ch = _currentChannel;
+      if (ch != null && ch.isRadio) {
+        _audioCardClosed = false;
+        await reloadCurrentChannel();
+        return;
+      }
       await _videoController!.play();
       _state = PlayerState.playing;
       // 用户重新开始播：允许卡片重新出现（此前按过 ❌ 收起来过）
