@@ -360,8 +360,14 @@ class RadioLyrics extends ChangeNotifier {
       // LRCLIB 网络层挂了：不拖累整体，还有并行在跑的 LrcAPI
       fromLrclib = null;
     }
-    if (fromLrclib != null && fromLrclib.lines.isNotEmpty) return fromLrclib;
-    return fallback;
+    // 带轴优先（用户规则）：同一首歌多来源候选时，带时间轴的永远压过
+    // 纯文本——主路只有纯文本而兜底路可能带轴，必须等兜底路回来比，
+    // 不能让纯文本抢先。主路本身就是带轴的才直接走，不浪费等待
+    if (fromLrclib != null && fromLrclib.synced) return fromLrclib;
+    final fromLrcApi = await fallback;
+    if (fromLrclib == null) return fromLrcApi;
+    if (fromLrcApi != null && fromLrcApi.synced) return fromLrcApi;
+    return fromLrclib;
   }
 
   /// 拆分假设列表：主假设（歌手 - 歌名）优先，互换假设兜底
@@ -407,6 +413,64 @@ class RadioLyrics extends ChangeNotifier {
   static String _cleanTrack(String t) =>
       t.toLowerCase().replaceAll(RegExp(r'[^\u4e00-\u9fa5A-Za-z0-9]'), '');
 
+  /// 文本归一：剥特殊字符 + 繁简归一（OpenCC 词表未加载时原样返回，
+  /// 无害）。歌词内容比对与 [ti:] 歌名核验共用
+  static String _normText(String s) {
+    final c = _cleanTrack(s);
+    if (c.isEmpty) return c;
+    return ChineseVariantConverter.instance
+        .convert(c, ChineseVariantConverter.modeSimplified);
+  }
+
+  /// LrcAPI 响应带 `[ti:]` 元数据时的歌名核验（用户规则：歌名定生死）。
+  /// 标签歌名与请求歌名清洗归一后互不包含 = 错歌
+  static bool _tiMismatch(String body, String title) {
+    final want = _normText(title);
+    if (want.isEmpty) return false;
+    String? ti;
+    for (final l in const LineSplitter().convert(body)) {
+      final m = RegExp(r'^\[ti:(.*)\]\s*$').firstMatch(l.trim());
+      if (m != null) {
+        final v = m.group(1)!.trim();
+        if (v.isNotEmpty) ti = v;
+        break;
+      }
+    }
+    if (ti == null) return false;
+    final got = _normText(ti);
+    if (got.isEmpty) return false;
+    return !(got.contains(want) || want.contains(got));
+  }
+
+  /// 两份歌词正文是否同一首歌：取前 4 句归一后拼串，相等/互相包含直接
+  /// 认同；分行粒度不同时按二字组重叠率 ≥ 60% 兜底。用于「同词同参
+  /// 问两次」的一致性核验——LrcAPI 是聚合源，实测同 query 会随机返回
+  /// 同歌手的另一首歌（任贤齐《对折》返回《好聚好散》），正文里又没有
+  /// 歌名可比，只能用两次结果互证背书；对不上宁可不放
+  static bool _sameLyricsDoc(LyricsDoc a, LyricsDoc b) {
+    String blob(LyricsDoc d) {
+      final buf = StringBuffer();
+      for (final l in d.lines.take(4)) {
+        buf.write(_normText(l.text));
+      }
+      return buf.toString();
+    }
+
+    final x = blob(a);
+    final y = blob(b);
+    if (x.isEmpty || y.isEmpty) return false;
+    if (x == y || x.contains(y) || y.contains(x)) return true;
+    if (x.length < 2 || y.length < 2) return false;
+    final grams = <String>{for (var i = 0; i + 2 <= x.length; i++) x.substring(i, i + 2)};
+    var hit = 0;
+    var total = 0;
+    for (var i = 0; i + 2 <= y.length; i++) {
+      total++;
+      if (grams.contains(y.substring(i, i + 2))) hit++;
+    }
+    return total > 0 && hit / total >= 0.6;
+  }
+
   /// 版本标注括号：词库条目歌名常写成「逆风明媚(Live)」「某某(伴奏)」
   /// 「某某【钢琴版】」——查询与比较时剥掉（LDDC 同款做法）
   static final RegExp _versionParenRe = RegExp(
@@ -433,6 +497,26 @@ class RadioLyrics extends ChangeNotifier {
     return out;
   }
 
+  /// 查询用歌名全变体（去重）：原文 → 剥版本括号 → 全清洗 → 各自的
+  /// 繁体/简体形。用户规则：**简体查不到查繁体、繁体不到查简体，都不中
+  /// 才判查无**——词库条目简繁混收（LRCLIB 港台条目全是繁体名，
+  /// 酷狗/网易系全是简体），只拿请求原文一种写法查会漏
+  static List<String> _titleQueryVariants(String track) {
+    final base = _trackVariants(track);
+    final out = List<String>.from(base);
+    final cv = ChineseVariantConverter.instance;
+    for (final v in base) {
+      for (final mode in const [
+        ChineseVariantConverter.modeTraditional,
+        ChineseVariantConverter.modeSimplified,
+      ]) {
+        final c = cv.convert(v, mode);
+        if (c != v && c.trim().isNotEmpty && !out.contains(c)) out.add(c);
+      }
+    }
+    return out;
+  }
+
   /// LRCLIB 三姿势：歌名+歌手 → 只按歌名 → 关键词模糊。
   /// 每个请求 4 秒超时，慢网不拖死整链
   static Future<List<Map<String, dynamic>>> _lrclibSearch(IcyTitle icy) async {
@@ -454,9 +538,10 @@ class RadioLyrics extends ChangeNotifier {
           .timeout(const Duration(seconds: 4), onTimeout: () => const []);
     }
     // 二级半：歌名逐级放宽查（业界做法，LDDC 同款）：剥版本括号 →
-    // 全清洗（只留文字）。词库条目歌名常带 (Live)/(伴奏)/书名号
+    // 全清洗（只留文字）→ 繁体形 → 简体形。词库条目歌名常带
+    // (Live)/(伴奏)/书名号，且简繁混收——只拿原文一种写法查会漏
     if (rows.isEmpty) {
-      for (final v in _trackVariants(icy.track).skip(1)) {
+      for (final v in _titleQueryVariants(icy.track).skip(1)) {
         rows = await _search(track: v)
             .timeout(const Duration(seconds: 4), onTimeout: () => const []);
         if (rows.isNotEmpty) break;
@@ -549,16 +634,62 @@ class RadioLyrics extends ChangeNotifier {
       r'發行|OP|SP|出版|MV|和音|配唱|录音室|錄音室)\s*[：:]');
 
   static Future<LyricsDoc?> _fetchFromLrcApi(IcyTitle icy) async {
-    if (icy.artist.isEmpty) return _lrcApiOnce(icy.track, '');
+    // 歌名变体逐级放宽（含简繁双向——简体查不到查繁体、反之亦然，
+    // 都不中才判查无）。每个变体内部按「同参两次互证」核验
+    if (icy.artist.isEmpty) {
+      for (final t in _titleQueryVariants(icy.track)) {
+        final d = await _lrcApiVerified(t, '');
+        if (d != null) return d;
+      }
+      return null;
+    }
     // 主假设：歌名 + 前缀切出的第一个人名（「煻(许佳慧)」→ 许佳慧，
     // 整串传进去查不到）；互换假设保留原串，兜「歌名 - 歌手」反写的台
     final segs = _artistSegments(icy.artist);
     final artist = segs.isNotEmpty ? segs.first : icy.artist;
-    final results = await Future.wait([
-      _lrcApiOnce(icy.track, artist),
+    final first = await Future.wait([
+      _lrcApiVerified(icy.track, artist),
       _lrcApiOnce(icy.artist, icy.track),
     ]);
-    return results[0] ?? results[1];
+    final m = first[0];
+    final s = first[1];
+    if (m != null && s != null) {
+      // 两假设都命中且是同一首歌：带时间轴的优先（用户规则）
+      if (!m.synced && s.synced && _sameLyricsDoc(m, s)) return s;
+      return m;
+    }
+    if (m != null) return m;
+    if (s != null) return s;
+    for (final t in _titleQueryVariants(icy.track).skip(1)) {
+      final d = await _lrcApiVerified(t, artist);
+      if (d != null) return d;
+    }
+    return null;
+  }
+
+  /// 同词同参并行问两次，互证后才收货。LrcAPI 聚合后端实测不稳定：
+  /// 同一 query 有时返回正确的歌、有时返回同歌手的另一首（无 [ti:]
+  /// 标签时正文里没有歌名可比，无法按歌名直接判错）——两次一致才算
+  /// 可信；只有一次有结果时只能放行（无法证伪），两次对不上整份弃用
+  static Future<LyricsDoc?> _lrcApiVerified(String title, String artist) async {
+    final r = await Future.wait([
+      _lrcApiOnce(title, artist),
+      _lrcApiOnce(title, artist),
+    ]);
+    final a = r[0];
+    final b = r[1];
+    if (a != null && b != null) {
+      if (_sameLyricsDoc(a, b)) {
+        // 同一首歌两份都可用：带时间轴的优先（用户规则）
+        if (!a.synced && b.synced) return b;
+        return a;
+      }
+      debugPrint('[Lyrics] LrcAPI 两次结果不一致, 弃用 (要: '
+          '$artist - $title) A首句: ${a.lines.first.text} '
+          'B首句: ${b.lines.first.text}');
+      return null;
+    }
+    return a ?? b;
   }
 
   static Future<LyricsDoc?> _lrcApiOnce(String title, String artist) async {
@@ -589,6 +720,13 @@ class RadioLyrics extends ChangeNotifier {
       return null; // 能被解析成 JSON = 错误体，不是歌词
     } on FormatException {
       // 解析失败 = 普通文本/LRC，继续
+    }
+    // 歌名定生死（用户规则）：响应带 [ti:] 元数据时，标签歌名与请求
+    // 歌名清洗归一后互不包含 = 后端给了别的歌，整份弃用（实测
+    // 「余超颖 - 值得」返回 [ti:值得 (Live)]——含「值得」，放行 ✓）
+    if (_tiMismatch(body, title)) {
+      debugPrint('[Lyrics] LrcAPI [ti:] 与请求歌名不符, 弃用 (要: $title)');
+      return null;
     }
     final lines = parseLrc(body);
     // 错歌防护：LrcAPI 有时只按标题匹配，返回**同名的另一首歌**
