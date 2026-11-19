@@ -332,6 +332,13 @@ class RadioLyrics extends ChangeNotifier {
   /// 界面走「查无歌词」，不影响播放。
   static const String _lrcApiBase = 'https://api.lrc.cx/lyrics';
 
+  /// 制作名单行：作词/作曲/编曲…开头的元信息行，纯文本歌词里整段
+  /// 展示时不需要（电台场景用户只想看歌词本身）
+  static final RegExp _creditLineRe = RegExp(
+      r'^(作词|作詞|作曲|填詞|编曲|編曲|制作人|製作人|混音|母带|母帶|录音|錄音|'
+      r'吉他|贝斯|貝斯|键盘|鼓|和声|和聲|弦乐|弦樂|监制|監製|统筹|統籌|出品|发行|'
+      r'發行|OP|SP|出版|MV|和音|配唱|录音室|錄音室)[：:]');
+
   static Future<LyricsDoc?> _fetchFromLrcApi(IcyTitle icy) async {
     if (icy.track.isEmpty) return null;
     final params = <String, String>{'title': icy.track};
@@ -362,7 +369,22 @@ class RadioLyrics extends ChangeNotifier {
       // 解析失败 = 普通文本/LRC，继续
     }
     final lines = parseLrc(body);
-    if (lines.isEmpty) return null;
+    if (lines.isEmpty) {
+      // 纯文本歌词：LrcAPI 用 `[!text]` 前缀标记无时间轴版本（如
+      // 枯木逢春《我们总会在夏天相遇》）。整段展示（与 LRCLIB 纯文本
+      // 同一待遇），跳过 作词/作曲 一类制作名单行。
+      final text = body.replaceFirst(RegExp(r'^\[!text\]\s*'), '');
+      final plain = <LyricsLine>[];
+      for (final l in const LineSplitter().convert(text)) {
+        final t = l.trim();
+        if (t.isEmpty) continue;
+        if (_creditLineRe.hasMatch(t)) continue;
+        plain.add(LyricsLine(Duration.zero, t));
+      }
+      if (plain.isEmpty) return null;
+      return LyricsDoc(
+          title: icy.track, artist: icy.artist, lines: plain, synced: false);
+    }
     var title = icy.track;
     var artist = icy.artist;
     for (final l in const LineSplitter().convert(body)) {
