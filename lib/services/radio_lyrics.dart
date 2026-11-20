@@ -317,8 +317,9 @@ class RadioLyrics extends ChangeNotifier {
     LyricsDoc? doc;
     try {
       // 并行架构下最长路径 = LRCLIB 三姿势各 4s = 12s；LrcAPI 兜底
-      // 自身 5s 必出结果，总闸放到 15s 保证兜底总能被等到
-      doc = await fetchLyrics(t).timeout(const Duration(seconds: 15));
+      // 自身 5s 必出结果，主假设空时还有一轮重试（v2.3.60）——总闸
+      // 放到 20s 保证重试总能被等到
+      doc = await fetchLyrics(t).timeout(const Duration(seconds: 20));
     } catch (e) {
       debugPrint('[Lyrics] query failed: $e');
       doc = null;
@@ -696,15 +697,35 @@ class RadioLyrics extends ChangeNotifier {
       return unv;
     }
     // 主假设：歌名 + 前缀切出的第一个人名（「煻(许佳慧)」→ 许佳慧，
-    // 整串传进去查不到）；互换假设保留原串，兜「歌名 - 歌手」反写的台
+    // 整串传进去查不到）；互换假设保留原串，兜「歌名 - 歌手」反写的台。
+    // 实测教训（胡夏《交给时间》显示成《那些年》的词）：互换假设是
+    // 「歌名当歌手、歌手当歌名」的乱炖 query，后端会按 title 关键词
+    // 模糊匹配塞同歌手的热门歌，且这类响应常**无任何元数据**
+    // （无 [ti:]、无 [ar:]、首行直接是歌词）——所有核验都无把柄。
+    // 所以互换假设的结果**强制打「歌名未证实」**：主假设任何可证实
+    // 结果都压过它；主假设空时先重试一轮（这源时好时坏是常态，
+    // 实测同 query 会有连空的时刻），重试仍空才让未证实结果垫底
     final segs = _artistSegments(icy.artist);
     final artist = segs.isNotEmpty ? segs.first : icy.artist;
+    LyricsDoc? markSwap(LyricsDoc? d) => d == null
+        ? null
+        : LyricsDoc(
+            title: d.title,
+            artist: d.artist,
+            lines: d.lines,
+            synced: d.synced,
+            duration: d.duration,
+            unverifiedName: true,
+          );
     final first = await Future.wait([
       _lrcApiVerified(icy.track, artist),
       _lrcApiOnce(icy.artist, icy.track),
     ]);
-    final m = first[0];
-    final s = first[1];
+    var m = first[0];
+    final s = markSwap(first[1]);
+    if (m == null) {
+      m = await _lrcApiVerified(icy.track, artist);
+    }
     final ok = [
       for (final d in [m, s])
         if (d != null && !d.unverifiedName) d
