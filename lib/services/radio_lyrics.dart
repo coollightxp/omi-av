@@ -330,7 +330,10 @@ class RadioLyrics extends ChangeNotifier {
     _applyVariant();
     _notFound = doc == null;
     if (_cache.length >= _cacheLimit) _cache.clear();
-    _cache[t] = doc;
+    // 「歌名未证实」的结果不缓存（v2.3.61）：LrcAPI 时好时坏，这次
+    // 兜底拿到的可能是按歌手模糊填补的错歌，下次切回重新查——源
+    // 换个节点/时刻就有机会拿到带标签的正确词自愈。查无(null)仍缓存
+    if (doc == null || !doc.unverifiedName) _cache[t] = doc;
     notifyListeners();
   }
 
@@ -455,6 +458,18 @@ class RadioLyrics extends ChangeNotifier {
     return !(g.contains(w) || w.contains(g));
   }
 
+  /// LrcAPI 响应头部的 `[ti:]` 元数据（无则 null）
+  static String? _tiOf(String body) {
+    for (final l in const LineSplitter().convert(body)) {
+      final m = RegExp(r'^\[ti:(.*)\]\s*$').firstMatch(l.trim());
+      if (m != null) {
+        final v = m.group(1)!.trim();
+        return v.isEmpty ? null : v;
+      }
+    }
+    return null;
+  }
+
   /// LrcAPI 响应带 `[ti:]` 元数据时的歌名核验（用户规则：歌名定生死）。
   /// 标签歌名与请求歌名清洗归一后互不包含 = 后端自作主张给了别的歌。
   /// v2.3.59 起不再整份弃用——**降级收货**：标记 [LyricsDoc.unverifiedName]，
@@ -464,15 +479,7 @@ class RadioLyrics extends ChangeNotifier {
   /// 却因为没有标签漏网
   static bool _tiMismatch(String body, String title) {
     if (_normText(title).isEmpty) return false;
-    String? ti;
-    for (final l in const LineSplitter().convert(body)) {
-      final m = RegExp(r'^\[ti:(.*)\]\s*$').firstMatch(l.trim());
-      if (m != null) {
-        final v = m.group(1)!.trim();
-        if (v.isNotEmpty) ti = v;
-        break;
-      }
-    }
+    final ti = _tiOf(body);
     if (ti == null) return false;
     return _nameOff(ti, title);
   }
@@ -806,28 +813,44 @@ class RadioLyrics extends ChangeNotifier {
     } on FormatException {
       // 解析失败 = 普通文本/LRC，继续
     }
-    // 歌名定生死（用户规则）：响应带 [ti:] 元数据时，标签歌名与请求
-    // 歌名清洗归一后互不包含 = 后端给了别的歌。v2.3.59 起**降级收货**
-    // 而非弃用（一刀切会把「蜃楼转移（释怀版）」正确命中、标签自报
-    // 家门的《爱情转移 (释怀版)》拦掉），标记后由查询梯子兜底排序
-    final unverified = _tiMismatch(body, title);
-    if (unverified) {
-      debugPrint('[Lyrics] LrcAPI [ti:] 与请求歌名不符, 降级收货 (要: $title)');
-    }
     final lines = parseLrc(body);
-    // 错歌防护：LrcAPI 有时只按标题匹配，返回**同名的另一首歌**
-    // （实测：请求 S.H.E《怎么办》，返回小谭同学《怎么办》，词曲全对
-    // 不上）。这类 LRC 首行往往是「歌名 - 歌手」形态，歌手与请求的
-    // 对不上 → 视为错歌弃用，宁可查无也不放错词。
-    if (lines.isNotEmpty && artist.isNotEmpty) {
+    // 首行「歌名 - 歌手」自报家门提取（词库条目常见形态）
+    String? firstTitle;
+    String? firstArtist;
+    if (lines.isNotEmpty) {
       final m = RegExp(r'^(.{1,40}?)\s*[-–—]\s*(.{1,30})$')
           .firstMatch(lines.first.text.trim());
-      if (m != null &&
-          !_artistLooselyMatches(artist, m.group(2)!.trim())) {
-        debugPrint('[Lyrics] LrcAPI 疑似错歌: ${lines.first.text} (要: '
-            '$artist - $title)');
-        return null;
+      if (m != null) {
+        firstTitle = m.group(1)!.trim();
+        firstArtist = m.group(2)!.trim();
       }
+    }
+    // 错歌防护：LrcAPI 有时只按标题匹配，返回**同名的另一首歌**
+    // （实测：请求 S.H.E《怎么办》，返回小谭同学《怎么办》，词曲全对
+    // 不上）。首行自报家门的歌手与请求的对不上 → 视为错歌弃用
+    if (lines.isNotEmpty &&
+        artist.isNotEmpty &&
+        firstArtist != null &&
+        !_artistLooselyMatches(artist, firstArtist)) {
+      debugPrint('[Lyrics] LrcAPI 疑似错歌: ${lines.first.text} (要: '
+          '$artist - $title)');
+      return null;
+    }
+    // 歌名可证实性判定（v2.3.61 定稿）：带 [ti:] 且与请求名对得上、
+    // 或首行自报家门的歌名与请求名对得上 = 可证实；**零证据
+    // （无 [ti:] 且首行不是「歌名-歌手」形态）一律降级**。实测教训
+    // （891台「白小白 - 人生漫漫」放成他另一首歌的词）：后端查无时
+    // 按歌手模糊填补热门歌，响应常无任何元数据且两次互证也稳定错，
+    // 零证据不能再默认当「可证实」。有 [ti:] 但对不上也降级收货
+    // （蜃楼转移教训：正确答案常带着≠请求名的标签）
+    final hasTi = _tiOf(body) != null;
+    final selfNamed = firstTitle != null && !_nameOff(firstTitle, title);
+    final unverified = _tiMismatch(body, title) || (!hasTi && !selfNamed);
+    if (_tiMismatch(body, title)) {
+      debugPrint('[Lyrics] LrcAPI [ti:] 与请求歌名不符, 降级收货 (要: $title)');
+    } else if (!hasTi && !selfNamed) {
+      debugPrint('[Lyrics] LrcAPI 响应无歌名证据, 降级收货 (要: '
+          '$artist - $title)');
     }
     if (lines.isEmpty) {
       // 纯文本歌词：LrcAPI 用 `[!text]` 前缀标记无时间轴版本（如
