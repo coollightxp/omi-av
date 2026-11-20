@@ -47,6 +47,11 @@ class LyricsDoc {
   bool get isEmpty => lines.isEmpty;
 }
 
+/// 任意括号/书名号段（用户规则：括号里的一般不是主歌曲名，是专辑/
+/// 版本标注——剥掉后剩下的才是主名。覆盖中英文括号与书名号）。
+/// 顶层定义：IcyTitle（先声明）与 RadioLyrics 都要用
+final RegExp _anyParen = RegExp(r'[（(《〈\[【][^）)》〉\]】]*[）)》〉\]】]');
+
 /// ICY 曲名拆出来的两个字段
 @immutable
 class IcyTitle {
@@ -54,6 +59,18 @@ class IcyTitle {
 
   final String track;
   final String artist;
+
+  /// 主歌名（用户规则，v2.3.63 定稿）：**符号外头的才是主曲名**——
+  /// 「谢幕（我喜欢）」主名是谢幕，括号里的是专辑/版本标注，不是歌名；
+  /// 查询与歌名核验一律以主名为准。剥完为空（整串都在括号里的怪名）
+  /// 回退原文
+  String get mainTrack {
+    final m = track
+        .replaceAll(_anyParen, ' ')
+        .replaceAll(RegExp(r'\s{2,}'), ' ')
+        .trim();
+    return m.isEmpty ? track : m;
+  }
 
   String get display => artist.isEmpty ? track : '$artist - $track';
 }
@@ -534,6 +551,10 @@ class RadioLyrics extends ChangeNotifier {
     return total > 0 && hit / total >= 0.6;
   }
 
+  /// 任意括号/书名号段（用户规则：括号里的一般不是主歌曲名，是专辑/
+  /// 版本标注——剥掉后剩下的才是主名。覆盖中英文括号与书名号）
+  static final RegExp _anyParenRe = _anyParen;
+
   /// 版本标注括号：词库条目歌名常写成「逆风明媚(Live)」「某某(伴奏)」
   /// 「某某【钢琴版】」——查询与比较时剥掉（LDDC 同款做法）
   static final RegExp _versionParenRe = RegExp(
@@ -545,9 +566,10 @@ class RadioLyrics extends ChangeNotifier {
   );
 
   /// 歌名查询变体（逐级放宽，LDDC/网易系工具的通用做法）：
-  /// 括号形原样 → 剥版本括号（**截断**：括号连同内容一起截掉，只留
-  /// 前头文字——不是把括号换成空格，那是「蜃楼转移 释怀版」这种
-  /// 四不像，词源后端反而解析不了）→ 全清洗（只留文字）
+  /// **主名（剥全部括号，用户规则 v2.3.63：符号外才是主曲名，括号里
+  /// 是专辑/标注不参与主查询）** → 原文括号形（兜「蜃楼转移（释怀版）」
+  /// 这类主名本身查无、括号形后端反而能解析的）→ 剥版本括号 →
+  /// 全清洗（只留文字）
   static List<String> _trackVariants(String track) {
     final out = <String>[];
     void add(String v) {
@@ -555,6 +577,11 @@ class RadioLyrics extends ChangeNotifier {
       if (v.isNotEmpty && !out.contains(v)) out.add(v);
     }
 
+    final main = track
+        .replaceAll(_anyParenRe, ' ')
+        .replaceAll(RegExp(r'\s{2,}'), ' ')
+        .trim();
+    add(main);
     add(track);
     add(track
         .replaceAll(_versionParenRe, '')
@@ -596,13 +623,14 @@ class RadioLyrics extends ChangeNotifier {
     var rows = const <Map<String, dynamic>>[];
     for (final a in artists) {
       if (a.isEmpty) continue;
-      rows = await _search(track: icy.track, artist: a)
+      // 主名第一（用户规则 v2.3.63）：符号外才是主曲名
+      rows = await _search(track: icy.mainTrack, artist: a)
           .timeout(const Duration(seconds: 4), onTimeout: () => const []);
       if (rows.isNotEmpty) break;
     }
     // 二级：只按歌名，结果里靠歌手相似度挑
     if (rows.isEmpty && icy.artist.isNotEmpty) {
-      rows = await _search(track: icy.track)
+      rows = await _search(track: icy.mainTrack)
           .timeout(const Duration(seconds: 4), onTimeout: () => const []);
     }
     // 二级半：歌名逐级放宽查（业界做法，LDDC 同款）：剥版本括号 →
@@ -632,11 +660,11 @@ class RadioLyrics extends ChangeNotifier {
     final synced = (best['syncedLyrics'] as String?)?.trim() ?? '';
     final plain = (best['plainLyrics'] as String?)?.trim() ?? '';
     final durSec = (best['duration'] as num?)?.toInt();
-    // 歌名可证实性：条目歌名与电台报的歌名归一后互不包含（且没有
-    // 版本标注可解释）→ 标记「歌名未证实」，跨源汇总时让位给可证实
+    // 歌名可证实性：条目歌名与主名（用户规则：符号外才是主曲名）
+    // 归一后互不包含 → 标记「歌名未证实」，跨源汇总时让位给可证实
     // 的结果（与 LrcAPI [ti:] 同一待遇）
     final unverified = _nameOff(
-        ((best['trackName'] as String?) ?? '').trim(), icy.track);
+        ((best['trackName'] as String?) ?? '').trim(), icy.mainTrack);
 
     if (synced.isNotEmpty) {
       final lines = parseLrc(synced);
@@ -746,13 +774,13 @@ class RadioLyrics extends ChangeNotifier {
             unverifiedName: true,
           );
     final first = await Future.wait([
-      _lrcApiVerified(icy.track, artist),
-      _lrcApiOnce(icy.artist, icy.track),
+      _lrcApiVerified(icy.mainTrack, artist),
+      _lrcApiOnce(icy.artist, icy.mainTrack),
     ]);
     var m = first[0];
     final s = markSwap(first[1]);
     if (m == null) {
-      m = await _lrcApiVerified(icy.track, artist);
+      m = await _lrcApiVerified(icy.mainTrack, artist);
     }
     final ok = [
       for (final d in [m, s])
@@ -935,12 +963,17 @@ class RadioLyrics extends ChangeNotifier {
     if (icy.track.isEmpty) return null;
     final segs = _artistSegments(icy.artist);
     final artist = segs.isNotEmpty ? segs.first : icy.artist;
-    // 主查询「歌手 歌名」，无果降级只按歌名（与 LRCLIB 同款姿势）
-    final queries = <String>[
-      if (artist.isNotEmpty && artist != icy.track) '${artist} ${icy.track}',
-      icy.track,
+    // 查询变体（用户规则 v2.3.63）：**主名第一**——「谢幕（我喜欢）」
+    // 主名是谢幕，括号里是专辑标注，整串拿去搜会把别的《我喜欢》混进来；
+    // 主名查无再用原文括号形兜底。每个变体先「歌手 歌名」再只按歌名
+    final main = icy.mainTrack;
+    final queries = <(String, String)>[
+      for (final t in <String>[main, if (main != icy.track) icy.track]) ...[
+        if (artist.isNotEmpty && artist != t) (t, '$artist $t'),
+        (t, t),
+      ],
     ];
-    for (final q in queries) {
+    for (final (want, q) in queries) {
       Map? best;
       try {
         final uri = Uri.parse(_ncmSearchBase).replace(queryParameters: {
@@ -955,9 +988,9 @@ class RadioLyrics extends ChangeNotifier {
         final data = jsonDecode(utf8.decode(resp.bodyBytes));
         final songs = (data['result']?['songs'] as List?) ?? const [];
         // 歌名定生死（_pick 同款权重）：归一相等 +5 / 互相包含 +3 /
-        // 不沾 -2；歌手沾边 +2。最高分为负 = 搜出来的歌名全不沾，
-        // 宁缺毋滥（错词比查无伤人）
-        final wantClean = _normText(icy.track);
+        // 不沾 -2；歌手沾边 +2。基准 = 本级查询用的主名变体，
+        // 最高分为负 = 搜出来的歌名全不沾，宁缺毋滥（错词比查无伤人）
+        final wantClean = _normText(want);
         if (wantClean.isEmpty) continue;
         var bestScore = 0;
         for (final e in songs) {
@@ -1005,7 +1038,7 @@ class RadioLyrics extends ChangeNotifier {
         final lines = parseLrc(lrc);
         if (lines.isEmpty) continue;
         final durMs = best['duration'];
-        final unverified = _nameOff(name, icy.track);
+        final unverified = _nameOff(name, want);
         if (unverified) {
           debugPrint('[Lyrics] 网易云条目歌名与请求不符, 降级收货 '
               '(要: ${icy.artist} - ${icy.track}, 得: $name)');
@@ -1085,7 +1118,10 @@ class RadioLyrics extends ChangeNotifier {
     var bestScore = -1;
     // 歌手前缀切段（「煻(许佳慧)」→ 许佳慧），逐段比对
     final wants = _artistSegments(icy.artist);
-    final wantTrack = icy.track.toLowerCase().trim();
+    // 歌名打分基准 = 主名（用户规则 v2.3.63：符号外才是主曲名，括号里
+    // 是专辑/标注）——否则「谢幕（我喜欢）」的清洗形「谢幕我喜欢」会把
+    // 别的歌《我喜欢》当「互相包含」放行
+    final wantTrack = icy.mainTrack.toLowerCase().trim();
     for (final r in rows) {
       var score = 0;
       // 歌手匹配：条目歌手名也切段，双向包含比，任一段命中即算。
