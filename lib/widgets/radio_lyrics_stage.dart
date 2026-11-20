@@ -186,6 +186,22 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               // 结果）：明确告诉用户这词是兜底来的，别当成确认无疑
               if (doc.unverifiedName)
                 const _TipChip(text: '歌名未证实 · 结果仅供参考'),
+              // 手动重查（v2.3.62）：电台歌不听指挥，词不对不用等
+              // 电台重放——点一下清缓存立刻重走查询链路
+              Align(
+                alignment: Alignment.centerRight,
+                child: IconButton(
+                  onPressed: () => lyrics.refetch(),
+                  tooltip: '重新查词',
+                  icon: const Icon(Icons.refresh),
+                  iconSize: 20,
+                  color: Colors.white.withValues(alpha: 0.55),
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.all(6),
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
+              ),
               if (lyrics.midJoined)
                 const _TipChip(text: '已中途加入 · 自动滚动，下一首起按时间轴同步')
               else if (!axisOk && doc.synced)

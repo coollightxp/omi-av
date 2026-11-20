@@ -170,6 +170,16 @@ class RadioLyrics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 手动重查当前曲目（v2.3.62）：电台歌不听用户的——错词不等
+  /// 电台重放才能救，点一下清掉这首的缓存立刻重走查询链路。
+  /// 词源的间歇性坏窗口（同 query 先吐错歌后吐对的）靠它当场自愈
+  Future<void> refetch() async {
+    final t = _raw;
+    if (t.isEmpty) return;
+    _cache.remove(t);
+    await _ensureFetch();
+  }
+
   /// 曲名变化（由 PlayerController 在 media-title 有效变化时调用）。
   ///
   /// [pos] 是「现在这条流播到第几秒」，只在非首曲时作为锚点。
@@ -353,49 +363,60 @@ class RadioLyrics extends ChangeNotifier {
     final icy = parseIcyTitle(rawTitle);
     if (icy.track.isEmpty) return null;
 
-    // 兜底路立刻出发，不等主路（两个拆分假设都试，先有结果的算数）
-    final fallback = _fetchFromLrcApi(icy);
-
-    LyricsDoc? fromLrclib;
-    try {
-      for (final cand in _icyCandidates(icy)) {
-        final rows = await _lrclibSearch(cand);
-        if (rows.isEmpty) continue;
-        final best = _pick(rows, cand);
-        if (best == null) continue;
-        final doc = _docFromLrclibRow(best, cand);
-        if (doc != null && doc.lines.isNotEmpty) {
-          fromLrclib = doc;
-          break;
-        }
+    // 三路并行出发（v2.3.62：网易云升主源）：
+    // 网易云词条自带正确歌名（铁证级核验、中文曲库最全）→ 第一位；
+    // LRCLIB（稳定）、LrcAPI（兜底）为备选。谁先回来不等谁，
+    // 最后按「可证实 > 未证实」+「来源优先级」统一排序
+    final fromNetease = _fetchFromNetease(icy);
+    final fromLrclib = _fetchFromLrclib(icy);
+    final fromLrcApi = _fetchFromLrcApi(icy);
+    final cands = <(LyricsDoc, int)>[];
+    void add(Future<LyricsDoc?> f, int sourceRank) async {
+      try {
+        final d = await f;
+        if (d != null && d.lines.isNotEmpty) cands.add((d, sourceRank));
+      } catch (_) {
+        // 单路网络层挂了不拖累整体
       }
+    }
+
+    add(fromNetease, 0);
+    add(fromLrclib, 1);
+    add(fromLrcApi, 2);
+    try {
+      await Future.wait<dynamic>([fromNetease, fromLrclib, fromLrcApi]);
     } catch (_) {
-      // LRCLIB 网络层挂了：不拖累整体，还有并行在跑的 LrcAPI
-      fromLrclib = null;
+      // 单路抛错不拖累其他路的结果（add 里已各自兜过一层）
     }
-    // 带轴优先（用户规则）+ 歌名可证实优先（v2.3.59）：两路都有结果时
-    // 排序取最优——可证实且带轴 > 可证实纯文本 > 未证实带轴 > 未证实
-    // 纯文本。「歌名未证实」= 词源自报家门的歌名与电台报的对不上（如
-    // ICY「蜃楼转移（释怀版）」vs 真身《爱情转移 (释怀版)》），查无与
-    // 放行都可能是错，只能让它垫底。主路可证实且带轴的直接走，不浪费等待
-    if (fromLrclib != null &&
-        fromLrclib.synced &&
-        !fromLrclib.unverifiedName) {
-      return fromLrclib;
-    }
-    final fromLrcApi = await fallback;
-    final cands = [
-      for (final d in [fromLrclib, fromLrcApi])
-        if (d != null) d
-    ];
     if (cands.isEmpty) return null;
+
+    // 排序（v2.3.59 起）：歌名可证实 > 未证实，可证实里带轴 > 纯文本；
+    // 平级时按来源优先级——网易云（词条自带正确歌名）压过 LRCLIB
+    // 压过 LrcAPI（兜底）。网易云第一位的意义：LrcAPI 坏窗口乱填的
+    // 零证据错歌，被网易云的可证实结果直接压掉
     int rank(LyricsDoc d) {
       if (!d.unverifiedName) return d.synced ? 3 : 2;
       return d.synced ? 1 : 0;
     }
 
-    cands.sort((a, b) => rank(b) - rank(a));
-    return cands.first;
+    cands.sort((a, b) {
+      final r = rank(b.$1) - rank(a.$1);
+      return r != 0 ? r : a.$2 - b.$2;
+    });
+    return cands.first.$1;
+  }
+
+  /// LRCLIB 路（原 fetchLyrics 内联逻辑抽出，三路并行化）
+  static Future<LyricsDoc?> _fetchFromLrclib(IcyTitle icy) async {
+    for (final cand in _icyCandidates(icy)) {
+      final rows = await _lrclibSearch(cand);
+      if (rows.isEmpty) continue;
+      final best = _pick(rows, cand);
+      if (best == null) continue;
+      final doc = _docFromLrclibRow(best, cand);
+      if (doc != null && doc.lines.isNotEmpty) return doc;
+    }
+    return null;
   }
 
   /// 拆分假设列表：主假设（歌手 - 歌名）优先，互换假设兜底
@@ -890,6 +911,122 @@ class RadioLyrics extends ChangeNotifier {
         artist: docArtist,
         lines: lines,
         unverifiedName: unverified);
+  }
+
+  // ==================== 网易云词源（v2.3.62） ====================
+
+  /// 第三词源：网易云非官方接口。与 LrcAPI 完全独立的曲库（中文覆盖
+  /// 最好），实测「王菲 - 你在终点等我」LrcAPI 全线查无/乱填时，
+  /// 网易云一次命中本尊。**词条自带正确歌名**——按 id 取词，搜索
+  /// 条目的 trackName 就是歌名铁证，[unverifiedName] 核验直接可信：
+  /// LrcAPI 坏窗口（同 query 吐错歌/按歌手乱填补）的零证据结果在
+  /// 「可证实优先」排序下永远让位给它。接口非官方：失败静默返回
+  /// null，另两路兜着
+  static const String _ncmSearchBase = 'https://music.163.com/api/search/get';
+  static const String _ncmLyricBase = 'https://music.163.com/api/song/lyric';
+
+  static Map<String, String> get _ncmHeaders => {
+        'Referer': 'https://music.163.com',
+        'Cookie': 'appver=2.9.7',
+        'User-Agent': _ua,
+      };
+
+  static Future<LyricsDoc?> _fetchFromNetease(IcyTitle icy) async {
+    if (icy.track.isEmpty) return null;
+    final segs = _artistSegments(icy.artist);
+    final artist = segs.isNotEmpty ? segs.first : icy.artist;
+    // 主查询「歌手 歌名」，无果降级只按歌名（与 LRCLIB 同款姿势）
+    final queries = <String>[
+      if (artist.isNotEmpty && artist != icy.track) '${artist} ${icy.track}',
+      icy.track,
+    ];
+    for (final q in queries) {
+      Map? best;
+      try {
+        final uri = Uri.parse(_ncmSearchBase).replace(queryParameters: {
+          's': q,
+          'type': '1',
+          'limit': '5',
+        });
+        final resp = await http
+            .get(uri, headers: _ncmHeaders)
+            .timeout(const Duration(seconds: 4));
+        if (resp.statusCode != 200) continue;
+        final data = jsonDecode(utf8.decode(resp.bodyBytes));
+        final songs = (data['result']?['songs'] as List?) ?? const [];
+        // 歌名定生死（_pick 同款权重）：归一相等 +5 / 互相包含 +3 /
+        // 不沾 -2；歌手沾边 +2。最高分为负 = 搜出来的歌名全不沾，
+        // 宁缺毋滥（错词比查无伤人）
+        final wantClean = _normText(icy.track);
+        if (wantClean.isEmpty) continue;
+        var bestScore = 0;
+        for (final e in songs) {
+          if (e is! Map) continue;
+          final name = (e['name'] as String?) ?? '';
+          var score = 0;
+          final gotClean = _normText(name);
+          if (gotClean == wantClean) {
+            score += 5;
+          } else if (gotClean.contains(wantClean) ||
+              wantClean.contains(gotClean)) {
+            score += 3;
+          } else {
+            score -= 2;
+          }
+          if (artist.isNotEmpty) {
+            final ar = [
+              for (final a in (e['artists'] as List? ?? const []))
+                if (a is Map) (a['name'] as String?) ?? ''
+            ].join(' ');
+            if (_artistLooselyMatches(artist, ar)) score += 2;
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            best = e;
+          }
+        }
+      } catch (_) {
+        continue; // 网络层挂了不拖累另两路
+      }
+      if (best == null) continue;
+      final id = best['id'];
+      final name = (best['name'] as String?) ?? icy.track;
+      try {
+        final lresp = await http
+            .get(
+              Uri.parse('$_ncmLyricBase?id=$id&lv=1&kv=1&tv=-1'),
+              headers: _ncmHeaders,
+            )
+            .timeout(const Duration(seconds: 4));
+        if (lresp.statusCode != 200) continue;
+        final ld = jsonDecode(utf8.decode(lresp.bodyBytes));
+        final lrc = (ld['lrc']?['lyric'] as String?)?.trim() ?? '';
+        if (lrc.isEmpty) continue;
+        final lines = parseLrc(lrc);
+        if (lines.isEmpty) continue;
+        final durMs = best['duration'];
+        final unverified = _nameOff(name, icy.track);
+        if (unverified) {
+          debugPrint('[Lyrics] 网易云条目歌名与请求不符, 降级收货 '
+              '(要: ${icy.artist} - ${icy.track}, 得: $name)');
+        }
+        return LyricsDoc(
+          title: name,
+          artist: [
+            for (final a in (best['artists'] as List? ?? const []))
+              if (a is Map) (a['name'] as String?) ?? ''
+          ].where((s) => s.isNotEmpty).join('/'),
+          lines: lines,
+          duration: durMs is num
+              ? Duration(milliseconds: durMs.toInt())
+              : null,
+          unverifiedName: unverified,
+        );
+      } catch (_) {
+        continue;
+      }
+    }
+    return null;
   }
 
   static Future<List<Map<String, dynamic>>> _search({
