@@ -30,7 +30,6 @@ class RadioLyricsStage extends StatefulWidget {
 
 class _RadioLyricsStageState extends State<RadioLyricsStage> {
   static const double _lineHeight = 48;
-  static const double _topPad = 16;
 
   final ScrollController _scroll = ScrollController();
   Timer? _tick;
@@ -172,42 +171,20 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
           // 位置跑飞（越过末行）时不能用，走整段提词器滚动
           final axisOk =
               doc.synced && lyrics.axisUsable(widget.controller.position);
-          body = Column(
+          // 提示三区布局（用户 2026-11-20 定稿）：原来提示全部竖排在
+          // 歌词上方太占地方——改成**浮层**盖在歌词区顶部，不占竖向
+          // 空间：左上角=简繁档位，右上角=时间偏差+重查，居中=其余
+          // 提示（歌名未证实/中途加入/位置未知/无时间轴）
+          final centerTips = <String>[
+            if (doc.unverifiedName) '歌名未证实 · 结果仅供参考',
+            if (lyrics.midJoined) '已中途加入 · 自动滚动，下一首起按时间轴同步',
+            if (!lyrics.midJoined && !axisOk && doc.synced) '位置未知 · 自动滚动',
+            if (!doc.synced) '这首没有时间轴 · 整段展示',
+          ];
+          body = Stack(
             children: [
-              // 有非零偏移时挂个角标：关掉设置面板后也能确认微调还在生效
-              if (lyrics.offsetMs != 0 && axisOk)
-                _TipChip(text: '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}'),
-              // 简繁档位角标：确认「设置里的简繁转换」真的到了歌词层。
-              // 词表没加载出来时明确说出来（正常是随包资源秒加载；
-              // 若一直显示未就绪 = 资产没进包，另查）
-              if (lyrics.variant != 0)
-                _TipChip(text: _variantChipText(lyrics.variant)),
-              // 词源自报家门的歌名与电台报的对不上（v2.3.59 降级收货的
-              // 结果）：明确告诉用户这词是兜底来的，别当成确认无疑
-              if (doc.unverifiedName)
-                const _TipChip(text: '歌名未证实 · 结果仅供参考'),
-              // 手动重查（v2.3.62）：电台歌不听指挥，词不对不用等
-              // 电台重放——点一下清缓存立刻重走查询链路
-              Align(
-                alignment: Alignment.centerRight,
-                child: IconButton(
-                  onPressed: () => lyrics.refetch(),
-                  tooltip: '重新查词',
-                  icon: const Icon(Icons.refresh),
-                  iconSize: 20,
-                  color: Colors.white.withValues(alpha: 0.55),
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.all(6),
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-              ),
-              if (lyrics.midJoined)
-                const _TipChip(text: '已中途加入 · 自动滚动，下一首起按时间轴同步')
-              else if (!axisOk && doc.synced)
-                const _TipChip(text: '位置未知 · 自动滚动'),
-              if (!doc.synced) const _TipChip(text: '这首没有时间轴 · 整段展示'),
-              Expanded(
+              // 歌词列表占满整块（顶垫加大，给浮层提示让位）
+              Positioned.fill(
                 child: ScrollConfiguration(
                   // 关掉滚动时冒出来的滑条（用户要求：一定不显示）
                   behavior: ScrollConfiguration.of(context)
@@ -221,56 +198,103 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
                       return false;
                     },
                     child: ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.symmetric(vertical: _topPad),
-                    itemCount: doc.lines.length,
-                    itemExtent: _lineHeight,
-                    // 带时间轴且位置可信：纯显示，禁止拖动（拖动会跟
-                    // 右侧音量手势打架），自动跟随走 animateTo 不受影响。
-                    // 无时间轴/位置不可信：桌面放开拖动/滚轮——用户要
-                    // 看全一整首；手机仍锁（右半边是音量手势区），
-                    // 靠上面的自动滚动浏览全文
-                    physics: axisOk
-                        ? const NeverScrollableScrollPhysics()
-                        : (widget.controller.isDesktop
-                            ? const ClampingScrollPhysics()
-                            : const NeverScrollableScrollPhysics()),
-                    itemBuilder: (context, i) {
-                      final line = doc.lines[i];
-                      final active = axisOk && i == _index;
-                      final near = _index >= 0 && (i - _index).abs() <= 1;
-                      // 整段展示（无时间轴 / 时间轴不可信）整首都要能读：
-                      // 用亮的常规样式，不走「上下句淡化」那套
-                      final plain = !axisOk;
-                      return Center(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Text(
-                            line.text,
-                            maxLines: 2,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: active
-                                  ? Colors.white
-                                  : Colors.white.withValues(
-                                      alpha: plain
-                                          ? 0.85
-                                          : near
-                                              ? 0.55
-                                              : 0.26),
-                              fontSize: active ? 19 : (plain ? 16.5 : 15),
-                              height: 1.35,
-                              fontWeight: active
-                                  ? FontWeight.w700
-                                  : (plain ? FontWeight.w500 : FontWeight.w400),
+                      controller: _scroll,
+                      padding: const EdgeInsets.only(top: 54, bottom: 16),
+                      itemCount: doc.lines.length,
+                      itemExtent: _lineHeight,
+                      // 带时间轴且位置可信：纯显示，禁止拖动（拖动会跟
+                      // 右侧音量手势打架），自动跟随走 animateTo 不受影响。
+                      // 无时间轴/位置不可信：桌面放开拖动/滚轮——用户要
+                      // 看全一整首；手机仍锁（右半边是音量手势区），
+                      // 靠上面的自动滚动浏览全文
+                      physics: axisOk
+                          ? const NeverScrollableScrollPhysics()
+                          : (widget.controller.isDesktop
+                              ? const ClampingScrollPhysics()
+                              : const NeverScrollableScrollPhysics()),
+                      itemBuilder: (context, i) {
+                        final line = doc.lines[i];
+                        final active = axisOk && i == _index;
+                        final near = _index >= 0 && (i - _index).abs() <= 1;
+                        // 整段展示（无时间轴 / 时间轴不可信）整首都要能读：
+                        // 用亮的常规样式，不走「上下句淡化」那套
+                        final plain = !axisOk;
+                        return Center(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Text(
+                              line.text,
+                              maxLines: 2,
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: active
+                                    ? Colors.white
+                                    : Colors.white.withValues(
+                                        alpha: plain
+                                            ? 0.85
+                                            : near
+                                                ? 0.55
+                                                : 0.26),
+                                fontSize: active ? 19 : (plain ? 16.5 : 15),
+                                height: 1.35,
+                                fontWeight: active
+                                    ? FontWeight.w700
+                                    : (plain
+                                        ? FontWeight.w500
+                                        : FontWeight.w400),
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
                     ),
                   ),
+                ),
+              ),
+              // 浮层提示条：左(简繁) · 中(其余提示) · 右(时间偏差+重查)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // 左上角：简繁档位（确认「设置里的简繁转换」真的到
+                    // 了歌词层；词表没就绪时如实说）
+                    if (lyrics.variant != 0)
+                      Flexible(
+                        child: _TipChip(
+                            text: _variantChipText(lyrics.variant)),
+                      ),
+                    // 居中：其余提示（可能多条同时挂，逐条换行）
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          for (final t in centerTips)
+                            _TipChip(text: t, compact: true),
+                        ],
+                      ),
+                    ),
+                    // 右上角：时间偏差角标（关掉设置面板后也能确认微调
+                    // 还在生效）+ 手动重查
+                    if (lyrics.offsetMs != 0 && axisOk)
+                      _TipChip(
+                          text: '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}',
+                          compact: true),
+                    IconButton(
+                      onPressed: () => lyrics.refetch(),
+                      tooltip: '重新查词',
+                      icon: const Icon(Icons.refresh),
+                      iconSize: 20,
+                      color: Colors.white.withValues(alpha: 0.55),
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.all(6),
+                      constraints:
+                          const BoxConstraints(minWidth: 32, minHeight: 32),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -305,14 +329,18 @@ String _fmtOffsetSec(int ms) {
 }
 
 class _TipChip extends StatelessWidget {
-  const _TipChip({required this.text});
+  const _TipChip({required this.text, this.compact = false});
 
   final String text;
+
+  /// 浮层模式：不带底部 margin（提示条盖在歌词区顶部时用，
+  /// 竖排堆叠的老场景才需要 margin 分隔）
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: compact ? EdgeInsets.zero : const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.07),
