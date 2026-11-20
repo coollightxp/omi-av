@@ -24,6 +24,7 @@ class LyricsDoc {
     required this.lines,
     this.synced = true,
     this.duration,
+    this.unverifiedName = false,
   });
 
   final String title;
@@ -35,6 +36,13 @@ class LyricsDoc {
 
   /// 词库里标注的标准时长（用于版本甄别，顺带能反推切歌点）
   final Duration? duration;
+
+  /// 歌名未证实：LrcAPI 返回的歌名（[ti:] / 首行「歌名 - 歌手」）与
+  /// 电台报的歌名对不上，且没有版本标注可解释。常见于电台 ICY 被
+  /// 语音识别抄烂（实测 891 台报「蜃楼转移（释怀版）」，真歌是
+  /// 苏星婕《爱情转移 (释怀版)》）——此时查无与放行都可能是错的，
+  /// 降级处理：整个查询梯子没有「歌名可证实」的结果时才最后兜底
+  final bool unverifiedName;
 
   bool get isEmpty => lines.isEmpty;
 }
@@ -247,6 +255,7 @@ class RadioLyrics extends ChangeNotifier {
       ],
       synced: d.synced,
       duration: d.duration,
+      unverifiedName: d.unverifiedName,
     );
   }
 
@@ -360,14 +369,29 @@ class RadioLyrics extends ChangeNotifier {
       // LRCLIB 网络层挂了：不拖累整体，还有并行在跑的 LrcAPI
       fromLrclib = null;
     }
-    // 带轴优先（用户规则）：同一首歌多来源候选时，带时间轴的永远压过
-    // 纯文本——主路只有纯文本而兜底路可能带轴，必须等兜底路回来比，
-    // 不能让纯文本抢先。主路本身就是带轴的才直接走，不浪费等待
-    if (fromLrclib != null && fromLrclib.synced) return fromLrclib;
+    // 带轴优先（用户规则）+ 歌名可证实优先（v2.3.59）：两路都有结果时
+    // 排序取最优——可证实且带轴 > 可证实纯文本 > 未证实带轴 > 未证实
+    // 纯文本。「歌名未证实」= 词源自报家门的歌名与电台报的对不上（如
+    // ICY「蜃楼转移（释怀版）」vs 真身《爱情转移 (释怀版)》），查无与
+    // 放行都可能是错，只能让它垫底。主路可证实且带轴的直接走，不浪费等待
+    if (fromLrclib != null &&
+        fromLrclib.synced &&
+        !fromLrclib.unverifiedName) {
+      return fromLrclib;
+    }
     final fromLrcApi = await fallback;
-    if (fromLrclib == null) return fromLrcApi;
-    if (fromLrcApi != null && fromLrcApi.synced) return fromLrcApi;
-    return fromLrclib;
+    final cands = [
+      for (final d in [fromLrclib, fromLrcApi])
+        if (d != null) d
+    ];
+    if (cands.isEmpty) return null;
+    int rank(LyricsDoc d) {
+      if (!d.unverifiedName) return d.synced ? 3 : 2;
+      return d.synced ? 1 : 0;
+    }
+
+    cands.sort((a, b) => rank(b) - rank(a));
+    return cands.first;
   }
 
   /// 拆分假设列表：主假设（歌手 - 歌名）优先，互换假设兜底
@@ -422,11 +446,23 @@ class RadioLyrics extends ChangeNotifier {
         .convert(c, ChineseVariantConverter.modeSimplified);
   }
 
+  /// 歌名归一比对（清洗 + 繁简归一）：互不包含 = 对不上
+  static bool _nameOff(String got, String want) {
+    final g = _normText(got);
+    final w = _normText(want);
+    if (g.isEmpty || w.isEmpty) return false;
+    return !(g.contains(w) || w.contains(g));
+  }
+
   /// LrcAPI 响应带 `[ti:]` 元数据时的歌名核验（用户规则：歌名定生死）。
-  /// 标签歌名与请求歌名清洗归一后互不包含 = 错歌
+  /// 标签歌名与请求歌名清洗归一后互不包含 = 后端自作主张给了别的歌。
+  /// v2.3.59 起不再整份弃用——**降级收货**：标记 [LyricsDoc.unverifiedName]，
+  /// 整个查询梯子没有「歌名可证实」的结果时才最后兜底。一刀切丢弃的
+  /// 教训：电台 ICY 报「蜃楼转移（释怀版）」，LrcAPI 正确返回的
+  /// [ti:爱情转移 (释怀版)] 反而因标签≠请求名被拦，混进来的真错歌
+  /// 却因为没有标签漏网
   static bool _tiMismatch(String body, String title) {
-    final want = _normText(title);
-    if (want.isEmpty) return false;
+    if (_normText(title).isEmpty) return false;
     String? ti;
     for (final l in const LineSplitter().convert(body)) {
       final m = RegExp(r'^\[ti:(.*)\]\s*$').firstMatch(l.trim());
@@ -437,9 +473,7 @@ class RadioLyrics extends ChangeNotifier {
       }
     }
     if (ti == null) return false;
-    final got = _normText(ti);
-    if (got.isEmpty) return false;
-    return !(got.contains(want) || want.contains(got));
+    return _nameOff(ti, title);
   }
 
   /// 两份歌词正文是否同一首歌：取前 4 句归一后拼串，相等/互相包含直接
@@ -482,7 +516,9 @@ class RadioLyrics extends ChangeNotifier {
   );
 
   /// 歌名查询变体（逐级放宽，LDDC/网易系工具的通用做法）：
-  /// 原文 → 剥版本括号 → 全清洗（只留文字）
+  /// 括号形原样 → 剥版本括号（**截断**：括号连同内容一起截掉，只留
+  /// 前头文字——不是把括号换成空格，那是「蜃楼转移 释怀版」这种
+  /// 四不像，词源后端反而解析不了）→ 全清洗（只留文字）
   static List<String> _trackVariants(String track) {
     final out = <String>[];
     void add(String v) {
@@ -491,7 +527,10 @@ class RadioLyrics extends ChangeNotifier {
     }
 
     add(track);
-    add(track.replaceAll(_versionParenRe, ' ').replaceAll(RegExp(r'\s{2,}'), ' '));
+    add(track
+        .replaceAll(_versionParenRe, '')
+        .replaceAll(RegExp(r'\s{2,}'), ' ')
+        .trim());
     final clean = _cleanTrack(track);
     if (clean.isNotEmpty) add(clean);
     return out;
@@ -564,6 +603,11 @@ class RadioLyrics extends ChangeNotifier {
     final synced = (best['syncedLyrics'] as String?)?.trim() ?? '';
     final plain = (best['plainLyrics'] as String?)?.trim() ?? '';
     final durSec = (best['duration'] as num?)?.toInt();
+    // 歌名可证实性：条目歌名与电台报的歌名归一后互不包含（且没有
+    // 版本标注可解释）→ 标记「歌名未证实」，跨源汇总时让位给可证实
+    // 的结果（与 LrcAPI [ti:] 同一待遇）
+    final unverified = _nameOff(
+        ((best['trackName'] as String?) ?? '').trim(), icy.track);
 
     if (synced.isNotEmpty) {
       final lines = parseLrc(synced);
@@ -573,6 +617,7 @@ class RadioLyrics extends ChangeNotifier {
         artist: (best['artistName'] as String?) ?? icy.artist,
         lines: lines,
         duration: durSec == null ? null : Duration(seconds: durSec),
+        unverifiedName: unverified,
       );
     }
     // LRCLIB 有条目但没歌词（空壳/纯音乐标记）：返回 null，
@@ -591,6 +636,7 @@ class RadioLyrics extends ChangeNotifier {
         lines: lines,
         synced: false,
         duration: durSec == null ? null : Duration(seconds: durSec),
+        unverifiedName: unverified,
       );
     }
     return null;
@@ -634,14 +680,20 @@ class RadioLyrics extends ChangeNotifier {
       r'發行|OP|SP|出版|MV|和音|配唱|录音室|錄音室)\s*[：:]');
 
   static Future<LyricsDoc?> _fetchFromLrcApi(IcyTitle icy) async {
+    // 「歌名未证实」结果的最后兜底位：查询梯子上任何一级拿到**可证实**
+    // （标签/条目歌名与请求名对得上）的结果立即返回；只有整条梯子全
+    // 是未证实的，才用最先拿到的那份未证实结果兜底（聊胜于无）
+    LyricsDoc? unv;
     // 歌名变体逐级放宽（含简繁双向——简体查不到查繁体、反之亦然，
     // 都不中才判查无）。每个变体内部按「同参两次互证」核验
     if (icy.artist.isEmpty) {
       for (final t in _titleQueryVariants(icy.track)) {
         final d = await _lrcApiVerified(t, '');
-        if (d != null) return d;
+        if (d == null) continue;
+        if (!d.unverifiedName) return d;
+        unv ??= d;
       }
-      return null;
+      return unv;
     }
     // 主假设：歌名 + 前缀切出的第一个人名（「煻(许佳慧)」→ 许佳慧，
     // 整串传进去查不到）；互换假设保留原串，兜「歌名 - 歌手」反写的台
@@ -653,18 +705,30 @@ class RadioLyrics extends ChangeNotifier {
     ]);
     final m = first[0];
     final s = first[1];
-    if (m != null && s != null) {
+    final ok = [
+      for (final d in [m, s])
+        if (d != null && !d.unverifiedName) d
+    ];
+    if (ok.isNotEmpty) {
       // 两假设都命中且是同一首歌：带时间轴的优先（用户规则）
-      if (!m.synced && s.synced && _sameLyricsDoc(m, s)) return s;
-      return m;
+      for (final d in ok) {
+        if (d.synced) return d;
+      }
+      return ok.first;
     }
-    if (m != null) return m;
-    if (s != null) return s;
+    for (final d in [m, s]) {
+      if (d != null && d.unverifiedName) {
+        unv ??= d;
+        break;
+      }
+    }
     for (final t in _titleQueryVariants(icy.track).skip(1)) {
       final d = await _lrcApiVerified(t, artist);
-      if (d != null) return d;
+      if (d == null) continue;
+      if (!d.unverifiedName) return d;
+      unv ??= d;
     }
-    return null;
+    return unv;
   }
 
   /// 同词同参并行问两次，互证后才收货。LrcAPI 聚合后端实测不稳定：
@@ -722,11 +786,12 @@ class RadioLyrics extends ChangeNotifier {
       // 解析失败 = 普通文本/LRC，继续
     }
     // 歌名定生死（用户规则）：响应带 [ti:] 元数据时，标签歌名与请求
-    // 歌名清洗归一后互不包含 = 后端给了别的歌，整份弃用（实测
-    // 「余超颖 - 值得」返回 [ti:值得 (Live)]——含「值得」，放行 ✓）
-    if (_tiMismatch(body, title)) {
-      debugPrint('[Lyrics] LrcAPI [ti:] 与请求歌名不符, 弃用 (要: $title)');
-      return null;
+    // 歌名清洗归一后互不包含 = 后端给了别的歌。v2.3.59 起**降级收货**
+    // 而非弃用（一刀切会把「蜃楼转移（释怀版）」正确命中、标签自报
+    // 家门的《爱情转移 (释怀版)》拦掉），标记后由查询梯子兜底排序
+    final unverified = _tiMismatch(body, title);
+    if (unverified) {
+      debugPrint('[Lyrics] LrcAPI [ti:] 与请求歌名不符, 降级收货 (要: $title)');
     }
     final lines = parseLrc(body);
     // 错歌防护：LrcAPI 有时只按标题匹配，返回**同名的另一首歌**
@@ -757,7 +822,11 @@ class RadioLyrics extends ChangeNotifier {
       }
       if (plain.isEmpty) return null;
       return LyricsDoc(
-          title: title, artist: artist, lines: plain, synced: false);
+          title: title,
+          artist: artist,
+          lines: plain,
+          synced: false,
+          unverifiedName: unverified);
     }
     var docTitle = title;
     var docArtist = artist;
@@ -772,7 +841,11 @@ class RadioLyrics extends ChangeNotifier {
         docArtist = v;
       }
     }
-    return LyricsDoc(title: docTitle, artist: docArtist, lines: lines);
+    return LyricsDoc(
+        title: docTitle,
+        artist: docArtist,
+        lines: lines,
+        unverifiedName: unverified);
   }
 
   static Future<List<Map<String, dynamic>>> _search({
@@ -897,8 +970,11 @@ class RadioLyrics extends ChangeNotifier {
 
   /// ICY `StreamTitle` 清洗拆分：「歌手 - 歌名」是最常见的格式。
   ///
-  /// 处理：去【】标签、括号里的版本标注（Live/伴奏/DJ 版）不参与查询
-  /// 但也不算错误、多个分隔符都认、压缩空白。
+  /// 处理：去【】标签、**括号原样保留**（v2.3.59 用户定稿：不是把
+  /// 括号换成空格，也不能连内容截掉——括号形原样发给词源后端，
+  /// 后端反而能解析：「蜃楼转移（释怀版）」发给 LrcAPI 能正确命中
+  /// 苏星婕《爱情转移 (释怀版)》，而转成空格的「蜃楼转移 释怀版」
+  /// 四不像反而查不到）、多个分隔符都认、压缩空白。
   ///
   /// 拆分一律按「左 = 歌手、右 = 歌名」处理（v2.3.55 定稿）。旧版有
   /// 个「左边短右边长才算歌手-歌名」的长度启发式，在**歌手名比歌名
@@ -910,12 +986,24 @@ class RadioLyrics extends ChangeNotifier {
     var s = raw.trim();
     // 【xxx】前缀标签（很多台这么写）
     s = s.replaceAll(RegExp(r'【[^】]*】'), ' ');
-    // 括号不能连内容一起删：不少台写成「煻(许佳慧) - 逆风明媚」，
-    // 歌手真名就在括号里，删了就只剩台标「煻」。括号本身当分隔符
-    // （换成空格），内容留给歌手候选切段；Live/伴奏/xx版 这类版本
-    // 标注由 _artistSegments 的词表过滤掉
-    s = s.replaceAll(RegExp(r'[（()）]'), ' ');
+    // 括号段先用占位符保护起来再找分隔符——括号里偶尔也带「-」，
+    // 直接找会把「爱情转移 (版-B)」这类切碎。切完左右两侧各自还原
+    // 成原括号形：歌手侧交给 _artistSegments 按非文字切段（括号
+    // 天然当分隔符，真名在括号里也切得出来，注释旧规则保留）
+    const ph = '\uE000';
+    final parens = <String>[];
+    s = s.replaceAllMapped(RegExp(r'[（(][^）)]*[）)]'), (m) {
+      parens.add(m.group(0)!);
+      return ph;
+    });
     s = s.replaceAll(RegExp(r'\s{2,}'), ' ').trim();
+
+    String restore(String x) {
+      for (final p in parens) {
+        x = x.replaceFirst(ph, p);
+      }
+      return x;
+    }
 
     for (final sep in const [' - ', ' – ', ' — ', '-', '－', '–', '—', '|']) {
       final i = s.indexOf(sep);
@@ -925,8 +1013,8 @@ class RadioLyrics extends ChangeNotifier {
       if (left.isEmpty || right.isEmpty) continue;
       // feat 剥离（业界做法）：「晴天 (feat. 王力宏)」里 feat 后面的
       // 人是合作者不是歌名的一部分——归入歌手栏，切段后参与比对
-      var track = _tidy(right);
-      var artist = _tidy(left);
+      var track = _tidy(restore(right));
+      var artist = _tidy(restore(left));
       final fm = RegExp(
               r'[\s]*[\(（\[【]?\s*(?:feat\.?|ft\.?|featuring)\s*[:：]?\s*'
               r'([^)）\]】]+)[\)）\]】]?\s*$',
@@ -939,7 +1027,8 @@ class RadioLyrics extends ChangeNotifier {
       }
       return IcyTitle(track, artist);
     }
-    return IcyTitle(_tidy(s), '');
+    // 无分隔符整串（「蜃楼转移（释怀版）」）也保留括号原形
+    return IcyTitle(_tidy(restore(s)), '');
   }
 
   static String _tidy(String s) => s

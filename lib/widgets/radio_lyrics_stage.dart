@@ -182,6 +182,10 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               // 若一直显示未就绪 = 资产没进包，另查）
               if (lyrics.variant != 0)
                 _TipChip(text: _variantChipText(lyrics.variant)),
+              // 词源自报家门的歌名与电台报的对不上（v2.3.59 降级收货的
+              // 结果）：明确告诉用户这词是兜底来的，别当成确认无疑
+              if (doc.unverifiedName)
+                const _TipChip(text: '歌名未证实 · 结果仅供参考'),
               if (lyrics.midJoined)
                 const _TipChip(text: '已中途加入 · 自动滚动，下一首起按时间轴同步')
               else if (!axisOk && doc.synced)
