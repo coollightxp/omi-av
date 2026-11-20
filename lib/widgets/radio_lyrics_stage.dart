@@ -41,6 +41,14 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
   /// 到尾后停留片刻再回顶（像读一篇文章，翻到底停一停）
   int _endHoldMs = 0;
 
+  // ---- 状态条上的「异常提示」闪现（用户 2026-11-20 五次定稿）----
+  /// 当前闪着的异常提示（中途加入/位置未知/无时间轴/歌名未证实）。
+  /// 只闪 4 秒就淡出，那一行交还给常驻状态（自动/简体/繁体 · 时间偏移）
+  String? _tipText;
+  DateTime? _tipUntil;
+  /// 上一次的提示签名：变了才重新计时（切歌、中途加入状态变化）
+  String _tipSig = '';
+
   @override
   void initState() {
     super.initState();
@@ -57,7 +65,40 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
         _scrollTo(i);
       }
       _autoScrollPlain();
+      _syncStatusTip(lyrics);
     });
+  }
+
+  /// 异常提示的 4 秒闪现（用户定稿）：提示只作「刚进这首歌时告知一句」，
+  /// 看完就该退场——常驻位置留给 自动/简体/繁体 · 时间偏移，那才是
+  /// 需要长期瞄一眼的状态。提示文本变了（切歌/中途加入转正常）就重
+  /// 新计时；提示清空则立刻交还常驻行
+  void _syncStatusTip(RadioLyrics lyrics) {
+    final doc = lyrics.doc;
+    if (doc == null) return;
+    final axisOk = doc.synced && lyrics.axisUsable(widget.controller.position);
+    final tips = <String>[
+      if (doc.unverifiedName) '歌名未证实 · 仅供参考',
+      if (lyrics.midJoined) '中途加入 · 自动滚动',
+      if (!lyrics.midJoined && !axisOk && doc.synced) '位置未知 · 自动滚动',
+      if (!doc.synced) '无时间轴 · 整段展示',
+    ];
+    final sig = tips.join('|');
+    final now = DateTime.now();
+    if (sig != _tipSig) {
+      _tipSig = sig;
+      setState(() {
+        _tipText = tips.isEmpty ? null : tips.join('   ·   ');
+        _tipUntil = tips.isEmpty ? null : now.add(const Duration(seconds: 4));
+      });
+      return;
+    }
+    if (_tipText != null && _tipUntil != null && now.isAfter(_tipUntil!)) {
+      setState(() {
+        _tipText = null;
+        _tipUntil = null;
+      });
+    }
   }
 
   @override
@@ -171,58 +212,42 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
           // 位置跑飞（越过末行）时不能用，走整段提词器滚动
           final axisOk =
               doc.synced && lyrics.axisUsable(widget.controller.position);
-          // 提示排版（用户 2026-11-20 二次定稿，重排美化）：
-          // ① 状态行：左=简繁档位、右=时间偏差，两个小 chip 左右分置；
-          // ② 说明行：其余提示（歌名未证实/中途加入/位置未知/无时间轴）
-          //    合并成一句居中小字、单行省略——**不再逐条堆 chip**，
-          //    长句叠在一起很难看（实测「已中途加入…」那条就叠了）；
-          // ③ 歌词区从提示下方开始，实占不重叠（v2.3.64 浮层方案会
-          //    盖住第一行歌词，已废弃）。刷新按钮删除（点了没反应）
-          final tips = <String>[
-            if (doc.unverifiedName) '歌名未证实 · 仅供参考',
-            if (lyrics.midJoined) '中途加入 · 自动滚动',
-            if (!lyrics.midJoined && !axisOk && doc.synced)
-              '位置未知 · 自动滚动',
-            if (!doc.synced) '无时间轴 · 整段展示',
-          ];
-          final showVariant = lyrics.variant != 0;
-          final showOffset = lyrics.offsetMs != 0 && axisOk;
+          // 状态条（用户 2026-11-20 五次定稿，最终版）：
+          // **一行写全**所有状态——「自动/简体/繁体 · 时间偏移 -4 秒」，
+          // 不做左右分置（中间会空出大半个框）、不做来回交替（要等，
+          // 还会闪）。异常提示（中途加入/位置未知/无时间轴/歌名未证实）
+          // 只在刚进这首歌时**顶替这一行 4 秒**，随后 fade 回常驻状态。
+          // 视觉用大众最熟的「标签」形态：圆角 8（不用 20，避免跟外层
+          // 歌词框的大圆角叠成双弧）、底色白 5%、边框白 12%——有块感
+          // 但不抢戏，一眼就知道「这是状态，不是歌词」
+          final statusText = _tipText ??
+              [
+                _variantChipText(lyrics.variant),
+                if (lyrics.offsetMs != 0 && axisOk)
+                  '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}',
+              ].join('   ·   ');
           body = Column(
             children: [
-              // **单行极简状态条**（用户 2026-11-20 三次定稿：既好看
-              // 又让歌词显示更多）——三行 chip 太占地，浮层又盖歌词。
-              // 折中：全部提示压成一行淡色小字，左=简繁档位、中=其余
-              // 提示（单行省略绝不叠）、右=时间偏差；无背景无边框，
-              // 不抢歌词的戏。整条高约 14px，比三行 chip 省 70px 左右，
-              // 等于多显示 1.5 行歌词
-              if (showVariant || tips.isNotEmpty || showOffset)
-                Padding(
-                  padding:
-                      const EdgeInsets.only(left: 6, right: 6, bottom: 4),
-                  child: Row(
-                    children: [
-                      if (showVariant)
-                        Text(
-                          _variantChipText(lyrics.variant),
-                          style: _statusStyle(),
-                        ),
-                      Expanded(
-                        child: Text(
-                          tips.join('   ·   '),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                          style: _statusStyle(),
-                        ),
-                      ),
-                      if (showOffset)
-                        Text(
-                          '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}',
-                          style: _statusStyle(),
-                        ),
-                    ],
+              // 距框左边 20px（Container 已有 14，这里补 6）；
+              // 与歌词隔 10px——不贴字，也不白占一行
+              Padding(
+                padding: const EdgeInsets.only(left: 6, bottom: 10),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 420),
+                    // 切换时两张叠放：高度不跳、起点不动，只有淡入淡出
+                    layoutBuilder: (current, previous) => Stack(
+                      alignment: Alignment.centerLeft,
+                      children: [...previous, if (current != null) current],
+                    ),
+                    child: _StatusChip(
+                      key: ValueKey(statusText),
+                      text: statusText,
+                    ),
                   ),
                 ),
+              ),
               Expanded(
                 child: ScrollConfiguration(
                   // 关掉滚动时冒出来的滑条（用户要求：一定不显示）
@@ -238,7 +263,7 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
                     },
                     child: ListView.builder(
                       controller: _scroll,
-                      padding: const EdgeInsets.only(top: 4, bottom: 16),
+                      padding: const EdgeInsets.only(top: 4, bottom: 8),
                       itemCount: doc.lines.length,
                       itemExtent: _lineHeight,
                       // 带时间轴且位置可信：纯显示，禁止拖动（拖动会跟
@@ -309,20 +334,49 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
   }
 }
 
-/// 状态条文字样式：10.5 号淡白小字——一行承载全部提示，
-/// 细看可确认状态（简繁生效/时间偏移），平时几乎不抢歌词的戏
-TextStyle _statusStyle() => TextStyle(
-      color: Colors.white.withValues(alpha: 0.40),
-      fontSize: 10.5,
-      height: 1.15,
-    );
+/// 状态条：一枚圆角矩形小标签（用户 2026-11-20 定稿形态）。
+///
+/// 为什么用「标签」而不是纯文字/竖线/眉线：chip 是移动端最普适的
+/// 形态（微信/淘宝/视频站的标签都长这样），用户零学习成本就知道
+/// 「这是一条状态，不是歌词内容」。底色与边框都压到极淡（5% / 12%），
+/// 圆角只给 8——外层歌词框是 20 的大圆角，这里再用大圆角会叠成双弧，
+/// 视觉上「框里套个胶囊」，显挤。
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({super.key, required this.text});
 
-/// 简繁档位角标文本：词表没就绪时如实说（显示原文），别让用户
-/// 以为开关坏了或没保存
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+      ),
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: 0.58),
+          fontSize: 11.5,
+          height: 1.2,
+        ),
+      ),
+    );
+  }
+}
+
+/// 简繁档位文本（用户 2026-11-20 定稿：三档就叫 自动 / 简体 / 繁体，
+/// 不用「已转简体」这类长说法——状态条要短才放得下一行写全）。
+/// 词表没就绪时如实加注，别让用户以为开关坏了或没保存
 String _variantChipText(int v) {
+  if (v == 0) return '自动';
   final cv = ChineseVariantConverter.instance;
-  if (!cv.loaded) return '简繁词表未就绪 · 暂显示原文';
-  return v == 1 ? '已转简体' : '已转繁体';
+  final name = v == 1 ? '简体' : '繁体';
+  return cv.loaded ? name : '$name（词表未就绪）';
 }
 
 String _fmtOffsetSec(int ms) {
