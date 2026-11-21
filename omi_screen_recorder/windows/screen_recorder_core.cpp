@@ -49,6 +49,13 @@ constexpr GUID kVirtualAudioDeviceProcessLoopback = {
 constexpr GUID kIeeeFloatSubtype = {
     0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 
+// ActivateAudioInterface 在部分 SDK 版本的 mmdeviceapi.h 里被多重守卫
+// 挡住（NTDDI 之外还有其他条件），签名固定，这里直接自声明，
+// 符号由 mmdevapi.lib 提供；与头文件声明重复时也兼容
+extern "C" HRESULT __stdcall ActivateAudioInterface(
+    const GUID* virtualAudioDevice, const PROPVARIANT* activationParams,
+    REFIID riid, void** outInterface);
+
 std::wstring Utf8ToWide(const std::string& s) {
   if (s.empty()) return std::wstring();
   int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
