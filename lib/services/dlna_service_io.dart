@@ -84,12 +84,22 @@ class DlnaService {
 
   bool get isRunning => _http != null && _ssdp != null;
 
+  /// 本次运行是否收到过投屏（SetURI）。发送端先发 Stop 会把
+  /// [_currentUri] 清空，但它的 UI 未必跟着清（B 站只认 SSDP byebye），
+  /// 断开时必须靠这个标志补发一次「设备消失」。
+  bool _hadSession = false;
+
   /// 本机（接收端 UI）主动断开投屏：清媒体 + 推 STOPPED 事件 +
   /// 终止所有 GENA 订阅 + SSDP byebye 一轮（微信视频号不解析事件、
   /// 不续订订阅，只有设备从 SSDP 消失才会清投屏 UI；byebye 只发一次，
   /// 设备仍在线，正常 alive 周期广播不受影响）
   void kickCastClients({bool keepAlive = true}) {
     final wasActive = _currentUri != null && _currentUri!.isNotEmpty;
+    // 本地认为「没在投」不等于发送端也这么认为：Stop 只清了我们的
+    // URI，B 站/微信类 DMC 还挂着「投屏中」，只有 SSDP byebye 能让它
+    // 清 UI。只要本次运行收到过投屏，断开就广播一次设备消失。
+    final shouldByebye = wasActive || _hadSession;
+    _hadSession = false;
     _currentUri = null;
     _currentTitle = '';
     _currentMetaData = '';
@@ -106,9 +116,9 @@ class DlnaService {
     }
     _subs.clear();
     _lastPushedState = null;
-    if (wasActive) _notifyByebye(keepAlive: keepAlive);
+    if (shouldByebye) _notifyByebye(keepAlive: keepAlive);
     CastLog.write('DLNA kickCastClients wasActive=$wasActive '
-        'keepAlive=$keepAlive');
+        'byebye=$shouldByebye keepAlive=$keepAlive');
   }
 
   /// 退出程序 / 关机 / 关服务前的最后一次断开通知（v2.3.67）。
@@ -121,10 +131,9 @@ class DlnaService {
   Future<void> shutdownCastLink() async {
     final wasActive = _currentUri != null && _currentUri!.isNotEmpty;
     kickCastClients(keepAlive: false);
-    if (wasActive) {
-      // byebye 是 6 个 USN 的 UDP 突发，给网卡足够时间发出去
-      await Future<void>.delayed(const Duration(milliseconds: 150));
-    }
+    // byebye 是 6 个 USN 的 UDP 突发，给网卡足够时间发出去再关 socket。
+    // 不能只在 wasActive 时等：发送端先 Stop 的路径同样发了 byebye
+    await Future<void>.delayed(const Duration(milliseconds: 150));
     stop();
     CastLog.write('DLNA shutdownCastLink done wasActive=$wasActive');
   }
@@ -275,6 +284,14 @@ class DlnaService {
   }
 
   void stop() {
+    // 关服务前还有未清的会话（比如用户直接关掉 DLNA 开关）：
+    // 先补一轮 byebye 再关 socket，否则手机端一直停在「投屏中」
+    final ssdp = _ssdp;
+    if (_hadSession && ssdp != null) {
+      _sendByebyePackets(ssdp);
+      CastLog.write('DLNA stop with pending session -> byebye');
+    }
+    _hadSession = false;
     _aliveTimer?.cancel();
     _aliveRestoreTimer?.cancel();
     _aliveRestoreTimer = null;
@@ -943,6 +960,7 @@ class DlnaService {
             }
           }
           _currentUri = newUri;
+          if (newUri.isNotEmpty) _hadSession = true;
           _currentTitle = _extractCastTitle(body);
           _currentMetaData = _extract(body, 'CurrentURIMetaData');
           CastLog.write('DLNA SetURI title="$_currentTitle" '

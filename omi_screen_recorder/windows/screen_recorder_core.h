@@ -22,8 +22,13 @@ class ScreenRecorder {
  public:
   static ScreenRecorder& Instance();
 
-  /// Win10 2004（build 19041）起可用：进程回环音频需要它
+  /// Win10 1809（build 17763）起可用：Graphics Capture 的底线。
+  /// 进程回环音频要 2004，但缺声音只退化成纯视频，不作为门槛。
   bool IsSupported();
+
+  /// 诊断串（os 版本 / supported / 进程回环 API 是否可用），
+  /// 录制被判定不可用时用来解释原因
+  std::string Diagnose();
 
   /// 启动录制。hwnd 为 Flutter 播放器窗口。
   RecorderResult Start(HWND hwnd, const std::string& pathUtf8, int fps,

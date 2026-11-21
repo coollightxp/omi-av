@@ -58,6 +58,13 @@ void OmiScreenRecorderPlugin::HandleMethodCall(
     return;
   }
 
+  if (method == "diagnose") {
+    // 只返回文本：Dart 侧直接写进 dlna_cast.log，用户截图就能定位
+    result->Success(
+        EncodableValue(omi_recorder::ScreenRecorder::Instance().Diagnose()));
+    return;
+  }
+
   if (method == "start") {
     const auto* args =
         std::get_if<EncodableMap>(method_call.arguments());

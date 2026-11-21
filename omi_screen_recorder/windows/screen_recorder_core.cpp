@@ -445,8 +445,49 @@ bool ScreenRecorder::IsSupported() {
   if (fn(&info) != 0) return false;
   if (info.dwMajorVersion > 10) return true;
   if (info.dwMajorVersion < 10) return false;
-  // 进程回环音频需要 Win10 2004（build 19041）
-  return info.dwBuildNumber >= 19041;
+  // 只要 Graphics Capture 可用就允许录：WGC 从 Win10 1809(17763) 起有。
+  // 进程回环音频要 2004(19041)，但拿不到声音只是退化成纯视频
+  //（SetupAudioCapture 失败时 hasAudio=false，录制照常），
+  // 不能因为声音能力不足就把整条录制判死——否则 1909/1809 的机器
+  // 会永远静默回退到内核转封装（投屏 HLS 因此白录）。
+  return info.dwBuildNumber >= 17763;
+}
+
+namespace {
+std::string Narrow(const std::wstring& w) {
+  if (w.empty()) return {};
+  const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                    static_cast<int>(w.size()), nullptr, 0,
+                                    nullptr, nullptr);
+  std::string out(static_cast<size_t>(n), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                      &out[0], n, nullptr, nullptr);
+  return out;
+}
+}  // namespace
+
+// 诊断信息：录制不可用时，界面/日志能说清是哪一环挡住的，
+// 而不是只看到一个 false（v2.3.71）
+std::string ScreenRecorder::Diagnose() {
+  typedef LONG(WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+  const HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+  RTL_OSVERSIONINFOW info{};
+  info.dwOSVersionInfoSize = sizeof(info);
+  std::wstring os = L"unknown";
+  if (nt != nullptr) {
+    const auto fn =
+        reinterpret_cast<RtlGetVersionPtr>(GetProcAddress(nt, "RtlGetVersion"));
+    if (fn != nullptr && fn(&info) == 0) {
+      os = std::to_wstring(info.dwMajorVersion) + L"." +
+           std::to_wstring(info.dwMinorVersion) + L"." +
+           std::to_wstring(info.dwBuildNumber);
+    }
+  }
+  std::wstring r = L"os=" + os;
+  r += L" supported=" + std::wstring(IsSupported() ? L"1" : L"0");
+  r += L" processLoopbackApi=";
+  r += std::wstring(ResolveActivateAudioInterface() != nullptr ? L"1" : L"0");
+  return Narrow(r);
 }
 
 RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,

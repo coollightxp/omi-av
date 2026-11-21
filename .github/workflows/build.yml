@@ -2609,6 +2609,22 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # 插件登记自检：本地插件 omi_screen_recorder 必须出现在
+      # generated_plugins.cmake 里，否则它根本不参与编译，
+      # 运行时 isSupported() 恒 false → 录制静默退回内核转封装
+      - name: Verify local plugin registration
+        shell: pwsh
+        run: |
+          $f = 'windows/flutter/generated_plugins.cmake'
+          if (-not (Test-Path $f)) { throw "missing $f" }
+          Get-Content $f
+          if (Select-String -Path $f -Pattern 'omi_screen_recorder' -Quiet) {
+            'plugin registration OK'
+          } else {
+            # 不在这里中断：包照出，但日志里必须留下明确结论
+            Write-Host '::warning::omi_screen_recorder NOT registered in generated_plugins.cmake'
+          }
+
       - name: Build Windows
         run: flutter build windows --release
 

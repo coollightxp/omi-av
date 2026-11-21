@@ -2,6 +2,8 @@
 class ScreenRecorder {
   static Future<bool> isSupported() async => false;
 
+  static Future<String?> diagnose() async => null;
+
   static Future<String?> start(String path,
       {int fps = 30, int bitrateMbps = 8}) async {
     return 'platform';

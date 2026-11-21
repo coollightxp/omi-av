@@ -18,6 +18,16 @@ class ScreenRecorder {
     }
   }
 
+  /// 诊断串（os 版本 / supported / 进程回环 API 是否可用）。
+  /// 插件未注册时返回 null——调用方据此区分「没编进包」和「系统不支持」。
+  static Future<String?> diagnose() async {
+    try {
+      return await _ch.invokeMethod<String>('diagnose');
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 启动录制。成功返回 null；失败返回错误描述（调用方可回退内核录制）。
   static Future<String?> start(String path,
       {int fps = 30, int bitrateMbps = 8}) async {

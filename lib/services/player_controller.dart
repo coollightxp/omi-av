@@ -5254,8 +5254,9 @@ class PlayerController extends ChangeNotifier {
   /// Windows 优先系统级录制（Graphics Capture + WASAPI 进程回环 + Media
   /// Foundation，omi_screen_recorder 插件）：录的是播放器窗口画面，
   /// 与内核无关，内核转封装出不去的流（投屏 HLS、视频号等）照样能录。
-  /// Win10 2004+ 可用，不可用或失败时回退内核录制（mpv stream-record /
-  /// mdk record）。网页频道用 MediaRecorder 录制 <video>，路径不变。
+  /// Win10 1809+ 可用（有画面就能录，声音拿不到退化成纯视频），
+  /// 不可用或启动失败时回退内核录制（mpv stream-record / mdk record），
+  /// 并在界面上说明回退原因。网页频道用 MediaRecorder 录制 video 元素。
   Future<bool> startRecording() async {
     if (_webPageActive) return _startWebRecording();
     final vc = _videoController;
@@ -5277,10 +5278,19 @@ class PlayerController extends ChangeNotifier {
           return true;
         }
         // 系统级失败：回退内核录制
-        _lastError = '系统级录制不可用($err)，已回退内核录制';
+        _lastError = '系统录制启动失败（$err），已回退内核';
         CastLog.write('rec start system FAILED: $err -> kernel');
+        OsdBus.show(_lastError!, icon: Icons.videocam_off);
       } else if (Platform.isWindows) {
-        CastLog.write('rec start system unsupported -> kernel');
+        // 不能再静默回退：v2.3.70 之前这里只写日志，用户以为在录屏，
+        // 实际走的是注定失败的内核转封装（投屏一录就「没有数据」）
+        final diag = await ScreenRecorder.diagnose();
+        CastLog.write('rec start system unsupported -> kernel '
+            'diag=${diag ?? "(plugin missing)"}');
+        _lastError = diag == null
+            ? '系统录制插件未加载，已回退内核'
+            : '系统录制不可用（$diag），已回退内核';
+        OsdBus.show(_lastError!, icon: Icons.videocam_off);
       }
       if (vc == null || !vc.value.isInitialized) {
         _lastError = '当前内核不支持录制';
