@@ -40,4 +40,7 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   ole32
 )
 
-target_include_directories(${PLUGIN_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+# INTERFACE：generated_plugin_registrant.cc 要 include
+# <omi_screen_recorder/...>，头文件目录必须传播给 runner 目标
+target_include_directories(${PLUGIN_NAME} INTERFACE
+  "${CMAKE_CURRENT_SOURCE_DIR}/include")
