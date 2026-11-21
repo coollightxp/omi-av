@@ -202,8 +202,8 @@ bool SetupAudioCapture() {
     pv.blob.cbSize = sizeof(params);
     pv.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
     IAudioClient* client = nullptr;
-    const HRESULT hr = ActivateAudioInterface(kVirtualAudioDeviceProcessLoopback,
-                                              &pv, IID_PPV_ARGS(&client));
+    const HRESULT hr = ActivateAudioInterface(
+        &kVirtualAudioDeviceProcessLoopback, &pv, IID_PPV_ARGS(&client));
     if (SUCCEEDED(hr) && client != nullptr) {
       WAVEFORMATEX* fmt = nullptr;
       if (SUCCEEDED(client->GetMixFormat(&fmt)) && IsFloatFormat(fmt)) {
