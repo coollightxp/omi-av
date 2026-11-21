@@ -915,7 +915,9 @@ class PlayerController extends ChangeNotifier {
 
   /// 停止 DLNA 投屏接收服务（设置面板开关）
   void _stopDlna() {
-    dlnaService.stop();
+    // 关服务等于设备从网络消失：正在投屏时先通知发送端（v2.3.67），
+    // 否则对方一直显示「已连接」。shutdownCastLink 内部会等包发出再关。
+    unawaited(dlnaService.shutdownCastLink());
     _dlnaRunning = false;
     _dlnaEndpoint = '';
     notifyListeners();
@@ -1905,7 +1907,10 @@ class PlayerController extends ChangeNotifier {
       _castEndedTimer?.cancel();
       _castEndedTimer = null;
       unawaited(CastStreamProxy.instance.stop());
-      dlnaService.clearCurrentMedia();
+      // v2.3.67：切台也是一次「离开投屏」，必须走完整断开——
+      // 只 clearCurrentMedia 对微信视频号这类不订阅 GENA 的发送端无效
+      //（它只认 SSDP byebye 和轮询结果），手机端会一直显示「已连接」
+      dlnaService.kickCastClients();
     }
     // 记录「最后一次真实播放的台」= 投屏结束后的恢复目标。
     // 只在真实频道上写，投屏占位频道永远不写；这样连投几次屏、
@@ -3537,6 +3542,8 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.shutdown:
         OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
         notifyListeners();
+        // 关机前若还在投屏，先把链路断干净并通知发送端（v2.3.67）
+        if (_isCasting) await dlnaService.shutdownCastLink();
         // 先发系统命令再退程序：进程先死也不影响系统照常关闭。
         // shutdown /p 立即关机、无系统倒计时通知（2.1.46 定稿）
         if (isDesktop) {
@@ -3551,6 +3558,7 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.exit:
         OsdBus.show('定时关闭：退出应用', icon: Icons.bedtime);
         notifyListeners();
+        if (_isCasting) await dlnaService.shutdownCastLink();
         if (isDesktop) {
           await ExitGuard.quit();
         } else if (!kIsWeb) {
@@ -4199,6 +4207,11 @@ class PlayerController extends ChangeNotifier {
   Future<void> prepareForExit() async {
     try {
       await flushSettings();
+    } catch (_) {}
+    // 关窗 / 托盘退出 / 定时退出都收敛到 ExitGuard → 这里（v2.3.67）。
+    // 在投屏态下必须先通知发送端再停内核，否则手机端一直显示「已连接」。
+    try {
+      await dlnaService.shutdownCastLink();
     } catch (_) {}
     // 网页态由播放页负责拆（平台视图随 widget 树销毁），这里只停内核
     try {
@@ -5743,7 +5756,10 @@ class PlayerController extends ChangeNotifier {
     }
     _disposeVideoController();
     WakelockPlus.disable();
-    dlnaService.stop();
+    // 兜底：正常退出路径（shutdownForExit / prepareForExit）已经 await 过
+    // 完整断开（含 150ms 发包窗口）。走到 dispose 时进程即将销毁，
+    // 这里只能再发一次、不等待，能发出去算赚到（v2.3.67）。
+    unawaited(dlnaService.shutdownCastLink());
     remoteAdminService.stop();
     unawaited(audioStop());
     reservationManager.dispose();

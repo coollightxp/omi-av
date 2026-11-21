@@ -1321,20 +1321,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       }
       return;
     }
-    if (c.isCasting) {
-      // 投屏中按返回/右键：第一次只提示，2 秒内再按才真正断开，防误触
-      _logBackEaten('casting');
-      final now = DateTime.now();
-      if (_castExitArmAt != null &&
-          now.difference(_castExitArmAt!) < const Duration(seconds: 2)) {
-        _castExitArmAt = null;
-        await c.stopCastAndRestore(userInitiated: true);
-      } else {
-        _castExitArmAt = now;
-        OsdBus.show('再按一次退出投屏', icon: Icons.cast_connected);
-      }
-      return;
-    }
+    // 投屏中按返回/右键：不再「双击才断开」（v2.3.67）。
+    // 这里**故意不做任何拦截**，让层级继续往下走：
+    //   · 面板开着 → 收面板（下一层就是它）
+    //   · 面板没开 → 落到退出卡片，用户可进设置/定时/退出/关机
+    // 断投屏改走底栏最右那颗「断开投屏」（发送端自己停也一样会恢复），
+    // 按返回永远不会断投屏，也就不会误触。
+
     if (_leftDrawerOpen) {
       _logBackEaten('drawer');
       setState(() => _leftDrawerOpen = false);
@@ -2094,6 +2087,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _shutdownRefresh = null;
     // 卡片确认后才真正关机（系统侧 t=0 立即执行，不再弹系统倒计时框）
     if (result == 'confirm' && mounted) {
+      // 同步/异步：关机前若还在投屏，先断开并通知发送端（v2.3.67），
+      // 否则手机端会一直停在「已连接」直到超时
+      final c = context.read<PlayerController>();
+      if (c.isCasting) await c.dlnaService.shutdownCastLink();
       await shutdownSystem();
     }
   }

@@ -42,5 +42,9 @@ class DlnaService {
 
   void clearCurrentMedia() {}
 
-  void kickCastClients() {}
+  void kickCastClients({bool keepAlive = true}) {}
+
+  Future<void> shutdownCastLink() async {
+    stop();
+  }
 }

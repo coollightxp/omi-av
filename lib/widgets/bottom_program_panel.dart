@@ -3,7 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/epg_program.dart';
-import '../core/menu_nav_flag.dart';
+
 import '../core/theme/app_colors.dart';
 import '../core/widgets/audio_wave.dart';
 import '../core/widgets/channel_badge.dart';
@@ -486,37 +486,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     final hasChannel = c.currentChannel != null;
     // 电台没有画面：旋转/截图/录制无意义，置灰；播放/暂停仍可用
     final hasVideo = hasChannel && !(c.currentChannel?.isRadio ?? false);
-    // 投屏态：播放会话由发送端控制，只保留必要操作
-    if (c.isCasting) {
-      final castActions = <_KbAction>[
-        _KbAction(
-            'playpause',
-            c.uiShowsPlaying ? Icons.pause : Icons.play_arrow,
-            c.uiShowsPlaying ? '暂停' : '播放',
-            widget.onTogglePlayPause),
-        if (c.isDesktop)
-          _KbAction('mute', c.isMuted ? Icons.volume_off : Icons.volume_up,
-              c.isMuted ? '取消静音' : '静音', c.toggleMute),
-        _KbAction(
-            'rotate',
-            Icons.screen_rotation,
-            c.videoRotation.value == 0
-                ? '旋转画面'
-                : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
-            c.cycleVideoRotation),
-        _KbAction('cast', Icons.cast_connected, '断开投屏', c.stopCastAndRestore),
-      ];
-      _actions = castActions;
-      if (_kbId != null && !castActions.any((a) => a.id == _kbId)) {
-        _kbId = null;
-      }
-      return Row(mainAxisSize: MainAxisSize.min, children: [
-        for (final a in castActions) ...[
-          _btn(a, big: a.id == 'playpause'),
-          if (a.id == 'rotate') _groupDivider(AppDensity.of(context)),
-        ],
-      ]);
-    }
+    // 投屏态不再单独做一套精简按钮（v2.3.67）：投屏播的就是视频，
+    // 底栏与普通视频一致——播放/暂停、截图/录制（桌面）、旋转、静音、
+    // 全屏（桌面）、断开投屏。以前只剩四格，手机上连静音都没有；
+    // 「重载」对投屏无意义（会话由发送端控制），投屏时直接不出现。
     // 电台变体（方案 13.3）：音频没有画面，截图/旋转/小窗都不出现
     final isRadio = c.currentChannel?.isRadio ?? false;
     // 【顺序红线】这里必须与下方 children 的拼装顺序逐项一致——
@@ -524,18 +497,22 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     // 焦点会"跳到最后一个又跳回来"（电台录音按钮实测踩过）。
     // 可用动作：禁用按钮不进列表，遥控器只会高亮能点的按钮
     final actions = <_KbAction>[
-      // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
-      // 遥控器左右键同路径），面板不单独设清晰度按钮
-      _KbAction(
-          'prevSource',
-          Icons.skip_previous,
-          c.webPageActive ? '降低清晰度' : '上一个源',
-          c.hasPrevSource ? c.prevSource : null),
-      _KbAction(
-          'nextSource',
-          Icons.skip_next,
-          c.webPageActive ? '提升清晰度' : '下一个源',
-          c.hasNextSource ? c.nextSource : null),
+      // 投屏只有一个源，线路步进没有意义：投屏时整组不声明，
+      // 遥控器也就不会把焦点停到一个看不见的按钮上
+      if (!c.isCasting) ...[
+        // 网页频道前台时切源键映射为清晰度循环（档位并入切源逻辑，
+        // 遥控器左右键同路径），面板不单独设清晰度按钮
+        _KbAction(
+            'prevSource',
+            Icons.skip_previous,
+            c.webPageActive ? '降低清晰度' : '上一个源',
+            c.hasPrevSource ? c.prevSource : null),
+        _KbAction(
+            'nextSource',
+            Icons.skip_next,
+            c.webPageActive ? '提升清晰度' : '下一个源',
+            c.hasNextSource ? c.nextSource : null),
+      ],
       _KbAction(
           'playpause',
           c.uiShowsPlaying ? Icons.pause : Icons.play_arrow,
@@ -569,15 +546,11 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             c.isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
             c.isFullscreen ? '退出全屏' : '全屏',
             c.toggleFullscreen),
-      // 手动重载当前频道：网页卡死/黑屏时不必等自动看门狗；
-      // 投屏中播放会话由发送端控制，重载无意义（置灰），
-      // 断开投屏后自动恢复可用
-      if (widget.onReload != null)
-        _KbAction(
-            'reload',
-            Icons.refresh,
-            c.isCasting ? '重载频道（投屏中不可用）' : '重载频道',
-            c.isCasting ? null : widget.onReload),
+      // 手动重载当前频道：网页卡死/黑屏时不必等自动看门狗。
+      // 投屏中播放会话由发送端控制，重载是废按钮——直接不进列表，
+      // 而不是置灰占位（置灰只会让人以为"点一下也许能用"）
+      if (widget.onReload != null && !c.isCasting)
+        _KbAction('reload', Icons.refresh, '重载频道', widget.onReload),
       // 网页/内置切换：仅网页频道体系内可用——网页播放中可切内置流
       // 播放（需已嗅探到可直连流），接管后可切回网页；纯流频道不显示
       if (c.showWebNativeButton && c.showWebNativeToggle)
@@ -631,23 +604,27 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     // 组间用竖线分隔（电视/桌面档），组内紧凑
     _KbAction byId(String id) => actions.firstWhere((a) => a.id == id);
     final children = <Widget>[
-      SourceStepper(
-        // 网页频道：清晰度档位归入线路体系（线路一 = 最高档 1080P），
-        // 菜单可直选某条线路；普通频道：线路 = 频道的多源列表
-        index: c.webPageActive ? c.webQualityIndex : c.sourceIndex,
-        count: c.webPageActive ? c.webQualityLevels.length : c.sourceCount,
-        onPrev: byId('prevSource').onPressed,
-        onNext: byId('nextSource').onPressed,
-        onSelect: c.webPageActive
-            ? (i) => c.selectWebQuality(i)
-            : (i) => c.switchSource(i),
-        webLines: c.webPageActive
-            ? [for (final l in c.webQualityLevels) '${l}P']
-            : null,
-        prevSelected: _kbId == 'prevSource',
-        nextSelected: _kbId == 'nextSource',
-      ),
-      _groupDivider(d),
+      // 投屏时没有线路概念（单源），整组连分隔线一起省掉，
+      // 否则开头会留下一条孤立的竖线
+      if (!c.isCasting) ...[
+        SourceStepper(
+          // 网页频道：清晰度档位归入线路体系（线路一 = 最高档 1080P），
+          // 菜单可直选某条线路；普通频道：线路 = 频道的多源列表
+          index: c.webPageActive ? c.webQualityIndex : c.sourceIndex,
+          count: c.webPageActive ? c.webQualityLevels.length : c.sourceCount,
+          onPrev: byId('prevSource').onPressed,
+          onNext: byId('nextSource').onPressed,
+          onSelect: c.webPageActive
+              ? (i) => c.selectWebQuality(i)
+              : (i) => c.switchSource(i),
+          webLines: c.webPageActive
+              ? [for (final l in c.webQualityLevels) '${l}P']
+              : null,
+          prevSelected: _kbId == 'prevSource',
+          nextSelected: _kbId == 'nextSource',
+        ),
+        _groupDivider(d),
+      ],
       _btn(byId('playpause'), big: true),
       _groupDivider(d),
     ];

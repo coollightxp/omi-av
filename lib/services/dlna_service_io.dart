@@ -85,7 +85,7 @@ class DlnaService {
   /// 终止所有 GENA 订阅 + SSDP byebye 一轮（微信视频号不解析事件、
   /// 不续订订阅，只有设备从 SSDP 消失才会清投屏 UI；byebye 只发一次，
   /// 设备仍在线，正常 alive 周期广播不受影响）
-  void kickCastClients() {
+  void kickCastClients({bool keepAlive = true}) {
     final wasActive = _currentUri != null && _currentUri!.isNotEmpty;
     _currentUri = null;
     _currentTitle = '';
@@ -103,12 +103,31 @@ class DlnaService {
     }
     _subs.clear();
     _lastPushedState = null;
-    if (wasActive) _notifyByebye();
-    CastLog.write('DLNA kickCastClients wasActive=$wasActive');
+    if (wasActive) _notifyByebye(keepAlive: keepAlive);
+    CastLog.write('DLNA kickCastClients wasActive=$wasActive '
+        'keepAlive=$keepAlive');
+  }
+
+  /// 退出程序 / 关机 / 关服务前的最后一次断开通知（v2.3.67）。
+  ///
+  /// 与 [kickCastClients] 的区别只有两点，但都是必须的：
+  /// 1. **不补 alive**——设备马上要消失，补 alive 会让发送端刚清掉 UI
+  ///    又看到「设备在线」；
+  /// 2. **等 150ms 再关 socket**——UDP 无连接，send() 只是入队，
+  ///    紧接着 close() 会把 byebye 包直接丢掉，发送端永远收不到。
+  Future<void> shutdownCastLink() async {
+    final wasActive = _currentUri != null && _currentUri!.isNotEmpty;
+    kickCastClients(keepAlive: false);
+    if (wasActive) {
+      // byebye 是 6 个 USN 的 UDP 突发，给网卡足够时间发出去
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    stop();
+    CastLog.write('DLNA shutdownCastLink done wasActive=$wasActive');
   }
 
   /// SSDP byebye：设备「消失」一次，强制微信等轮询型 DMC 清掉投屏态
-  void _notifyByebye() {
+  void _notifyByebye({bool keepAlive = true}) {
     final socket = _ssdp;
     if (socket == null) return;
     final usnBase = 'uuid:$_uuid';
@@ -143,9 +162,10 @@ class DlnaService {
           'USN: ${e[1]}\r\n\r\n';
       socket.send(pkt.codeUnits, InternetAddress('239.255.255.250'), 1900);
     }
-    // byebye 后立刻补一轮 alive，让设备不真的从列表里消失（微信已收到
-    // byebye 会清投屏态；其他 App 几乎无感）
-    _notifyAlive();
+    // byebye 后补一轮 alive，让设备不真的从列表里消失（微信已收到
+    // byebye 会清投屏态；其他 App 几乎无感）。
+    // 退出/关机场景传 keepAlive=false：设备真的要没了，不能补。
+    if (keepAlive) _notifyAlive();
   }
 
   /// 清空当前投屏媒体：投屏结束（Stop/自动恢复）后调用，
