@@ -4,9 +4,9 @@
 
 #include "omi_screen_recorder_plugin.h"
 
-FLUTTER_PLUGIN_EXPORT void OmiScreenRecorderPluginRegisterWithRegistrar(
+FLUTTER_PLUGIN_EXPORT void OmiScreenRecorderPluginCApiRegisterWithRegistrar(
     FlutterDesktopPluginRegistrarRef registrar) {
-  omi_screen_recorder::OmiScreenRecorderPluginRegisterWithRegistrar(
+  omi_screen_recorder::OmiScreenRecorderPluginCApiRegisterWithRegistrar(
       flutter::PluginRegistrarManager::GetInstance()
           ->GetRegistrar<flutter::PluginRegistrarWindows>(registrar));
 }

@@ -22,7 +22,7 @@ int GetIntArg(const EncodableMap* map, const char* key, int fallback) {
 
 }  // namespace
 
-void OmiScreenRecorderPluginRegisterWithRegistrar(
+void OmiScreenRecorderPluginCApiRegisterWithRegistrar(
     flutter::PluginRegistrarWindows* registrar) {
   auto plugin = std::make_unique<OmiScreenRecorderPlugin>(registrar);
   registrar->AddPlugin(std::move(plugin));
