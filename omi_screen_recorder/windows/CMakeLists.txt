@@ -18,6 +18,12 @@ target_compile_features(${PLUGIN_NAME} PUBLIC cxx_std_17)
 target_compile_options(${PLUGIN_NAME} PRIVATE /EHsc /W3)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE UNICODE _UNICODE)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE PLUGIN_IMPL)
+# 进程回环音频 ActivateAudioInterface 声明在 NTDDI_WIN10_19H1 守卫之后，
+# SDK 默认 NTDDI 低于该值会把声明藏起来（0x0A000007 = 19H1）
+target_compile_definitions(${PLUGIN_NAME} PRIVATE
+  _WIN32_WINNT=0x0A00
+  WINVER=0x0A00
+  NTDDI_VERSION=0x0A000007)
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE
   flutter

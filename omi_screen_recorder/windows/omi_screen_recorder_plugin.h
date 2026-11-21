@@ -9,6 +9,10 @@
 
 namespace omi_screen_recorder {
 
+/// C API 层（omi_screen_recorder_plugin_c_api.cpp）调用的注册入口
+void OmiScreenRecorderPluginRegisterWithRegistrar(
+    flutter::PluginRegistrarWindows* registrar);
+
 class OmiScreenRecorderPlugin : public flutter::Plugin {
  public:
   static void RegisterWithRegistrar(

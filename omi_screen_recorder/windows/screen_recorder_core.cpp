@@ -92,6 +92,7 @@ struct RecorderState {
   // WGC
   wgc::GraphicsCaptureItem item{nullptr};
   wgc::Direct3D11CaptureFramePool pool{nullptr};
+  wgc::GraphicsCaptureSession session{nullptr};
   wgc::Direct3D11CaptureFramePool::FrameArrived_revoker frameRevoker;
   winrt::com_ptr<ID3D11Device> d3d;
   winrt::com_ptr<ID3D11DeviceContext> ctx;
@@ -138,7 +139,8 @@ void OnFrame(wgc::Direct3D11CaptureFramePool const& sender) {
   try {
     wgdx11::IDirect3DSurface surface = frame.Surface();
     if (!surface) return;
-    auto access = surface.as<::IDirect3DDxgiInterfaceAccess>();
+    auto access = surface.as<
+        ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     winrt::com_ptr<::ID3D11Texture2D> tex;
     if (FAILED(access->GetInterface(winrt::guid_of<::ID3D11Texture2D>(),
                                     tex.put_void())) ||
@@ -185,7 +187,7 @@ bool SetupAudioCapture() {
   {
     AUDIOCLIENT_ACTIVATION_PARAMS params{};
     params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-    params.ProcessLoopbackParams.ProcessId = GetCurrentProcessId();
+    params.ProcessLoopbackParams.TargetProcessId = GetCurrentProcessId();
     params.ProcessLoopbackParams.ProcessLoopbackMode =
         PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
     PROPVARIANT pv{};
@@ -610,7 +612,7 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
       }
     }
 
-    if (FAILED(writer->BeginWrite())) {
+    if (FAILED(writer->BeginWriting())) {
       r.error = "BeginWrite failed";
       Stop();
       return r;
@@ -625,7 +627,9 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     g.audioStop = false;
     g.running = true;
     running_ = true;
-    g.pool.StartCapture(g.item);
+    // 显式会话：新投影里帧池没有 StartCapture(item) 便捷方法
+    g.session = g.pool.CreateCaptureSession(g.item);
+    g.session.StartCapture();
     g.encodeThread = std::thread(EncodeLoop);
     g.audioThread = std::thread(AudioLoop);
     r.ok = true;
@@ -675,6 +679,7 @@ int64_t ScreenRecorder::Stop() {
 
   // WGC 资源
   g.frameRevoker.revoke();
+  g.session = nullptr;
   g.pool = nullptr;
   g.item = nullptr;
   g.staging = nullptr;
