@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 
-set(PLUGIN_NAME "omi_screen_recorder" CACHE STRING "The name of the Flutter plugin library")
-set(PLUGIN_BUNDLED_LIBRARIES ${PLUGIN_NAME}.dll PARENT_SCOPE)
+# 目标名必须是 <插件名>_plugin：flutter 生成的 generated_plugins.cmake
+# 会 add_subdirectory 本目录并引用 $<TARGET_FILE:omi_screen_recorder_plugin>
+set(PLUGIN_NAME "omi_screen_recorder_plugin" CACHE STRING "The name of the Flutter plugin library")
 
 project(${PLUGIN_NAME} LANGUAGES CXX)
 
