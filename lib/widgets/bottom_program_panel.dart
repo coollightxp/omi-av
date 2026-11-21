@@ -363,7 +363,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         // （用户截图：1280×720 与「线路 1/1」各占一行）。
         if (isRadio)
           _audioBadge(c)
-        else if (scale < 1)
+        else
+          // 全平台统一为手机档的一行文字（频道 · 分辨率 · 线路）。
+          // 电脑/Linux 原来用三个徽章并排，窄窗口会换行、且与手机端
+          // 信息不一致；统一后各端看到的字段与顺序完全相同
           Text(
             [
               if (hasChannel && current != null) info.channelName,
@@ -381,28 +384,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-          )
-        else
-          Wrap(
-            spacing: 10,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              // 有 EPG 时大字行已是节目名，这里才需要频道名；
-              // 无 EPG 时大字行本身就是频道名，避免重复
-              if (hasChannel && current != null)
-                _metaText(info.channelName, Colors.white70),
-              if (c.webPageActive) ...[
-                // 网页频道：左边显示所选线路的分辨率（线路一 1080P → 1080P）
-                _badge(c.webQualityLabel),
-                _badge(
-                    '线路 ${c.webQualityIndex + 1}/${c.webQualityLevels.length}'),
-              ] else ...[
-                // 普通直播源：取视频实际分辨率显示在左边
-                if (c.resolutionText.isNotEmpty) _badge(c.resolutionText),
-                _badge('线路 ${c.sourceIndex + 1}/${c.sourceCount}'),
-              ],
-            ],
           ),
         const SizedBox(height: 3),
         // 即将播放（保留结束时间）
@@ -446,14 +427,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           ),
       ],
     );
-  }
-
-  Widget _metaText(String text, Color color) {
-    return Text(text,
-        style: TextStyle(
-            color: color,
-            fontSize: AppTypography.of(context).body,
-            fontWeight: FontWeight.w500));
   }
 
   /// 「音频直播」徽章：跳动的四根小条 + 文案，暂停时条压平、文案改「已暂停」

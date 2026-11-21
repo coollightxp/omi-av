@@ -948,6 +948,8 @@ function renderPlayer(){
     s.preferredQuality||'auto');
   html+=switchCard('showWebNativeToggle','显示网页播放器切换按钮','不常用，默认隐藏；开了之后网页频道嗅探到直连流时，底部面板才会出现网页/内置播放器切换键');
   html+=switchCard('autoPlayNext','自动播放下一频道','当前节目结束后自动切台');
+  html+=switchCard('reservationRecord','预约到点自动录音','预约节目开始时自动切台并录制/录音（单条预约仍可单独勾选）');
+  html+=switchCard('castRecordFullSpeed','投屏录制全速下载','默认按源码率 1.5 倍限速；打开后满速下载，但会和播放器抢带宽');
   html+=switchCard('resumeLastChannel','启动时恢复上次频道','关闭后启动停在「请选择频道」，不发任何网络请求');
   // 「真波形纹理/电平驱动波形」两个实验项已下架（与音效滤镜冲突，2026-11 移除）
   html+=rangeCard('gestureSensitivity','手势灵敏度','左右滑调音量/亮度的跟手程度',0.5,2,0.1,

@@ -1163,6 +1163,10 @@ class PlayerController extends ChangeNotifier {
         'preferredQuality': s.preferredQuality.name,
         'showWebNativeToggle': s.showWebNativeToggle,
         'hideUnavailableChannels': s.hideUnavailableChannels,
+        // 录制相关：与设备设置面板保持一致（录制目录仅桌面端可改路径，
+        // 手机浏览器不适合填路径，仍只在设备上设置）
+        'reservationRecord': s.reservationRecord,
+        'castRecordFullSpeed': s.castRecordFullSpeed,
         'lyricsEnabled': s.lyricsEnabled,
         // 歌词时间微调（毫秒，正 = 往后等 / 负 = 往前赶）
         'lyricsOffsetMs': s.lyricsOffsetMs,
@@ -1290,6 +1294,10 @@ class PlayerController extends ChangeNotifier {
           rb('showWebNativeToggle') ?? cur.showWebNativeToggle;
       final hideUnavailable =
           rb('hideUnavailableChannels') ?? cur.hideUnavailableChannels;
+      final reservationRecord =
+          rb('reservationRecord') ?? cur.reservationRecord;
+      final castRecordFullSpeed =
+          rb('castRecordFullSpeed') ?? cur.castRecordFullSpeed;
       final lyricsEnabled = rb('lyricsEnabled') ?? cur.lyricsEnabled;
       int lyricsOffset = cur.lyricsOffsetMs;
       final loRaw = ri('lyricsOffsetMs');
@@ -1374,6 +1382,8 @@ class PlayerController extends ChangeNotifier {
           webEnabled != _settings.webEnabled ||
           webNative != _settings.showWebNativeToggle ||
           hideUnavailable != _settings.hideUnavailableChannels ||
+          reservationRecord != _settings.reservationRecord ||
+          castRecordFullSpeed != _settings.castRecordFullSpeed ||
           lyricsEnabled != _settings.lyricsEnabled ||
           lyricsOffset != _settings.lyricsOffsetMs ||
           lyricsVariant != _settings.lyricsVariant ||
@@ -1401,6 +1411,8 @@ class PlayerController extends ChangeNotifier {
           webEnabled: webEnabled,
           showWebNativeToggle: webNative,
           hideUnavailableChannels: hideUnavailable,
+          reservationRecord: reservationRecord,
+          castRecordFullSpeed: castRecordFullSpeed,
           lyricsEnabled: lyricsEnabled,
           lyricsOffsetMs: lyricsOffset,
           lyricsVariant: lyricsVariant,
