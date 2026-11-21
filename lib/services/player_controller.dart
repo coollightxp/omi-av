@@ -33,6 +33,7 @@ import 'format_hint.dart';
 import 'net_warm.dart';
 import 'media/omi_video_backend.dart';
 import 'media/omi_video_engine.dart';
+import 'icy_metadata_reader.dart';
 import 'media_capture_service.dart';
 import 'radio_library.dart';
 import 'channel_blacklist.dart';
@@ -282,6 +283,12 @@ class PlayerController extends ChangeNotifier {
   /// 电台没有 XMLTV 时的第二级降级：节目单面板至少能显示"刚播了什么"。
   final List<String> _radioTracks = <String>[];
   List<String> get radioTracks => List.unmodifiable(_radioTracks);
+
+  /// 电台 ICY 歌名读取器（MDK 内核不提供 StreamTitle）
+  IcyMetadataReader? _icyReader;
+
+  /// 读取器代际：换台时旧连接迟到的标题直接丢弃
+  int _icyGen = 0;
   String _lastMediaTitle = '';
 
   /// 很多电台的 ICY 元数据就是流文件名（index.m3u8 / 64k.mp3），
@@ -2019,6 +2026,8 @@ class PlayerController extends ChangeNotifier {
     _autoReloadCount = 0;
     // 换台复位「网页截录不可用」的探测结果
     _webCaptureUnsupported = false;
+    // 换台先停掉上一台的 ICY 连接（旧标题不能再写到新台）
+    _stopIcyReader();
     _softErrPending = false;
     _softErrSecondRound = false;
     _softErrTimer?.cancel();
@@ -2934,7 +2943,10 @@ class PlayerController extends ChangeNotifier {
     // 切回界面才跳台」。原地 open 不碰 texture，直接用已在跑的音频
     // 输出换流，后台几秒内就出声。失败（内核释放/不支持）回退重建。
     final live = _videoController;
-    if (channel.isRadio && _isBackgroundNow && live != null) {
+    if (channel.isRadio &&
+        _isBackgroundNow &&
+        live != null &&
+        live.engine == 'mpv') {
       try {
         await live.openInPlace(
           Uri.parse(channel.streamUrls[_sourceIndex]),
@@ -3020,12 +3032,10 @@ class PlayerController extends ChangeNotifier {
     // 新台前播、旧台后台出声的双路直播
     if (gen != _playGeneration) return;
 
-    // MDK 起播失败过就锁回 MPV，避免用户在坏环境里反复撞同一面墙。
-    // 电台固定走 MPV：纯音频流的 ICY 曲目、录音、真电平都依赖 libmpv，
-    // 而电台没有画面，MDK 的「不闪黑」在这里没有收益，不走这条新路径
-    // 视频统一走 MDK：实测 MDK 在老机器与安卓上的兼容性、截图/录制能力
-    // 都更好；MPV 只保留给电台（ICY 曲目名、后台原地换台依赖 libmpv）。
-    final useMdk = !channel.isRadio;
+    // 视频与电台统一走 MDK：实测 MDK 在老机器与安卓上的兼容性、截图/录制
+    // 能力都更好。电台原本依赖 libmpv 的 ICY 曲目名，现在由
+    // [IcyMetadataReader] 自己补（见下方起播成功后的启动逻辑）。
+    final useMdk = true;
     final c = createOmiVideoBackend(
       url: Uri.parse(streamUrl),
       useMdk: useMdk,
@@ -3104,6 +3114,11 @@ class PlayerController extends ChangeNotifier {
       await WakelockPlus.enable();
 
       _state = PlayerState.playing;
+      // 电台：MDK/fvp 不暴露 ICY 曲目名，自己连一路元数据补齐
+      // （通知栏/锁屏卡片、曲目历史、歌词锚点都读同一条 _lastMediaTitle）
+      if (channel.isRadio && !_isCasting) {
+        _startIcyReader(streamUrl, headers);
+      }
       // 起播成功：清错误提示与挂起的自动重试
       _lastError = null;
       _autoRetryTimer?.cancel();
@@ -3362,6 +3377,48 @@ class PlayerController extends ChangeNotifier {
             icon: Icons.notifications_off_outlined);
       }
     } catch (_) {}
+  }
+
+  /// 电台 ICY 歌名：起播成功后自己连一路元数据（独立轻量 HTTP 连接）。
+  /// 标题会写进 `_lastMediaTitle`，与播放内核无关；通知栏/锁屏卡片、
+  /// 曲目历史、歌词锚点都消费同一个字段。
+  void _startIcyReader(String url, Map<String, String> headers) {
+    _stopIcyReader();
+    final gen = ++_icyGen;
+    final reader = IcyMetadataReader(onTitle: (title) {
+      if (gen != _icyGen) return;
+      _onIcyTitle(title);
+    });
+    _icyReader = reader;
+    final u = Uri.tryParse(url);
+    if (u == null) return;
+    unawaited(reader.start(u, headers: headers.isEmpty ? null : headers));
+  }
+
+  void _stopIcyReader() {
+    _icyGen++;
+    final r = _icyReader;
+    _icyReader = null;
+    if (r != null) unawaited(r.stop());
+  }
+
+  /// ICY 标题变化：与 libmpv 的 media-title 走同一套消费逻辑
+  /// （曲目历史 + 歌词锚点 + 通知栏/锁屏卡片）
+  void _onIcyTitle(String raw) {
+    final track = raw.trim();
+    if (track.isEmpty || track == _lastMediaTitle) return;
+    _lastMediaTitle = track;
+    if ((_currentChannel?.isRadio ?? false) && !isJunkTrack(track)) {
+      _radioTracks.remove(track);
+      _radioTracks.insert(0, track);
+      if (_radioTracks.length > 20) _radioTracks.removeLast();
+      RadioLyrics.instance.onTrack(
+        track,
+        _videoController?.value.position ?? Duration.zero,
+      );
+      notifyListeners();
+    }
+    _syncAudioNotification();
   }
 
   /// 通知栏/锁屏卡片：只在电台域出现（电视正常播放有画面，不需要）。
@@ -6363,6 +6420,7 @@ class PlayerController extends ChangeNotifier {
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
     _resetWebRecording();
+    _stopIcyReader();
     if (RadioRecorder.isRecording) {
       unawaited(RadioRecorder.stop());
     }
