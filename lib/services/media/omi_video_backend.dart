@@ -10,10 +10,10 @@ import 'omi_video_value.dart';
 /// 上层（PlayerController / 播放页）只依赖这个类型，不关心底层是
 /// libmpv(media_kit) 还是 MDK(fvp + video_player)：
 ///
-/// | 引擎 | 实现类 | 适用 |
+/// | 引擎 | 实现类 | 用途 |
 /// |---|---|---|
-/// | mpv | `OmiVideoController`（omi_video_io.dart） | 默认，功能最全（音量/滤镜/录制/截帧） |
-/// | mdk | `OmiVideoMdkController`（omi_video_mdk.dart） | 老显卡/老系统上 D3D11 纹理更稳，不闪黑 |
+/// | mdk | `OmiVideoMdkController`（omi_video_mdk.dart） | 视频（含投屏）统一使用 |
+/// | mpv | `OmiVideoController`（omi_video_io.dart） | 仅电台（ICY 曲目名、后台原地换台） |
 /// | web | `OmiVideoController`（omi_video_web.dart） | 浏览器 HTML video |
 ///
 abstract class OmiVideoBackend extends ChangeNotifier {
@@ -22,11 +22,6 @@ abstract class OmiVideoBackend extends ChangeNotifier {
   /// 引擎标识：`mpv` / `mdk` / `web`。
   /// 上层据此做「起播无画面就换个引擎再试」的兜底（不依赖具体实现类型）。
   String get engine;
-
-  /// 视频输出是否已就绪（mpv 的 `vo-configured`）。
-  /// 安卓上 mpv 偶发「有声音、有视频尺寸，但 vo 没起来 → 黑屏」，
-  /// 只看尺寸判断不出来；MDK/Web 恒为 true。
-  bool get videoOutputOk => true;
 
   Future<void> initialize();
   Future<void> play();

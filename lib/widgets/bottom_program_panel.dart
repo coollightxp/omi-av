@@ -553,7 +553,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.uiShowsPlaying ? Icons.pause : Icons.play_arrow,
           c.uiShowsPlaying ? '暂停' : '播放',
           hasChannel ? widget.onTogglePlayPause : null),
-      if (c.canCapture && !isRadio) ...[
+      if (c.canCaptureCurrent && !isRadio) ...[
         _KbAction('screenshot', Icons.camera_alt, '截图',
             hasVideo ? widget.onScreenshot : null),
         _KbAction(
@@ -670,7 +670,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     //   · 视频（中间组非空）：组前再补一条，与暂停后那条相邻 → 双线。
     // 口径：组前一律用暂停键后的既有那条；组为空时什么都不加。
     final mid = <Widget>[];
-    if (c.canCapture && !isRadio) {
+    if (c.canCaptureCurrent && !isRadio) {
       mid.addAll([
         _btn(byId('screenshot')),
         _btn(byId('record'), big: true),

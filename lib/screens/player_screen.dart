@@ -4099,7 +4099,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
   Future<void> _toggleRecording(PlayerController controller) async {
-    if (!controller.canCapture) return;
+    if (!controller.canCaptureCurrent) return;
     if (controller.isRecording) {
       final path = await controller.stopRecording();
       if (mounted) {

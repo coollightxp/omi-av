@@ -35,7 +35,6 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     _video = VideoController(_player);
     _bindStreams();
     _observeMediaTitle();
-    _observeVideoOutput();
   }
 
   /// 当前流地址/HTTP 头：原地换源（[openInPlace]）会就地改写
@@ -54,13 +53,6 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
 
   @override
   String get engine => 'mpv';
-
-  /// mpv `vo-configured`：视频输出是否真的建起来了。
-  /// 安卓上实测过「已经 playing、尺寸也上报了，但 vo 没配置 → 黑屏」，
-  /// 只靠尺寸判断不出来。观测不到该属性时保持 true（不做误判）。
-  bool _voOk = true;
-  @override
-  bool get videoOutputOk => _voOk;
 
   void _set(OmiVideoValue next) {
     if (_disposed) return;
@@ -90,22 +82,6 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
       } catch (e) {
         // 某些内核/资源不允许观测：静默降级，标题回落到台名
         debugPrint('[OmiVideo] observe media-title failed: $e');
-      }
-    }());
-  }
-
-  /// 观测 `vo-configured`：上层看门狗据此判断「有声音但真的没画面」。
-  /// 只有明确收到 false 才更新；观测失败保持 true，避免误切内核。
-  void _observeVideoOutput() {
-    final platform = _player.platform;
-    if (platform is! NativePlayer) return;
-    unawaited(() async {
-      try {
-        await platform.observeProperty('vo-configured', (value) async {
-          _voOk = value == true;
-        });
-      } catch (e) {
-        debugPrint('[OmiVideo] observe vo-configured failed: $e');
       }
     }());
   }

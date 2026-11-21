@@ -2372,33 +2372,9 @@ class _PlayerSettingsTab extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
             _buildQualitySelector(controller),
-            // 双引擎：mpv（功能全）/ MDK（D3D11 直出，老显卡不闪黑）
-            // 切换后立刻重开当前台生效；网页频道与内核无关，不受影响
-            ListTile(
-              leading: const Icon(Icons.memory, color: Colors.white70),
-              title: const Text('播放内核',
-                  style: TextStyle(color: Colors.white, fontSize: 15)),
-              subtitle: Text(
-                controller.useMdkEngine
-                    ? 'MDK（libmdk / D3D11）：默认，画面最稳，叠面板不闪黑'
-                    : 'MPV（libmpv）：功能完整（滤镜/录制/实时电平）；'
-                        '个别老显卡叠加面板时会闪一下',
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-              trailing: DropdownButton<String>(
-                value: controller.playEngine,
-                dropdownColor: const Color(0xFF1B1D22),
-                underline: const SizedBox.shrink(),
-                style: const TextStyle(color: Colors.white, fontSize: 13.5),
-                items: const [
-                  DropdownMenuItem(value: 'mpv', child: Text('MPV')),
-                  DropdownMenuItem(value: 'mdk', child: Text('MDK')),
-                ],
-                onChanged: (v) {
-                  if (v != null) controller.setPlayEngine(v);
-                },
-              ),
-            ),
+            // 播放内核不再提供切换：视频统一走 MDK（老机器/安卓兼容性、
+            // 截图与录制都更好），MPV 只保留给电台（ICY 曲目名、后台
+            // 原地换台依赖 libmpv），对用户不可见。
             // 网页/内置切换按钮默认不占面板：很不常用，常驻反而挤占
             // 遥控器焦点路径；开关打开才在底部面板显示（用户要求）
             SwitchListTile(

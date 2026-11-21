@@ -12,14 +12,14 @@ import 'omi_video_value.dart';
 
 /// MDK（libmdk）内核实现：fvp 把 `video_player` 的平台实现接管为 MDK。
 ///
-/// 为什么保留这条引擎：Windows 上 mpv 的画面走 Flutter 纹理回传，老显卡
-/// /Win10 1607 的驱动在纹理重建、面板叠加时容易掉帧闪黑；MDK 直接用
-/// D3D11 渲染到纹理，同类机器上更稳。用户可在「设置 → 播放器 → 播放引擎」
-/// 里切换，换台后生效。
+/// 视频节目（含投屏）统一走这条内核：老显卡/老系统上 D3D11 直出比 mpv
+/// 的 OpenGL 纹理更稳，安卓上也一样；截图（fvp snapshot）与录制
+/// （fvp record）在两个平台都可用，所以不再需要双引擎来回切。
+/// MPV 只保留给电台（ICY 曲目名、安卓后台原地换台）。
 ///
-/// 能力边界（与 mpv 引擎的差异，均在 UI 上做了降级）：
-/// - 录制/截帧走 fvp 扩展（MDK 原生 `record` / `snapshot`，见 OMPlayer
-///   同款实现），与 mpv 的 stream-record 一样可用
+/// 能力边界：
+/// - 不支持原地换源（`openInPlace` 抛 UnsupportedError，调用方回退重建）；
+/// - 不支持 `vid=no`（后台由调用方直接停掉画面）。
 class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoMdkController.network(
     Uri url, {

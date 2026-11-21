@@ -77,18 +77,11 @@ enum SleepAction { pause, exit, shutdown }
 class PlayerController extends ChangeNotifier {
   OmiVideoBackend? _videoController;
 
-  /// MDK 起播失败后的临时降级（不写设置，下次启动仍尊重用户选择）
-  bool _forceMpv = false;
-
-  /// MPV 起播失败/黑屏时的一次性兜底：本台改用 MDK 重开。
-  /// 只对当前频道生效（换台复位），不写设置——用户下次仍用自己的选择。
-  bool _forceMdkOnce = false;
-
-  /// 本台是否已经做过一次「换引擎重开」，防止 mpv↔mdk 来回死循环
-  bool _engineFallbackTried = false;
-
-  /// 起播后「有声音没画面」的看门狗（mpv 黑屏兜底）
-  Timer? _noPicTimer;
+  /// 是否已截图/录制失败过、该网页频道不再提供这两个按钮。
+  /// 跨域 iframe / DRM 页面在安卓上拿不到画面，点了也只会失败，
+  /// 干脆把按钮藏起来（用户要求），换台/刷新网页时复位。
+  bool _webCaptureUnsupported = false;
+  bool get webCaptureUnsupported => _webCaptureUnsupported;
 
   /// 最近一次截图/录制是否已进系统相册（安卓 MediaStore）。
   /// 界面提示据此从「保存至: 路径」改成「已保存到相册」。
@@ -368,6 +361,12 @@ class PlayerController extends ChangeNotifier {
   bool get canCapture =>
       !kIsWeb &&
       (MediaCaptureService.isDesktop || MediaCaptureService.isAndroid);
+
+  /// 当前是否显示截图/录制按钮。
+  /// 网页频道一旦探测到拿不到画面（跨域 iframe / DRM），就把这两个
+  /// 入口隐藏掉——留着只会点了失败（用户要求）。换台/刷新网页时复位。
+  bool get canCaptureCurrent =>
+      canCapture && !(_webPageActive && _webCaptureUnsupported);
   bool get isFullscreen => _isFullscreen;
   bool get isCasting => _isCasting;
   bool get isMuted => _isMuted;
@@ -2018,11 +2017,8 @@ class PlayerController extends ChangeNotifier {
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
-    // 换台复位「换引擎兜底」：每个频道允许一次 mpv↔mdk 互换
-    _engineFallbackTried = false;
-    _forceMdkOnce = false;
-    _noPicTimer?.cancel();
-    _noPicTimer = null;
+    // 换台复位「网页截录不可用」的探测结果
+    _webCaptureUnsupported = false;
     _softErrPending = false;
     _softErrSecondRound = false;
     _softErrTimer?.cancel();
@@ -2112,6 +2108,7 @@ class PlayerController extends ChangeNotifier {
     }
     _webPageActive = false;
     _webPageForeground = false;
+    _webCaptureUnsupported = false;
     _currentChannel = channel;
     _sourceIndex = 0;
     // 立刻进 loading：换台到真正起播之间要建内核/等网络，这段空档
@@ -2442,6 +2439,7 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     _resetWebRecording();
+    _webCaptureUnsupported = false;
     await _disposeVideoController();
     _currentChannel = channel;
     _sourceIndex = 0;
@@ -3025,9 +3023,9 @@ class PlayerController extends ChangeNotifier {
     // MDK 起播失败过就锁回 MPV，避免用户在坏环境里反复撞同一面墙。
     // 电台固定走 MPV：纯音频流的 ICY 曲目、录音、真电平都依赖 libmpv，
     // 而电台没有画面，MDK 的「不闪黑」在这里没有收益，不走这条新路径
-    final useMdk =
-        !channel.isRadio && !_forceMpv &&
-        (_settings.playEngine == 'mdk' || _forceMdkOnce);
+    // 视频统一走 MDK：实测 MDK 在老机器与安卓上的兼容性、截图/录制能力
+    // 都更好；MPV 只保留给电台（ICY 曲目名、后台原地换台依赖 libmpv）。
+    final useMdk = !channel.isRadio;
     final c = createOmiVideoBackend(
       url: Uri.parse(streamUrl),
       useMdk: useMdk,
@@ -3110,10 +3108,6 @@ class PlayerController extends ChangeNotifier {
       _lastError = null;
       _autoRetryTimer?.cancel();
       _autoRetryTimer = null;
-      // mpv 黑屏兜底：init 成功、状态已 playing，但 8 秒内连视频尺寸
-      // 都没上报（= 只有声音没有画面），就换另一个引擎重开本台。
-      // 用户实测：同一个源 MPV 黑屏、MDK 正常，手动切引擎太麻烦
-      _armNoPictureWatchdog(c, channel);
       // 嗅探流起播成功：清回退标记
       _sniffedFromWeb = false;
       // 记录当前频道，下次启动时恢复。网页嗅探接管时保存的是原网页
@@ -3157,9 +3151,6 @@ class PlayerController extends ChangeNotifier {
         _sniffPlaybackFailed();
         return;
       }
-      // 所有源都失败：先换另一个内核再试一次（MPV 起不来但 MDK 能播，
-      // 或反过来），仍失败才按设置自动重试
-      if (_tryEngineFallback(c, channel)) return;
       // 所有源都失败：按设置自动重试，次数用尽判定链接失效
       _enterErrorOrRetry();
     } catch (e) {
@@ -3183,7 +3174,6 @@ class PlayerController extends ChangeNotifier {
         _sniffPlaybackFailed();
         return;
       }
-      if (_tryEngineFallback(c, channel)) return;
       _enterErrorOrRetry();
     }
     notifyListeners();
@@ -3208,18 +3198,6 @@ class PlayerController extends ChangeNotifier {
       }
     }
     if (v.hasError) {
-      // MDK 引擎在本机起不来（老显卡缺 D3D11 特性/MDK 运行库缺失）：
-      // 自动切回 MPV 重开当前台，用户至少能看到画面，不用手动去设置里改。
-      // 电台本来就固定走 MPV，出错不能算到 MDK 头上（否则误报 + 白重开）
-      if (_settings.playEngine == 'mdk' &&
-          !_forceMpv &&
-          !(_currentChannel?.isRadio ?? false)) {
-        _forceMpv = true;
-        OsdBus.show('MDK 内核起播失败，已自动切回 MPV', icon: Icons.memory);
-        final ch = _currentChannel;
-        if (ch != null) unawaited(playChannel(ch));
-        return;
-      }
       if (_isCasting) {
         // 投屏只有一个源，出错基本意味着流真的断了（直播间关播/CDN 掐流）。
         // 直接切回投屏前频道，比停在 error 等用户手动操作体验好。
@@ -4174,62 +4152,6 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  /// 起播「有声音没画面」看门狗（mpv 黑屏兜底）。
-  ///
-  /// 判据用「视频尺寸是否上报」而不是帧率/截图：mpv 只要解码出视频轨就会
-  /// 上报 width/height，8 秒仍为 0 基本可以断定画面管线没起来（用户实测
-  /// 同一个源 MPV 黑屏、MDK 正常）。已上报尺寸的慢源不再折腾。
-  void _armNoPictureWatchdog(OmiVideoBackend c, Channel channel) {
-    _noPicTimer?.cancel();
-    _noPicTimer = null;
-    if (channel.isRadio ||
-        channel.isWebPage ||
-        _isCasting ||
-        _isBackgroundNow) {
-      return;
-    }
-    _noPicTimer = Timer(const Duration(seconds: 8), () {
-      _noPicTimer = null;
-      if (!identical(c, _videoController)) return;
-      // 用户已暂停（或已进错误页）：不是「起播黑屏」，不折腾
-      if (_state != PlayerState.playing) return;
-      final v = c.value;
-      if (!v.isInitialized || v.hasError) return;
-      // 有尺寸只能说明视频轨解出来了；mpv 还要看 vo 有没有真的建起来
-      // （安卓上出现过尺寸正常但 vo 未配置 → 纯黑屏）
-      if (v.size.width > 0 && v.size.height > 0 && c.videoOutputOk) return;
-      CastLog.write('no-picture watchdog fired: engine=${c.engine} '
-          'ch=${channel.name}');
-      _tryEngineFallback(c, channel);
-    });
-  }
-
-  /// 当前内核起不来/没画面：换另一个内核重开本台（每台最多一次）。
-  /// 返回 true 表示已发起重开，调用方不要再走重试/错误页。
-  bool _tryEngineFallback(OmiVideoBackend c, Channel channel) {
-    if (_engineFallbackTried || channel.isRadio || _isCasting) return false;
-    final cur = c.engine;
-    if (cur != 'mpv' && cur != 'mdk') return false;
-    // MDK 在本机已经失败过（已锁回 MPV）：不要再往坏环境里撞一次
-    if (cur == 'mpv' && _forceMpv) return false;
-    _engineFallbackTried = true;
-    _noPicTimer?.cancel();
-    _noPicTimer = null;
-    if (cur == 'mpv') {
-      _forceMdkOnce = true;
-    } else {
-      _forceMpv = true;
-    }
-    CastLog.write('engine fallback: $cur -> ${cur == 'mpv' ? 'mdk' : 'mpv'} '
-        'ch=${channel.name}');
-    OsdBus.show(
-      cur == 'mpv' ? 'MPV 内核未能出画面，已切换 MDK 重试' : 'MDK 内核未能出画面，已切换 MPV 重试',
-      icon: Icons.memory,
-    );
-    unawaited(_playCurrentSource());
-    return true;
-  }
-
   void _enterErrorOrRetry() {
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
@@ -4363,7 +4285,7 @@ class PlayerController extends ChangeNotifier {
         closeToTray: p.getBool(_kCloseToTray) ?? false,
         fishHotkey: p.getBool(_kFishHotkey) ?? true,
         // 默认 MDK：实测同机 MPV 叠面板闪黑、MDK 不闪；已存过设置的用户
-        // 保持原选择（尊重手动切换），MDK 起播失败还有 _forceMpv 兜底
+        // 保持原选择（尊重手动切换）
         playEngine: p.getString(_kPlayEngine) ?? 'mdk',
         showWebNativeToggle: p.getBool(_kShowWebNativeToggle) ?? false,
         hideUnavailableChannels: p.getBool(_kHideUnavailable) ?? true,
@@ -4794,26 +4716,13 @@ class PlayerController extends ChangeNotifier {
       icon: Icons.network_check,
     );
   }
-  bool get useMdkEngine => _settings.playEngine == 'mdk';
 
-  /// 切换播放内核。正在播内置流时立刻重开当前台，让用户当场看到差别；
-  /// 网页频道不受影响（网页走 WebView，与内核无关）
+  /// 旧版「播放内核」设置（仅保留兼容：视频已统一 MDK，MPV 只用于电台）。
+  /// 仍接收设置同步，但不再影响任何视频播放。
   Future<void> setPlayEngine(String engine) async {
     final next = engine == 'mdk' ? 'mdk' : 'mpv';
     if (_settings.playEngine == next) return;
-    _forceMpv = false;
-    _forceMdkOnce = false;
-    _engineFallbackTried = false;
     updateSettings(_settings.copyWith(playEngine: next));
-    OsdBus.show(
-      next == 'mdk' ? '播放内核：MDK（画面更稳）' : '播放内核：MPV（功能完整）',
-      icon: Icons.memory,
-    );
-    final ch = _currentChannel;
-    if (ch != null && !ch.isWebPage && !webPageActive) {
-      // 重开当前台：playChannel 内部会按新引擎重建控制器
-      await playChannel(ch);
-    }
   }
 
 
@@ -5397,6 +5306,10 @@ class PlayerController extends ChangeNotifier {
   /// 优先录解码后的画面（MediaRecorder），拿不到再试直连流；
   /// 投屏走流级录制（CastStreamRecorder，直接下载原始媒体字节）。
   Future<bool> startRecording() async {
+    if (_isRecording) {
+      _lastError = '录制失败：已在录制中';
+      return false;
+    }
     // 网页频道：先录页面里解码后的视频（captureStream + MediaRecorder）。
     // 桌面 WebView2 与安卓 WebView 都支持；这样 DRM/AES 加密的流也能录，
     // 因为录的是已经解码出来的画面，而不是原始加密字节。
@@ -5405,7 +5318,10 @@ class PlayerController extends ChangeNotifier {
       if (jsOk) return true;
       // 页面里找不到视频（跨域 iframe 等）才退回「直连流」录制；
       // 那条路只接未加密的 FLV/直连 mp4，加密流会被拒绝（见方法注释）
-      return _startWebStreamRecording();
+      final directOk = await _startWebStreamRecording();
+      // 两条路都不行：这个网页频道确实拿不到画面，隐藏截图/录制入口
+      if (!directOk) _markWebCaptureUnsupported();
+      return directOk;
     }
     // 诊断：逐个判定失败原因。投屏 URL 与普通频道不同（非 HLS 走本地
     // 代理、HLS 直连），失败点必须精确到分支才能定位，不能笼统返回 false。
@@ -6039,6 +5955,14 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  /// 网页频道探测到拿不到画面：隐藏截图/录制入口（换台/刷新网页复位）
+  void _markWebCaptureUnsupported() {
+    if (_webCaptureUnsupported) return;
+    _webCaptureUnsupported = true;
+    CastLog.write('web capture unsupported: ${_currentChannel?.name ?? '-'}');
+    notifyListeners();
+  }
+
   /// 截取当前视频帧保存为 PNG（固定文件夹）。
   /// 网页频道走 WebView 截图桥，返回的就是 PNG 字节，直接落盘。
   Future<String?> takeScreenshot() async {
@@ -6060,12 +5984,24 @@ class PlayerController extends ChangeNotifier {
           }
         }
       } catch (_) {}
-      // 2) 退回 WebView 自身截图（桌面可靠；安卓视频层可能仍是黑的）
+      // 2) 安卓不再退回 WebView.draw()：它抓不到硬件视频层，只会得到
+      //    一张黑图（用户实测），干脆判定这个频道不可截图、隐藏入口
+      if (MediaCaptureService.isAndroid) {
+        _markWebCaptureUnsupported();
+        return null;
+      }
+      // 桌面回退 WebView2 截图（合成层取图，含视频画面）
       final shot = _webScreenshot;
-      if (shot == null) return null;
+      if (shot == null) {
+        _markWebCaptureUnsupported();
+        return null;
+      }
       try {
         final bytes = await shot();
-        if (bytes == null || bytes.isEmpty) return null;
+        if (bytes == null || bytes.isEmpty) {
+          _markWebCaptureUnsupported();
+          return null;
+        }
         final name = _currentChannel?.name ?? 'web_screenshot';
         final path =
             await captureService.buildFilePath('screenshots', name, 'png');
@@ -6304,8 +6240,6 @@ class PlayerController extends ChangeNotifier {
   Future<void> _disposeVideoController() async {
     // 先尝试释放上一轮 dispose 挂起的孤儿实例
     _retryOrphanDispose();
-    _noPicTimer?.cancel();
-    _noPicTimer = null;
     final c = _videoController;
     if (c != null) {
       final closure = _videoListenerClosure;
@@ -6426,8 +6360,6 @@ class PlayerController extends ChangeNotifier {
     _reservationRecordTimer?.cancel();
     _reservationRecordTimer = null;
     _softErrTimer?.cancel();
-    _noPicTimer?.cancel();
-    _noPicTimer = null;
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
     _resetWebRecording();
