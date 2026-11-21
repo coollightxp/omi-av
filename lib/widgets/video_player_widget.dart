@@ -403,7 +403,7 @@ class _RadioStage extends StatelessWidget {
         // 副歌换歌时自己变），其次 EPG 节目名。单独订阅播放器值，
         // 避免整屏跟着 position 每 100ms 重建
         AnimatedBuilder(
-          animation: Listenable.merge([controller.videoController]),
+          animation: Listenable.merge([controller, controller.videoController]),
           builder: (context, _) {
             final now = _nowText();
             if (now.isEmpty || now == name) {
@@ -517,7 +517,9 @@ class _RadioStage extends StatelessWidget {
   /// 当前曲目/节目的取值顺序：ICY 实时曲目 → EPG 当前节目 → 空。
   /// 流文件名（index.m3u8 / 64k.mp3）不是曲目，过滤掉不显示
   String _nowText() {
-    final icy = (controller.videoController?.value.mediaTitle ?? '').trim();
+    // 读控制器里的 ICY 标题：MDK 内核不提供 mediaTitle，
+    // 曲目由 IcyMetadataReader 写入同一个字段
+    final icy = controller.nowPlayingTrack.trim();
     if (icy.isNotEmpty && !PlayerController.isJunkTrack(icy)) return icy;
     final epg = controller.currentProgram?.title ??
         controller.getNowPlayingInfo().programTitle;

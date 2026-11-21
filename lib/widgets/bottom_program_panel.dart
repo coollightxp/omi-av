@@ -417,12 +417,12 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           // 电台没有节目单：第三行放 ICY 实时曲目（有的话），
           // 没有就放分组名（电视伴音 / 央广·国家台 / …）
           AnimatedBuilder(
-            animation: Listenable.merge([c.videoController]),
+            animation: Listenable.merge([c, c.videoController]),
             builder: (context, _) {
               // 垃圾过滤要跟电视屏那条路对齐：不少台的 ICY 元数据就是
               // 流文件名（HLS 转码源尤其常见，如「64.m3u8?transcode=ts」），
               // 拿它当曲目显示，用户还以为解析坏了。过滤后回退到分组名
-              final icy = (c.videoController?.value.mediaTitle ?? '').trim();
+              final icy = c.nowPlayingTrack.trim();
               final hasTrack = icy.isNotEmpty && !PlayerController.isJunkTrack(icy);
               final text = hasTrack ? '♪ $icy' : radioGroup;
               if (text.isEmpty) return const SizedBox.shrink();

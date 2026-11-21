@@ -26,7 +26,14 @@ class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
     _pc = VideoPlayerController.networkUrl(
       url,
       httpHeaders: headers ?? const <String, String>{},
-      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+      // allowBackgroundPlayback：video_player 默认在 Activity 暂停时自动
+      // 暂停。电台必须有后台出声，否则一缩后台就静音（用户实测：缩到
+      // 后台就暂停，要点通知卡片上的播放才继续）。视频台后台走画中画，
+      // 同样需要它保持播放。
+      videoPlayerOptions: VideoPlayerOptions(
+        mixWithOthers: true,
+        allowBackgroundPlayback: true,
+      ),
     );
     _pc.addListener(_sync);
   }

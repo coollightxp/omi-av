@@ -284,6 +284,12 @@ class PlayerController extends ChangeNotifier {
   final List<String> _radioTracks = <String>[];
   List<String> get radioTracks => List.unmodifiable(_radioTracks);
 
+  /// 电台当前曲目（ICY 实时歌名，无则空串）。
+  /// 与内核无关：MDK 不提供 StreamTitle，由 [IcyMetadataReader] 写入。
+  /// UI（播放页大字幕、底部面板）统一读这里，不要再读
+  /// `videoController.value.mediaTitle`（MDK 恒为空）。
+  String get nowPlayingTrack => _lastMediaTitle;
+
   /// 电台 ICY 歌名读取器（MDK 内核不提供 StreamTitle）
   IcyMetadataReader? _icyReader;
 
