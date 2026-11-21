@@ -251,6 +251,18 @@ class PlayerController extends ChangeNotifier {
   String? _recordPath;
   // 本轮录制是否走系统级（omi_screen_recorder）；停止路径据此分流
   bool _usingSystemRecorder = false;
+  // 本轮录制对应的「源标识」（频道 id + 源下标 + 地址）。
+  // 换台 / 换源 / 切投屏时标识变了 = 前一段内容已经播完，必须在旧内核
+  // 被拆掉之前把文件收尾（mp4 的 moov 靠 Finalize 写，内核一释放就废）
+  String? _recSourceKey;
+
+  /// 当前正在播的源的录制标识；拿不到时返回 null
+  String? get _currentSourceKey {
+    final ch = _currentChannel;
+    if (ch == null || ch.streamUrls.isEmpty) return null;
+    if (_sourceIndex < 0 || _sourceIndex >= ch.streamUrls.length) return null;
+    return '${ch.id}#$_sourceIndex#${ch.streamUrls[_sourceIndex]}';
+  }
 
   // 网页录制：MediaRecorder 分块（base64）经 JS bridge 追加写入 .webm
   int _webRecBytes = 0;
@@ -2320,6 +2332,10 @@ class PlayerController extends ChangeNotifier {
     if (_webPageActive && _currentChannel?.id == channel.id) {
       return;
     }
+    // 离开当前网页/换网页：网页录制先把末尾分块收回并落盘
+    if (_isRecording) {
+      await _finalizeRecording('切换频道');
+    }
     _resetWebRecording();
     await _disposeVideoController();
     _currentChannel = channel;
@@ -2357,7 +2373,16 @@ class PlayerController extends ChangeNotifier {
   /// 退出网页频道内嵌模式（隐藏网页控件，回到普通播放界面）
   void exitWebPage() {
     if (!_webPageActive) return;
-    _resetWebRecording();
+    if (_isRecording) {
+      // 网页录制（MediaRecorder）的末尾分块只能由页面 JS 回传：必须趁
+      // WebView 还活着通知停止。这里不 await（exitWebPage 是同步方法），
+      // unawaited 调用会立即同步跑到 _stopWebRecording 的 JS 派发点，
+      // 其内部会清掉 _recordPath/_webRecDone/_webRecBytes，不要再调
+      // _resetWebRecording（会把 path 清掉，导致保存判定失败）
+      unawaited(_finalizeRecording('退出网页播放'));
+    } else {
+      _resetWebRecording();
+    }
     _webViewClosedAt = DateTime.now();
     // 同 playChannel：原生窗口先缩到 0×0 再走销毁，否则这 2.5 秒里
     // 它会一直盖在画面上（白底 + 吃鼠标 + 吃双击）
@@ -2763,6 +2788,21 @@ class PlayerController extends ChangeNotifier {
       _sourceIndex = 0;
     }
     final gen = ++_playGeneration;
+    // 录制只对着「这一路源」：换台、换源、切到投屏，都意味着前面那段
+    // 内容已经结束，必须趁旧内核还在把录制收尾落盘（否则换台后视频
+    // 文件打不开——用户实测）。同源重载（自动重试/手动重载）时系统级
+    // 录制录的是窗口画面，跟内核无关，可以继续往下录；内核录制遇重建
+    // 必然断，只能先保存。
+    final recKey = _currentSourceKey;
+    if (_isRecording) {
+      final sameSource = recKey != null && recKey == _recSourceKey;
+      if (!sameSource || !_usingSystemRecorder) {
+        await _finalizeRecording(sameSource ? '重新起播' : '切换节目');
+      }
+    }
+    _recSourceKey = recKey;
+    // 收尾这段是 await：期间又切了台的话本次起播作废（新调用会接着干）
+    if (gen != _playGeneration) return;
     _instanceBornAt = DateTime.now();
     // 后台换台不要进 loading：卡片会跟着在「播放/暂停」之间闪一下，
     // 而且加载失败时用户看到的是一张不知道在干嘛的卡片。后台保持
@@ -4032,6 +4072,9 @@ class PlayerController extends ChangeNotifier {
     if (_isCasting) return;
     OsdBus.show('正在重载「${channel.name}」', icon: Icons.refresh);
     if (_webPageActive) {
+      // 整页重新载入 = 旧页面的 MediaRecorder 上下文随之消失，末尾分块
+      // 再不收回就永久丢了：重载前先把录制收尾落盘
+      if (_isRecording) await _finalizeRecording('重载网页');
       _webReloadSerial++;
       setWebForeground(false);
       _webPlaying = false;
@@ -5228,6 +5271,7 @@ class PlayerController extends ChangeNotifier {
         if (err == null) {
           _usingSystemRecorder = true;
           _isRecording = true;
+          _recSourceKey = _currentSourceKey;
           CastLog.write('rec start system path=$_recordPath');
           notifyListeners();
           return true;
@@ -5254,6 +5298,7 @@ class PlayerController extends ChangeNotifier {
       }
       _usingSystemRecorder = false;
       _isRecording = true;
+      _recSourceKey = _currentSourceKey;
       notifyListeners();
       return true;
     } catch (e) {
@@ -5466,6 +5511,7 @@ class PlayerController extends ChangeNotifier {
           'recordings', _currentChannel?.name ?? 'web', ext);
       _webRecDone = Completer<void>();
       _isRecording = true;
+      _recSourceKey = _currentSourceKey ?? 'web:${_currentChannel?.id}';
       notifyListeners();
       return true;
     } catch (e) {
