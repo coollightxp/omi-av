@@ -93,7 +93,8 @@ class DlnaService {
   /// 终止所有 GENA 订阅 + SSDP byebye 一轮（微信视频号不解析事件、
   /// 不续订订阅，只有设备从 SSDP 消失才会清投屏 UI；byebye 只发一次，
   /// 设备仍在线，正常 alive 周期广播不受影响）
-  void kickCastClients({bool keepAlive = true, bool pushStopped = true}) {
+  void kickCastClients(
+      {bool keepAlive = true, bool pushStopped = true, bool forceByebye = false}) {
     final wasActive = _currentUri != null && _currentUri!.isNotEmpty;
     _currentUri = null;
     _currentTitle = '';
@@ -111,7 +112,7 @@ class DlnaService {
     }
     _subs.clear();
     _lastPushedState = null;
-    if (wasActive) _notifyByebye(keepAlive: keepAlive);
+    if (wasActive || forceByebye) _notifyByebye(keepAlive: keepAlive);
     CastLog.write('DLNA kickCastClients wasActive=$wasActive '
         'keepAlive=$keepAlive');
   }

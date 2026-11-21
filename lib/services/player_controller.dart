@@ -1460,8 +1460,8 @@ class PlayerController extends ChangeNotifier {
 
   /// 播放投屏推送的 URL（记录投屏前频道用于断开恢复）
   Future<void> playCastUrl(String url, String title) async {
-    // 正在等待画面里来了新投屏：直接接上
-    _clearCastWait();
+    // 正在等待画面里来了新投屏：直接接上，链路保持，不能断开
+    _clearCastWait(notifyPeer: false);
     // 紧接 Stop 到达的新投屏：取消挂起的"恢复上次频道"和"播完兜底"
     _castRestoreTimer?.cancel();
     _castRestoreTimer = null;
@@ -1577,21 +1577,29 @@ class PlayerController extends ChangeNotifier {
     _castPendingSeek = null;
     _castPendingSeekAt = null;
     unawaited(CastStreamProxy.instance.stop());
-    // 本机主动断开：清 DLNA 媒体 + 推 STOPPED + 终止订阅 + SSDP
-    // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
-    // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
-    dlnaService.kickCastClients();
+    // 方案 3.7：投屏结束后按设置进「正在等待投屏」，给发送端连播
+    // （电视剧下一集）留窗口；0=马上返回，-1=一直等
+    final wait = _settings.castEndWaitSeconds;
+    final willWait = !userInitiated && (wait < 0 || wait > 0);
+    if (willWait) {
+      // 等待连播期间**不能断开投屏链路**：手机那边还连着，下一集就是
+      // 它接着推过来的。这里只清「当前媒体」（轮询会看到已停止），
+      // 不发 SSDP byebye、不杀 GENA 订阅，设备一直在线等下一次投屏。
+      dlnaService.clearCurrentMedia();
+    } else {
+      // 真正结束投屏：清媒体 + 推 STOPPED + 终止订阅 + SSDP byebye
+      // 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有设备从
+      // SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
+      dlnaService.kickCastClients();
+    }
     // 注意：**不在这里把 _preCastChannel 置 null**。
     // 它记的是「最后一次真实播放的台」，投屏可以连投很多次，每次都要能
     // 回到同一个直播；旧代码在这里取走即清，第二次投屏时当前频道已是
     // 占位频道、`??=` 记不回来，等待超时就"没有可恢复的台"→ 请选择频道。
     final restore = _preCastChannel;
     CastLog.write('cast stop gen=$_castGen restore='
-        '${restore?.name ?? "(none)"} user=$userInitiated');
-    // 方案 3.7：投屏结束后按设置进「正在等待投屏」，给发送端连播
-    // （电视剧下一集）留窗口；0=马上返回，-1=一直等
-    final wait = _settings.castEndWaitSeconds;
-    if (!userInitiated && (wait < 0 || wait > 0)) {
+        '${restore?.name ?? "(none)"} user=$userInitiated wait=$willWait');
+    if (willWait) {
       _pendingRestoreChannel = restore;
       await _disposeVideoController();
       WakelockPlus.disable();
@@ -1640,13 +1648,13 @@ class PlayerController extends ChangeNotifier {
     _castWaitTimer?.cancel();
     _castWaitTimer = null;
     if (!_castWaiting) return;
-    _castWaiting = false;
-    _castWaitRemain = 0;
     // 恢复目标双保险：等待期内记下的优先，其次用「最后一次真实播放的台」。
     // 等待期间任何一次 playChannel 都会调 _clearCastWait() 把 pending 清掉，
     // 只靠 pending 会出现"明明有台可回却说没有"。
     final restore = _pendingRestoreChannel ?? _preCastChannel;
-    _pendingRestoreChannel = null;
+    // 离开等待态 = 不再等连播：按用户口径，必须主动告诉发送端断开。
+    // 等待期设备一直在广播、当前媒体为空，所以要强制 byebye。
+    _clearCastWait();
     CastLog.write('cast wait exit restore=${restore?.name ?? "(none)"}');
     if (restore != null) {
       for (var attempt = 1; attempt <= 2; attempt++) {
@@ -1671,9 +1679,15 @@ class PlayerController extends ChangeNotifier {
   /// 界面用：等待画面双击返回 → 立刻回直播
   Future<void> cancelCastWaitAndRestore() => _exitCastWait();
 
-  /// 新投屏进来：清掉等待态（不恢复旧频道，由 playCastUrl 接管）
-  void _clearCastWait() {
+  /// 新投屏进来：清掉等待态（不恢复旧频道，由 playCastUrl 接管）。
+  /// [notifyPeer] 为 false 表示链路马上要继续用（新投屏），不能断开。
+  void _clearCastWait({bool notifyPeer = true}) {
     if (!_castWaiting) return;
+    if (notifyPeer) {
+      // 离开等待（回直播/切台）：等待期设备一直在广播、当前媒体为空，
+      // 只有强制 byebye 才能让发送端清掉「投屏中」
+      dlnaService.kickCastClients(forceByebye: true);
+    }
     _castWaitTimer?.cancel();
     _castWaitTimer = null;
     _castWaiting = false;
