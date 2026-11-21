@@ -21,6 +21,9 @@ class MediaCaptureService {
   Future<String?> publishToGallery(String path, {required bool video}) async =>
       null;
 
+  /// Web/无文件系统：空实现
+  Future<void> deleteFile(String path) async {}
+
   Future<Uint8List> rgbaToPng(
       Uint8List rgba, int width, int height) async {
     throw UnsupportedError('截图仅支持桌面端');

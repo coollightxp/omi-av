@@ -4195,7 +4195,9 @@ class PlayerController extends ChangeNotifier {
       if (_state != PlayerState.playing) return;
       final v = c.value;
       if (!v.isInitialized || v.hasError) return;
-      if (v.size.width > 0 && v.size.height > 0) return;
+      // 有尺寸只能说明视频轨解出来了；mpv 还要看 vo 有没有真的建起来
+      // （安卓上出现过尺寸正常但 vo 未配置 → 纯黑屏）
+      if (v.size.width > 0 && v.size.height > 0 && c.videoOutputOk) return;
       CastLog.write('no-picture watchdog fired: engine=${c.engine} '
           'ch=${channel.name}');
       _tryEngineFallback(c, channel);
@@ -5465,6 +5467,50 @@ class PlayerController extends ChangeNotifier {
       }
     }
     final vc = _videoController;
+    // MPV 内核：`stream-record` 实测安卓/Windows 都录不出可用文件
+    // （HLS 直播只追加 demuxer 收到的原始字节，常是 0 字节或没有文件尾，
+    // 用户反馈「MPV 下两个平台都录不了，MDK 正常」）。改走与投屏同一条
+    // 流级录制：按当前源 URL 直接下载原始字节，与内核/播放状态无关，
+    // 也不打断播放。MDK 的 record 原生可用，保持不动。
+    if (vc != null &&
+        vc.engine == 'mpv' &&
+        !_isCasting &&
+        !_currentChannel!.isRadio) {
+      // 网页嗅探后切内置播放时，真实流在 _sniffTarget 里
+      final sniff = _sniffedFromWeb ? _sniffTarget : null;
+      final url = sniff?.url ?? _currentChannel!.streamUrls[_sourceIndex];
+      if (url.isNotEmpty) {
+        final err = await CastStreamRecorder.start(
+          url: url,
+          name: _currentChannel!.name,
+          userAgent: sniff?.ua ?? _currentChannel!.userAgent,
+          referer: sniff?.referer ?? _currentChannel!.httpReferer,
+          subDir: 'recordings',
+          // 直播录制不限速：1.5 倍码率限速只对已知时长的点播有意义
+          throttle: false,
+        );
+        if (err == null) {
+          CastStreamRecorder.onFinished = _onCastRecorderFinished;
+          if (!CastStreamRecorder.isRecording) {
+            CastStreamRecorder.onFinished = null;
+            _lastError = '录制流已结束，未录到数据';
+            return false;
+          }
+          _usingCastRecorder = true;
+          _isRecording = true;
+          _recordPath = CastStreamRecorder.filePath;
+          CastLog.write('record start mpv-stream path=$_recordPath');
+          notifyListeners();
+          return true;
+        }
+        CastLog.write('mpv stream record failed: $err -> stream-record');
+        // 加密流：stream-record 也落不了可用文件，直接报错
+        if (err == 'encrypted') {
+          _lastError = '该源已加密，无法录制';
+          return false;
+        }
+      }
+    }
     if (vc == null) {
       _lastError = '录制失败：播放器未就绪';
       CastLog.write('record start failed: videoController is null '
@@ -5638,6 +5684,45 @@ class PlayerController extends ChangeNotifier {
 
   // ---- 网页频道录制（MediaRecorder） ----
 
+  /// 网页截图 JS：把正在播放的 <video> 帧画到 canvas 再导出 JPEG。
+  /// 安卓的 WebView.draw() 抓不到硬件合成的视频层（截图出来是一块黑），
+  /// 只能从视频元素本身取帧；DRM/跨域污染 canvas 时返回空串，交给上层
+  /// 回退到 WebView 截图。
+  static const _webShotJs = r'''
+(function(){
+  try {
+    function allVideos(root){
+      var out = Array.prototype.slice.call(root.querySelectorAll('video'));
+      var frames = root.querySelectorAll('iframe');
+      for (var i=0;i<frames.length;i++){
+        try { var d = frames[i].contentDocument;
+              if (d) out = out.concat(allVideos(d)); } catch(e) {}
+      }
+      return out;
+    }
+    var vs = allVideos(document), target = null, best = 0;
+    for (var i=0;i<vs.length;i++){
+      var v = vs[i];
+      if (!v.videoWidth || !v.videoHeight) continue;
+      var r = v.getBoundingClientRect();
+      var area = Math.max(0, r.width) * Math.max(0, r.height);
+      if (v.paused || v.ended) area = area * 0.5;
+      if (area > best) { best = area; target = v; }
+    }
+    if (!target) return '';
+    var w = target.videoWidth, h = target.videoHeight;
+    // 限制到 1280 宽、0.85 质量：安卓 evaluateJavascript 结果走 Binder
+    // （约 1MB 上限），1080p 全质量 base64 可能直接超限拿不回来
+    var maxW = 1280;
+    if (w > maxW) { h = Math.round(h * maxW / w); w = maxW; }
+    var cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(target, 0, 0, w, h);
+    return cv.toDataURL('image/jpeg', 0.85);
+  } catch(e) { return ''; }
+})();
+''';
+
   /// 开始网页录制 JS：捕获正在播放的 video 流并启动 MediaRecorder。
   /// 分块（base64）经 omRecChunk 回传，结束经 omRecEnd 通知。
   static const _webRecStartJs = r'''
@@ -5676,9 +5761,32 @@ class PlayerController extends ChangeNotifier {
       }
     }
     if (!target) return 'novideo';
+    // 优先用 video.captureStream（原画质、带音轨）；安卓 WebView 上它可能
+    // 不存在，或者返回一条没有视频轨的空流——这时改用 canvas 定时抓帧
+    // 再 captureStream（能录，代价是没有音轨）。用户实测安卓录出来 0 秒
+    // 就是踩了前一种情况。
     var capture = target.captureStream || target.mozCaptureStream;
-    if (!capture) return 'nocapture';
-    var stream = capture.call(target);
+    var stream = null;
+    if (capture) {
+      try {
+        stream = capture.call(target);
+        var vt = (stream && stream.getVideoTracks) ? stream.getVideoTracks() : [];
+        if (!vt || vt.length === 0) stream = null;
+      } catch(e) { stream = null; }
+    }
+    if (!stream) {
+      var cw = target.videoWidth || 1280;
+      var vh = target.videoHeight || 720;
+      var cv = document.createElement('canvas');
+      cv.width = cw; cv.height = vh;
+      var ctx = cv.getContext('2d');
+      window.__omRecCanvas = cv;
+      window.__omRecTimer = setInterval(function(){
+        try { ctx.drawImage(target, 0, 0, cw, vh); } catch(e) {}
+      }, 40);
+      try { stream = cv.captureStream ? cv.captureStream(25) : null; } catch(e) { stream = null; }
+    }
+    if (!stream) return 'nocapture';
     var mime = '';
     // 优先 mp4（与 fvp 原生录制格式一致），WebView2/Edge 支持 H.264
     var cands = [
@@ -5742,6 +5850,12 @@ class PlayerController extends ChangeNotifier {
     var rec = window.__omRec;
     if (!rec) return 'none';
     window.__omRec = null;
+    // canvas 抓帧兜底：停录时收掉定时器
+    if (window.__omRecTimer) {
+      try { clearInterval(window.__omRecTimer); } catch(e) {}
+      window.__omRecTimer = null;
+    }
+    window.__omRecCanvas = null;
     rec.onstop = function(){
       var chain = window.__omRecChain || Promise.resolve();
       chain.then(function(){
@@ -5885,6 +5999,11 @@ class PlayerController extends ChangeNotifier {
       }
     } catch (_) {}
     final path = _webRecBytes > 0 ? _recordPath : null;
+    // 0 字节文件没有意义（用户看到的「0 秒录像」），顺手删掉，
+    // 界面上按「未捕获到视频数据」提示
+    if (path == null && _recordPath != null) {
+      await captureService.deleteFile(_recordPath!);
+    }
     _isRecording = false;
     _recordPath = null;
     _webRecDone = null;
@@ -5924,6 +6043,24 @@ class PlayerController extends ChangeNotifier {
   /// 网页频道走 WebView 截图桥，返回的就是 PNG 字节，直接落盘。
   Future<String?> takeScreenshot() async {
     if (_webPageActive) {
+      // 1) 先从 <video> 元素取帧（安卓上这是唯一能拿到画面的方式：
+      //    WebView.draw() 抓不到硬件视频层，截出来是全黑）
+      try {
+        final r = await _webEval?.call(_webShotJs);
+        final s = r?.toString() ?? '';
+        final i = s.indexOf('base64,');
+        if (i > 0) {
+          final bytes = base64Decode(s.substring(i + 7));
+          if (bytes.isNotEmpty) {
+            final name = _currentChannel?.name ?? 'web_screenshot';
+            final path =
+                await captureService.buildFilePath('screenshots', name, 'jpg');
+            await captureService.saveBytes(path, bytes);
+            return _publishToGallery(path, video: false);
+          }
+        }
+      } catch (_) {}
+      // 2) 退回 WebView 自身截图（桌面可靠；安卓视频层可能仍是黑的）
       final shot = _webScreenshot;
       if (shot == null) return null;
       try {

@@ -35,6 +35,7 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
     _video = VideoController(_player);
     _bindStreams();
     _observeMediaTitle();
+    _observeVideoOutput();
   }
 
   /// 当前流地址/HTTP 头：原地换源（[openInPlace]）会就地改写
@@ -53,6 +54,13 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
 
   @override
   String get engine => 'mpv';
+
+  /// mpv `vo-configured`：视频输出是否真的建起来了。
+  /// 安卓上实测过「已经 playing、尺寸也上报了，但 vo 没配置 → 黑屏」，
+  /// 只靠尺寸判断不出来。观测不到该属性时保持 true（不做误判）。
+  bool _voOk = true;
+  @override
+  bool get videoOutputOk => _voOk;
 
   void _set(OmiVideoValue next) {
     if (_disposed) return;
@@ -82,6 +90,22 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
       } catch (e) {
         // 某些内核/资源不允许观测：静默降级，标题回落到台名
         debugPrint('[OmiVideo] observe media-title failed: $e');
+      }
+    }());
+  }
+
+  /// 观测 `vo-configured`：上层看门狗据此判断「有声音但真的没画面」。
+  /// 只有明确收到 false 才更新；观测失败保持 true，避免误切内核。
+  void _observeVideoOutput() {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    unawaited(() async {
+      try {
+        await platform.observeProperty('vo-configured', (value) async {
+          _voOk = value == true;
+        });
+      } catch (e) {
+        debugPrint('[OmiVideo] observe vo-configured failed: $e');
       }
     }());
   }
@@ -180,13 +204,20 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
       });
     }
     try {
-      // 后台给 open 加个上限：万一视频管线还是没跳过，也不能让整个
-      // 起播流程挂死在 await 上（回前台才恢复 = 用户看到的现象）
-      await (_videoDisabled
-          ? opening.timeout(const Duration(seconds: 6))
-          : opening);
+      // 起播给个上限：安卓上 mpv 偶发 open 一直不返回（等 Surface/网络），
+      // 不设上限时上层永远收不到结果，就是「黑屏且没有任何兜底」。
+      // 前台超时后抛给 PlayerController，由它换另一个内核重开。
+      await opening.timeout(
+        _videoDisabled
+            ? const Duration(seconds: 6)
+            : const Duration(seconds: 20),
+      );
     } on TimeoutException {
-      debugPrint('[OmiVideo] 后台 open 超时：按已起播继续（音频优先）');
+      if (_videoDisabled) {
+        debugPrint('[OmiVideo] 后台 open 超时：按已起播继续（音频优先）');
+      } else {
+        rethrow;
+      }
     }
     _playerOpened = true;
     // open 返回即 demuxer 就绪；画面尺寸可能稍后才上报，

@@ -84,6 +84,13 @@ class MediaCaptureService {
     return path;
   }
 
+  /// 删除落盘文件（0 字节录像等无意义产物）
+  Future<void> deleteFile(String path) async {
+    try {
+      await File(path).delete();
+    } catch (_) {}
+  }
+
   /// 安卓：把已落盘的截图/录像搬进系统相册（MediaStore）。
   ///
   /// 应用文档目录里的文件在相册/文件管理器里看不到，用户在手机上截完图

@@ -23,6 +23,11 @@ abstract class OmiVideoBackend extends ChangeNotifier {
   /// 上层据此做「起播无画面就换个引擎再试」的兜底（不依赖具体实现类型）。
   String get engine;
 
+  /// 视频输出是否已就绪（mpv 的 `vo-configured`）。
+  /// 安卓上 mpv 偶发「有声音、有视频尺寸，但 vo 没起来 → 黑屏」，
+  /// 只看尺寸判断不出来；MDK/Web 恒为 true。
+  bool get videoOutputOk => true;
+
   Future<void> initialize();
   Future<void> play();
   Future<void> pause();
