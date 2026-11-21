@@ -90,8 +90,8 @@ class MediaCaptureService {
   /// 找不到东西。原生侧用 MediaStore 复制一份（Android 10+ 免存储权限），
   /// 复制成功后删掉应用私有副本，避免占两份空间。
   ///
-  /// 返回相册内容 URI；非安卓、Android 9 及以下（无权限写公共目录）或
-  /// 失败时返回 null——文件保持在应用目录，调用方按原路径提示。
+  /// 返回相册内容 URI；非安卓、用户拒绝存储权限或失败时返回 null——
+  /// 文件保持在应用目录，调用方按原路径提示。
   Future<String?> publishToGallery(String path, {required bool video}) async {
     if (!isAndroid) return null;
     final name = path.split(RegExp(r'[\\/]')).last;
@@ -105,6 +105,11 @@ class MediaCaptureService {
             _ => 'video/mp4',
           };
     try {
+      // Android 9 及以下写公共相册要 WRITE_EXTERNAL_STORAGE：原生侧先
+      // 检查，没有就弹系统授权框；Android 10+ 直接返回 true（免权限）
+      final granted =
+          await _native.invokeMethod<bool>('ensureGalleryPermission') ?? false;
+      if (!granted) return null;
       final uri = await _native.invokeMethod<String>('saveToGallery', {
         'path': path,
         'name': name,

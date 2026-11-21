@@ -5392,15 +5392,18 @@ class PlayerController extends ChangeNotifier {
 
   /// 开始录制当前画面到固定文件夹，返回是否成功。
   /// 普通频道走内核原生录制（mpv stream-record / MDK record）；网页频道
-  /// 优先用嗅探到的真实流做流级录制，拿不到可直连流才退回 MediaRecorder；
+  /// 优先录解码后的画面（MediaRecorder），拿不到再试直连流；
   /// 投屏走流级录制（CastStreamRecorder，直接下载原始媒体字节）。
   Future<bool> startRecording() async {
-    // 网页频道：优先用嗅探到的真实流做流级录制（CastStreamRecorder），
-    // 不依赖页面内的 captureStream/MediaRecorder——WebView2 上后者常因
-    // 跨域 iframe / DRM / JS 桥消息体积限制失败（用户实测录出空文件）。
+    // 网页频道：先录页面里解码后的视频（captureStream + MediaRecorder）。
+    // 桌面 WebView2 与安卓 WebView 都支持；这样 DRM/AES 加密的流也能录，
+    // 因为录的是已经解码出来的画面，而不是原始加密字节。
     if (_webPageActive) {
-      if (await _startWebStreamRecording()) return true;
-      return _startWebRecording();
+      final jsOk = await _startWebRecording();
+      if (jsOk) return true;
+      // 页面里找不到视频（跨域 iframe 等）才退回「直连流」录制；
+      // 那条路只接未加密的 FLV/直连 mp4，加密流会被拒绝（见方法注释）
+      return _startWebStreamRecording();
     }
     // 诊断：逐个判定失败原因。投屏 URL 与普通频道不同（非 HLS 走本地
     // 代理、HLS 直连），失败点必须精确到分支才能定位，不能笼统返回 false。
@@ -5754,29 +5757,31 @@ class PlayerController extends ChangeNotifier {
 })();
 ''';
 
-  /// 网页频道走「真实流」录制：用嗅探到的可直连媒体流直接下载字节。
-  /// 这条路不碰 WebView 的 captureStream/MediaRecorder，所以在 WebView2
-  /// 上也稳（用户实测 MediaRecorder 那条路录出来是空的）。
-  /// 拿不到可直连流（blob:/DRM/未嗅探到）返回 false，由调用方退回 JS 录制。
+  /// 网页频道「直连流」录制兜底：页面里拿不到视频时才走这里。
+  ///
+  /// 只接**未加密**的 HTTP-FLV 与直连 mp4/mp3。HLS/DASH 一律不接：
+  /// 这类源大量带 AES-128 / SAMPLE-AES / DRM（央视频、咪咕等），
+  /// 原始字节是密文，不解码直接落盘就是一堆没法播的数据——用户反馈
+  /// 「嗅探到的是加密的，不录解码后的画面没有意义」。能解码的常规情况
+  /// 已经由 [_startWebRecording] 覆盖。
   Future<bool> _startWebStreamRecording() async {
     final t = _sniffTarget;
     if (t == null || t.url.isEmpty || CastStreamRecorder.isRecording) {
       return false;
     }
     final kind = _sniffKindOf(t.url);
-    if (kind == null) return false;
-    // HLS/DASH/FLV 先预检（DRM/加密的录了也是坏文件）；直连 mp4/mp3 不预检
-    final playable = kind == 'direct'
-        ? true
-        : await checkSniffedStreamPlayable(
-            url: t.url,
-            kind: kind,
-            referer: t.referer,
-            userAgent: t.ua,
-          );
-    if (!playable) {
-      CastLog.write('web rec: sniffed stream not directly recordable ($kind)');
+    if (kind != 'flv' && kind != 'direct') {
+      CastLog.write('web rec direct skipped: $kind may be encrypted');
       return false;
+    }
+    if (kind == 'flv') {
+      final playable = await checkSniffedStreamPlayable(
+        url: t.url,
+        kind: 'flv',
+        referer: t.referer,
+        userAgent: t.ua,
+      );
+      if (!playable) return false;
     }
     final err = await CastStreamRecorder.start(
       url: t.url,
@@ -5820,10 +5825,10 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 网页录制启动（由 startRecording 在网页频道时调用）
+  /// 网页录制启动（网页频道录制主路径，桌面/安卓通用）
   Future<bool> _startWebRecording() async {
     final eval = _webEval;
-    if (eval == null || !isDesktop || _isRecording) return false;
+    if (eval == null || _isRecording) return false;
     try {
       _webRecBytes = 0;
       _webRecStarting = true;
