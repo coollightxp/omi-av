@@ -5634,25 +5634,56 @@ class PlayerController extends ChangeNotifier {
     }
     if (!stream) {
       var cw = target.videoWidth || 1280;
-      var vh = target.videoHeight || 720;
+      var ch = target.videoHeight || 720;
+      // 超过 1080p 按比例缩到 1080p：手机 canvas 逐帧拷贝 + 软件编码
+      // 扛不住更高分辨率，硬录 4K 会严重掉帧
+      var maxSide = Math.max(cw, ch);
+      if (maxSide > 1920) {
+        var k = 1920 / maxSide;
+        cw = Math.round(cw * k);
+        ch = Math.round(ch * k);
+      }
       var cv = document.createElement('canvas');
-      cv.width = cw; cv.height = vh;
-      var ctx = cv.getContext('2d');
+      cv.width = cw; cv.height = ch;
+      var ctx = cv.getContext('2d', { alpha: false });
       window.__omRecCanvas = cv;
-      window.__omRecTimer = setInterval(function(){
-        try { ctx.drawImage(target, 0, 0, cw, vh); } catch(e) {}
-      }, 40);
-      try { stream = cv.captureStream ? cv.captureStream(25) : null; } catch(e) { stream = null; }
+      function drawFrame(){
+        try { ctx.drawImage(target, 0, 0, cw, ch); } catch(e) {}
+      }
+      // 优先 requestVideoFrameCallback：只在真有新帧时画一次，帧率跟源
+      // 一致且不空转；不支持时退回 33ms（30fps）定时器。旧的 40ms 定时器
+      // + 25fps 在安卓上就是用户看到的「缓慢卡顿」。
+      window.__omRecRafOn = true;
+      if (target.requestVideoFrameCallback) {
+        var tick = function(){
+          if (!window.__omRecRafOn) return;
+          drawFrame();
+          target.requestVideoFrameCallback(tick);
+        };
+        target.requestVideoFrameCallback(tick);
+      } else {
+        window.__omRecTimer = setInterval(drawFrame, 33);
+      }
+      drawFrame();
+      try { stream = cv.captureStream ? cv.captureStream(30) : null; } catch(e) { stream = null; }
     }
     if (!stream) return 'nocapture';
+    var vw = target.videoWidth || 1280;
+    var vh = target.videoHeight || 720;
+    // 码率按分辨率给。MediaRecorder 默认只给 ~2.5Mbps，1080p 会糊成
+    // 马赛克，编码器为了追不上还会主动丢帧（用户反馈的「卡顿」）。
+    var vbps = Math.max(2500000,
+        Math.min(10000000, Math.round(vw * vh * 3)));
     var mime = '';
-    // 优先 mp4（与 fvp 原生录制格式一致），WebView2/Edge 支持 H.264
+    // 优先 mp4（与 fvp 原生录制格式一致），WebView2/Edge 支持 H.264；
+    // 安卓 WebView 一般只支持 WebM：先试 VP8（硬件编码支持最广），
+    // VP9 软件编码在 1080p 下会掉帧，放后面
     var cands = [
-      'video/mp4;codecs=h264,aac',
       'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
       'video/mp4',
-      'video/webm;codecs=vp9,opus',
       'video/webm;codecs=vp8,opus',
+      'video/webm;codecs=vp8',
+      'video/webm;codecs=vp9,opus',
       'video/webm'
     ];
     for (var m=0;m<cands.length;m++){
@@ -5664,11 +5695,20 @@ class PlayerController extends ChangeNotifier {
     var rec = null;
     var tries = mime ? [mime] : cands;
     for (var t=0;t<tries.length && !rec;t++){
-      try { rec = new MediaRecorder(stream, {mimeType: tries[t]}); mime = tries[t]; }
-      catch(e) { rec = null; }
+      try {
+        rec = new MediaRecorder(stream, {
+          mimeType: tries[t],
+          videoBitsPerSecond: vbps,
+          audioBitsPerSecond: 128000
+        });
+        mime = tries[t];
+      } catch(e) { rec = null; }
     }
     if (!rec) {
-      try { rec = new MediaRecorder(stream); mime = ''; } catch(e) { return 'err'; }
+      try {
+        rec = new MediaRecorder(stream, { videoBitsPerSecond: vbps });
+        mime = '';
+      } catch(e) { return 'err'; }
     }
     window.__omRec = rec;
     window.__omRecChain = Promise.resolve();
@@ -5693,7 +5733,7 @@ class PlayerController extends ChangeNotifier {
         });
       });
     };
-    rec.start(1000);
+    rec.start(2000);
     var ext = (mime && mime.indexOf('mp4') >= 0) ? 'mp4' : 'webm';
     return 'ok:' + ext;
   } catch(e) { return 'err'; }
@@ -5708,7 +5748,8 @@ class PlayerController extends ChangeNotifier {
     var rec = window.__omRec;
     if (!rec) return 'none';
     window.__omRec = null;
-    // canvas 抓帧兜底：停录时收掉定时器
+    // canvas 抓帧兜底：停录时收掉定时器/帧回调
+    window.__omRecRafOn = false;
     if (window.__omRecTimer) {
       try { clearInterval(window.__omRecTimer); } catch(e) {}
       window.__omRecTimer = null;
