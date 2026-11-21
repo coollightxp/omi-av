@@ -17,13 +17,15 @@ add_library(${PLUGIN_NAME} SHARED
 target_compile_features(${PLUGIN_NAME} PUBLIC cxx_std_17)
 target_compile_options(${PLUGIN_NAME} PRIVATE /EHsc /W3)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE UNICODE _UNICODE)
-target_compile_definitions(${PLUGIN_NAME} PRIVATE PLUGIN_IMPL)
-# 进程回环音频 ActivateAudioInterface 声明在 NTDDI_WIN10_19H1 守卫之后，
-# SDK 默认 NTDDI 低于该值会把声明藏起来（0x0A000007 = 19H1）
+# 两个宏都定义：c_api 头用 FLUTTER_PLUGIN_IMPL 判导出方向，
+# PLUGIN_IMPL 是 flutter 模板惯例；缺一个都会让导出变 dllimport
+target_compile_definitions(${PLUGIN_NAME} PRIVATE PLUGIN_IMPL FLUTTER_PLUGIN_IMPL)
+# ActivateAudioInterface / 进程回环结构体声明藏在 NTDDI_WIN10_19H1
+# 守卫后（0x0A000008 起）；SDK 默认 NTDDI 低于该值，提到安全上限
 target_compile_definitions(${PLUGIN_NAME} PRIVATE
   _WIN32_WINNT=0x0A00
   WINVER=0x0A00
-  NTDDI_VERSION=0x0A000007)
+  NTDDI_VERSION=0x0A000010)
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE
   flutter
