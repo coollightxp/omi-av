@@ -7,5 +7,13 @@ class ScreenRecorder {
     return 'platform';
   }
 
-  static Future<int> stop() async => 0;
+  static Future<ScreenRecordStop> stop() async =>
+      const ScreenRecordStop(0, 0, 0);
+}
+
+class ScreenRecordStop {
+  final int durationMs;
+  final int frames;
+  final int encoded;
+  const ScreenRecordStop(this.durationMs, this.frames, this.encoded);
 }

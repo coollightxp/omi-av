@@ -72,6 +72,9 @@ class DlnaService {
   Timer? _readyWatchTimer;
   String? _readyWatchLastState;
 
+  /// byebye 之后延迟补 alive 的定时器（见 _notifyByebye）
+  Timer? _aliveRestoreTimer;
+
   /// 最近一次命令期望的对外状态（Macast 同款：命令驱动而非播放器驱动）。
   /// SetURI→PAUSED_PLAYBACK，Play→PLAYING，Pause→PAUSED_PLAYBACK。
   /// 抖音(乐播SDK)在 Play 后几百毫秒内就轮询 GetTransportInfo，
@@ -130,6 +133,24 @@ class DlnaService {
   void _notifyByebye({bool keepAlive = true}) {
     final socket = _ssdp;
     if (socket == null) return;
+    _sendByebyePackets(socket);
+    // UDP 无重传：再补一轮，降低丢包导致发送端仍停在「投屏中」
+    Timer(const Duration(milliseconds: 60), () {
+      if (_ssdp == socket) _sendByebyePackets(socket);
+    });
+    if (!keepAlive) return;
+    // 不能立刻 alive：byebye→alive 顺序会让部分投送端（B 站）认为
+    // 设备只是刷新了一下，投屏会话继续挂着。延迟几秒再广播，
+    // 设备重新出现在列表里，但不带任何会话状态。
+    _aliveRestoreTimer?.cancel();
+    _aliveRestoreTimer = Timer(const Duration(seconds: 5), () {
+      _aliveRestoreTimer = null;
+      if (_ssdp == socket) _notifyAlive();
+    });
+  }
+
+  /// byebye 包体（单独抽出便于补发）
+  void _sendByebyePackets(RawDatagramSocket socket) {
     final usnBase = 'uuid:$_uuid';
     final entries = <List<String>>[
       ['upnp:rootdevice', '$usnBase::upnp:rootdevice'],
@@ -162,10 +183,6 @@ class DlnaService {
           'USN: ${e[1]}\r\n\r\n';
       socket.send(pkt.codeUnits, InternetAddress('239.255.255.250'), 1900);
     }
-    // byebye 后补一轮 alive，让设备不真的从列表里消失（微信已收到
-    // byebye 会清投屏态；其他 App 几乎无感）。
-    // 退出/关机场景传 keepAlive=false：设备真的要没了，不能补。
-    if (keepAlive) _notifyAlive();
   }
 
   /// 清空当前投屏媒体：投屏结束（Stop/自动恢复）后调用，
@@ -259,6 +276,8 @@ class DlnaService {
 
   void stop() {
     _aliveTimer?.cancel();
+    _aliveRestoreTimer?.cancel();
+    _aliveRestoreTimer = null;
     _positionEventTimer?.cancel();
     _readyWatchTimer?.cancel();
     for (final s in _subs.values) {

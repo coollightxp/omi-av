@@ -30,6 +30,8 @@ class OmiScreenRecorderPlugin : public flutter::Plugin {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   flutter::PluginRegistrarWindows* registrar_;
+  // 必须持有 channel 引用：MethodChannel 析构后 handler 就失效了
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
 };
 
 }  // namespace omi_screen_recorder

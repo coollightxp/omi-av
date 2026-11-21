@@ -39,14 +39,28 @@ class ScreenRecorder {
     }
   }
 
-  /// 停止并完成落盘（Finalize），返回本次录制毫秒数。
-  static Future<int> stop() async {
+  /// 停止并完成落盘（Finalize），返回时长与帧数诊断信息。
+  static Future<ScreenRecordStop> stop() async {
     try {
       final r = await _ch.invokeMethod<Map<dynamic, dynamic>>('stop');
-      final v = r?['durationMs'];
-      return v is int ? v : 0;
+      int pick(String k) {
+        final v = r?[k];
+        return v is int ? v : 0;
+      }
+
+      return ScreenRecordStop(pick('durationMs'), pick('frames'), pick('encoded'));
     } catch (_) {
-      return 0;
+      return const ScreenRecordStop(0, 0, 0);
     }
   }
+}
+
+/// 一次系统级录制的收尾统计：时长、WGC 捕获帧数、实际编码帧数。
+/// frames==0 说明窗口没有产出画面（最小化/被独占/驱动不支持）；
+/// frames>0 而 encoded==0 说明编码器没吃进样本。
+class ScreenRecordStop {
+  final int durationMs;
+  final int frames;
+  final int encoded;
+  const ScreenRecordStop(this.durationMs, this.frames, this.encoded);
 }

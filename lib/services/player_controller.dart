@@ -1509,16 +1509,15 @@ class PlayerController extends ChangeNotifier {
   /// 手动断开是明确意图，直接回直播，不再进入等待画面。
   Future<void> _doStopCastAndRestore({bool userInitiated = false}) async {
     if (!_isCasting) return;
+    // 投屏结束（手动断开 / 对方停止 / 出错）先收尾录制，再释放播放器，
+    // 否则系统级录制的 Finalize 赶不上、文件不完整（用户诉求）
+    await _finalizeRecording(userInitiated ? '手动断开投屏' : '投屏结束');
     _isCasting = false;
     _watchPosMs = -1;
     _watchAdvanceAt = null;
     _castPendingSeek = null;
     _castPendingSeekAt = null;
     unawaited(CastStreamProxy.instance.stop());
-    // 本机主动断开：清 DLNA 媒体 + 推 STOPPED + 终止订阅 + SSDP
-    // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
-    // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
-    dlnaService.kickCastClients();
     // 注意：**不在这里把 _preCastChannel 置 null**。
     // 它记的是「最后一次真实播放的台」，投屏可以连投很多次，每次都要能
     // 回到同一个直播；旧代码在这里取走即清，第二次投屏时当前频道已是
@@ -1530,6 +1529,10 @@ class PlayerController extends ChangeNotifier {
     // （电视剧下一集）留窗口；0=马上返回，-1=一直等
     final wait = _settings.castEndWaitSeconds;
     if (!userInitiated && (wait < 0 || wait > 0)) {
+      // 等待态**不摘设备**（v2.3.69）：只清媒体 + 推 STOPPED，让发送端
+      // 知道这一条播完了，设备仍留在它的列表里，下一集还能推过来。
+      // 此时发 SSDP byebye 会让设备从发送端列表消失，连播就断了。
+      dlnaService.clearCurrentMedia();
       _pendingRestoreChannel = restore;
       await _disposeVideoController();
       WakelockPlus.disable();
@@ -1537,6 +1540,11 @@ class PlayerController extends ChangeNotifier {
       _enterCastWait(wait);
       return;
     }
+    // 真正离开投屏（回直播 / 手动断开 / 不等待）：完整断开并通知发送端
+    // ——清 DLNA 媒体 + 推 STOPPED + 终止订阅 + SSDP byebye 两轮。
+    // 微信视频号不解析 GENA 事件，只有"设备消失 + 查询无媒体"双管齐下
+    // 才会清掉投屏 UI。
+    dlnaService.kickCastClients();
     if (restore != null) {
       await playChannel(restore);
     } else {
@@ -1579,6 +1587,10 @@ class PlayerController extends ChangeNotifier {
     _castWaitTimer = null;
     if (!_castWaiting) return;
     _castWaiting = false;
+    // 离开等待、回直播＝这一次投屏会话彻底结束，通知发送端（v2.3.69）。
+    // 等待期间一直保持设备在线，是为了让发送端能连推下一集；一旦回直播
+    // 就必须断开，否则对方还显示"投屏中"。
+    dlnaService.kickCastClients();
     _castWaitRemain = 0;
     // 恢复目标双保险：等待期内记下的优先，其次用「最后一次真实播放的台」。
     // 等待期间任何一次 playChannel 都会调 _clearCastWait() 把 pending 清掉，
@@ -3182,6 +3194,8 @@ class PlayerController extends ChangeNotifier {
     // -1=一直等待新投屏或用户手动切台/断开。
     if (_isCasting && v.isCompleted && _state == PlayerState.playing) {
       _state = PlayerState.ended;
+      // 片子播完就没有后续画面了：录制必须在此收尾并落盘
+      unawaited(_finalizeRecording('投屏播完'));
       notifyListeners();
       _castEndedTimer?.cancel();
       final wait = _settings.castEndWaitSeconds;
@@ -3367,6 +3381,8 @@ class PlayerController extends ChangeNotifier {
   /// 一起被销毁时 mpv 的原生实例不保证释放——声音继续响，再从桌面点图标
   /// 就成了两路同时在放。必须在销毁前主动 pause + stop 服务。
   Future<void> shutdownForExit() async {
+    // 正在录制：先停录并落盘
+    await _finalizeRecording('退出程序');
     _audioCardClosed = true;
     _cardExitAt = DateTime.now();
     // 作废在飞的换台（同 _exitFromCard），然后**真正释放内核**：
@@ -3546,7 +3562,8 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.shutdown:
         OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 关机前若还在投屏，先把链路断干净并通知发送端（v2.3.67）
+        // 关机前先收尾录制（落盘），再断投屏链路通知发送端（v2.3.69）
+        await _finalizeRecording('定时关机');
         if (_isCasting) await dlnaService.shutdownCastLink();
         // 先发系统命令再退程序：进程先死也不影响系统照常关闭。
         // shutdown /p 立即关机、无系统倒计时通知（2.1.46 定稿）
@@ -3562,6 +3579,7 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.exit:
         OsdBus.show('定时关闭：退出应用', icon: Icons.bedtime);
         notifyListeners();
+        await _finalizeRecording('定时退出');
         if (_isCasting) await dlnaService.shutdownCastLink();
         if (isDesktop) {
           await ExitGuard.quit();
@@ -4237,6 +4255,8 @@ class PlayerController extends ChangeNotifier {
   /// 被连带拆除（flutter_windows.dll 内 0xc0000005）。这里主动释放，
   /// 让原生资源先安静下来，再由 ExitGuard 结束进程。
   Future<void> prepareForExit() async {
+    // 正在录制：先停录并落盘，退出/关机不能把文件丢了
+    await _finalizeRecording('退出程序');
     try {
       await flushSettings();
     } catch (_) {}
@@ -5208,11 +5228,15 @@ class PlayerController extends ChangeNotifier {
         if (err == null) {
           _usingSystemRecorder = true;
           _isRecording = true;
+          CastLog.write('rec start system path=$_recordPath');
           notifyListeners();
           return true;
         }
         // 系统级失败：回退内核录制
         _lastError = '系统级录制不可用($err)，已回退内核录制';
+        CastLog.write('rec start system FAILED: $err -> kernel');
+      } else if (Platform.isWindows) {
+        CastLog.write('rec start system unsupported -> kernel');
       }
       if (vc == null || !vc.value.isInitialized) {
         _lastError = '当前内核不支持录制';
@@ -5252,15 +5276,28 @@ class PlayerController extends ChangeNotifier {
       // 系统级录制：stop 内部 Finalize 落盘，无需额外等待
       _usingSystemRecorder = false;
       notifyListeners();
-      await ScreenRecorder.stop();
+      final st = await ScreenRecorder.stop();
+      int size = 0;
       if (path != null) {
         try {
           final f = File(path);
-          // 64KB 以下视为没录上（几秒的 H.264 不止这个数）
-          if (await f.exists() && await f.length() > 64 * 1024) return path;
+          if (await f.exists()) size = await f.length();
         } catch (_) {}
       }
-      _lastError = '录制已停止（未捕获到视频数据）';
+      CastLog.write('rec stop system ms=${st.durationMs} '
+          'frames=${st.frames} encoded=${st.encoded} size=$size');
+      // 64KB 以下视为没录上（几秒的 H.264 不止这个数）
+      if (path != null && size > 64 * 1024) return path;
+      // 诊断分流：0 帧=窗口没出画面；有帧没编码=编码器没吃样本；
+      // 编码了但文件小=落盘失败
+      if (st.frames == 0) {
+        _lastError = '录制失败：窗口未产生画面（最小化、被独占或驱动不支持）';
+      } else if (st.encoded == 0) {
+        _lastError = '录制失败：编码器未接收画面（${st.frames} 帧已捕获）';
+      } else {
+        _lastError = '录制失败：文件未落盘（编码 ${st.encoded} 帧，仅 $size 字节）';
+      }
+      CastLog.write('rec stop system FAILED: $_lastError');
       return null;
     }
     final vc = _videoController;
@@ -5269,6 +5306,7 @@ class PlayerController extends ChangeNotifier {
       // 给编码器一点时间刷新文件尾
       await Future.delayed(const Duration(milliseconds: 800));
     } catch (_) {}
+    CastLog.write('rec stop kernel path=$path');
     notifyListeners();
     // 产物校验（v2.3.68）：mdk 的 record 是 fire-and-forget，流不支持时
     // 它不报错、文件根本不生成（投屏的 HLS 点播/视频号流实测白录）。
@@ -5276,10 +5314,27 @@ class PlayerController extends ChangeNotifier {
     if (path != null && isDesktop) {
       try {
         final f = File(path);
-        if (!await f.exists() || await f.length() == 0) return null;
+        if (!await f.exists() || await f.length() == 0) {
+          _lastError = '录制失败：当前内核未能写出数据（该流不支持转封装）';
+          CastLog.write('rec stop kernel FAILED: no data');
+          return null;
+        }
       } catch (_) {}
     }
     return path;
+  }
+
+  /// 异常/被动结束时收尾录制：能保存就保存，失败只写日志，不打断流程。
+  /// 用于投屏播完、对方断开、退出程序、关机、定时退出等路径。
+  Future<void> _finalizeRecording(String reason) async {
+    if (!_isRecording) return;
+    CastLog.write('rec auto-stop reason=$reason');
+    try {
+      final path = await stopRecording().timeout(const Duration(seconds: 6));
+      if (path != null) {
+        OsdBus.show('录制已保存（$reason）', icon: Icons.videocam);
+      }
+    } catch (_) {}
   }
 
   // ---- 网页频道录制（MediaRecorder） ----

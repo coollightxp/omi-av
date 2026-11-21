@@ -145,6 +145,10 @@ struct RecorderState {
   std::thread audioThread;
   std::atomic<bool> encodeStop{false};
   std::atomic<bool> audioStop{false};
+
+  // 诊断：累计成功拷贝的帧数 / 写出的视频帧数
+  std::atomic<uint64_t> framesCaptured{0};
+  std::atomic<uint64_t> framesEncoded{0};
 };
 
 RecorderState g;
@@ -194,6 +198,7 @@ void OnFrame(wgc::Direct3D11CaptureFramePool const& sender) {
       g.hasPending = true;
     }
     g.ctx->Unmap(g.staging.get(), 0);
+    g.framesCaptured.fetch_add(1, std::memory_order_relaxed);
   } catch (...) {
     // 单帧失败不影响整体录制
   }
@@ -406,6 +411,7 @@ void EncodeLoop() {
           std::lock_guard<std::mutex> lk(g.writerMutex);
           if (g.writer != nullptr) {
             g.writer->WriteSample(g.videoIdx, sample);
+            g.framesEncoded.fetch_add(1, std::memory_order_relaxed);
           }
         }
         sample->Release();
@@ -646,6 +652,8 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     g.pendingFrame.clear();
     g.encodeStop = false;
     g.audioStop = false;
+    g.framesCaptured = 0;
+    g.framesEncoded = 0;
     g.running = true;
     running_ = true;
     // 显式会话：新投影里帧池没有 StartCapture(item) 便捷方法
@@ -674,6 +682,8 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
 
 int64_t ScreenRecorder::Stop() {
   const bool wasRunning = g.running.load();
+  lastFramesCaptured_ = static_cast<int64_t>(g.framesCaptured.load());
+  lastFramesEncoded_ = static_cast<int64_t>(g.framesEncoded.load());
   const LARGE_INTEGER now = QpcNow();
   int64_t ms = 0;
   if (wasRunning && g.freq.QuadPart > 0) {

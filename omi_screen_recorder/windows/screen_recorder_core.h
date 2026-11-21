@@ -34,9 +34,15 @@ class ScreenRecorder {
 
   bool IsRecording() const { return running_; }
 
+  /// 上一次录制的诊断计数（Stop 后有效）
+  int64_t LastFramesCaptured() const { return lastFramesCaptured_; }
+  int64_t LastFramesEncoded() const { return lastFramesEncoded_; }
+
  private:
   ScreenRecorder() = default;
   bool running_ = false;
+  int64_t lastFramesCaptured_ = 0;
+  int64_t lastFramesEncoded_ = 0;
 };
 
 }  // namespace omi_recorder

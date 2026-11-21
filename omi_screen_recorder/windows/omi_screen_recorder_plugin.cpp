@@ -30,7 +30,20 @@ void OmiScreenRecorderPluginCApiRegisterWithRegistrar(
 
 OmiScreenRecorderPlugin::OmiScreenRecorderPlugin(
     flutter::PluginRegistrarWindows* registrar)
-    : registrar_(registrar) {}
+    : registrar_(registrar) {
+  // 关键：创建 MethodChannel 并挂 handler。缺这一步时 Dart 端调用会抛
+  // MissingPluginException，isSupported() 恒为 false，录制永远回退内核
+  // （表现为：直播能录、投屏 HLS 白录）。
+  auto channel =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          registrar->messenger(), "omi_screen_recorder",
+          &flutter::StandardMethodCodec::GetInstance());
+  channel->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) { HandleMethodCall(call, std::move(result)); });
+  channel_ = std::move(channel);
+}
 
 OmiScreenRecorderPlugin::~OmiScreenRecorderPlugin() = default;
 
@@ -78,6 +91,12 @@ void OmiScreenRecorderPlugin::HandleMethodCall(
     EncodableMap out;
     out[EncodableValue("ok")] = EncodableValue(true);
     out[EncodableValue("durationMs")] = EncodableValue(ms);
+    out[EncodableValue("frames")] =
+        EncodableValue(omi_recorder::ScreenRecorder::Instance()
+                           .LastFramesCaptured());
+    out[EncodableValue("encoded")] =
+        EncodableValue(omi_recorder::ScreenRecorder::Instance()
+                           .LastFramesEncoded());
     result->Success(EncodableValue(out));
     return;
   }
