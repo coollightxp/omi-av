@@ -40,6 +40,9 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
   /// 电平恒为 -1，波形退回播放态模拟。
   OmiVideoValue get value => _value;
 
+  @override
+  String get engine => 'web';
+
   void _sync() {
     if (_disposed) return;
     final v = _vc.value;

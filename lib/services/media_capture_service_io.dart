@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// 媒体捕获服务 - 桌面端录制与截图的文件存储
@@ -14,6 +15,9 @@ class MediaCaptureService {
 
   /// 安卓也支持截图/录制（应用文档目录，无需存储权限）
   static bool get isAndroid => !kIsWeb && Platform.isAndroid;
+
+  /// 安卓原生通道（与画中画/通知栏共用 MainActivity 上的 omi/pip 通道）
+  static const MethodChannel _native = MethodChannel('omi/pip');
 
   /// 用户指定的保存根目录（设置里选的）。空 = 用默认位置。
   /// 截图/录制/录音全部走 [getSaveDir]，改一处即全部生效。
@@ -78,6 +82,42 @@ class MediaCaptureService {
   Future<String> saveBytes(String path, Uint8List bytes) async {
     await File(path).writeAsBytes(bytes, flush: true);
     return path;
+  }
+
+  /// 安卓：把已落盘的截图/录像搬进系统相册（MediaStore）。
+  ///
+  /// 应用文档目录里的文件在相册/文件管理器里看不到，用户在手机上截完图
+  /// 找不到东西。原生侧用 MediaStore 复制一份（Android 10+ 免存储权限），
+  /// 复制成功后删掉应用私有副本，避免占两份空间。
+  ///
+  /// 返回相册内容 URI；非安卓、Android 9 及以下（无权限写公共目录）或
+  /// 失败时返回 null——文件保持在应用目录，调用方按原路径提示。
+  Future<String?> publishToGallery(String path, {required bool video}) async {
+    if (!isAndroid) return null;
+    final name = path.split(RegExp(r'[\\/]')).last;
+    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    final mime = !video
+        ? 'image/png'
+        : switch (ext) {
+            'webm' => 'video/webm',
+            'ts' => 'video/mp2t',
+            'mkv' => 'video/x-matroska',
+            _ => 'video/mp4',
+          };
+    try {
+      final uri = await _native.invokeMethod<String>('saveToGallery', {
+        'path': path,
+        'name': name,
+        'mime': mime,
+      });
+      if (uri == null || uri.isEmpty) return null;
+      try {
+        await File(path).delete();
+      } catch (_) {}
+      return uri;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 追加字节到文件末尾（网页录制分块写入）

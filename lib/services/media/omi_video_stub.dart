@@ -18,6 +18,9 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
 
   OmiVideoValue get value => const OmiVideoValue();
 
+  @override
+  String get engine => 'none';
+
   Future<void> initialize() async => throw UnsupportedError('当前平台无视频内核实现');
 
   Future<void> play() async {}

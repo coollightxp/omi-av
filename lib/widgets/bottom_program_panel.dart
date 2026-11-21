@@ -215,10 +215,21 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                             Expanded(child: _buildInfo(c, scale)),
                             Flexible(
                               flex: 0,
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerRight,
-                                child: _buildButtons(c),
+                              // 按钮区最多占半屏（手机）：加了截图/录制后
+                              // 8 个钮的固有宽度会把信息区挤成一条缝，
+                              // 文字只能反复换行（用户截图反馈）。这里给
+                              // 按钮一个上限，超了整体等比缩小，保证标题
+                              // 与节目信息始终有可读宽度
+                              child: ConstrainedBox(
+                                constraints: BoxConstraints(
+                                  maxWidth:
+                                      screenW * (scale < 1 ? 0.52 : 0.64),
+                                ),
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerRight,
+                                  child: _buildButtons(c),
+                                ),
                               ),
                             ),
                           ],
@@ -264,8 +275,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       size: size,
       // 1.6 倍宽：省台/卫视的官方台标多是「圆标 + 台名」的横向长图，
       // 方形容器里 contain 只能缩成中间一小块（用户反馈「高度够、
-      // 不够宽，台标是残缺的」）。横向给足空间后整张图能铺开
-      width: size * 1.6,
+      // 不够宽，台标是残缺的」）。横向给足空间后整张图能铺开。
+      // 手机档收窄到 1.25 倍：把横向空间让给节目信息与控制按钮
+      width: size * (scale < 1 ? 1.25 : 1.6),
       circular: false,
       // 不加底衬：台标图自带底色/透明底，再叠一层 8% 白会在 logo 外围
       // 多出一圈「框」，直接透明贴在面板上更干净（用户反馈）
@@ -345,30 +357,53 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         SizedBox(height: scale < 1 ? 3 : 5),
         // 频道 / 分辨率 / 线路（电视直播不显示当前节目时段，
         // 时段只出现在下方「即将播放」那一行）
-        Wrap(
-          spacing: 10,
-          runSpacing: 4,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            // 有 EPG 时大字行已是节目名，这里才需要频道名；
-            // 无 EPG 时大字行本身就是频道名，避免重复
-            if (hasChannel && current != null && !isRadio)
-              _metaText(info.channelName, Colors.white70),
-            // 电台：脉冲小条 + 「音频直播」，替代分辨率/线路这类视频信息
-            if (isRadio)
-              _audioBadge(c)
-            else if (c.webPageActive) ...[
-              // 网页频道：左边显示所选线路的分辨率（线路一 1080P → 1080P）
-              _badge(c.webQualityLabel),
-              _badge(
-                  '线路 ${c.webQualityIndex + 1}/${c.webQualityLevels.length}'),
-            ] else ...[
-              // 普通直播源：取视频实际分辨率显示在左边
-              if (c.resolutionText.isNotEmpty) _badge(c.resolutionText),
-              _badge('线路 ${c.sourceIndex + 1}/${c.sourceCount}'),
+        //
+        // 手机档用一行纯文字而不是徽章：徽章自带 8dp 内边距 + 描边，
+        // 三个并排必然换行，面板被撑成四行、信息区被按钮挤窄后更难看
+        // （用户截图：1280×720 与「线路 1/1」各占一行）。
+        if (isRadio)
+          _audioBadge(c)
+        else if (scale < 1)
+          Text(
+            [
+              if (hasChannel && current != null) info.channelName,
+              if (c.webPageActive) c.webQualityLabel,
+              if (c.webPageActive)
+                '线路 ${c.webQualityIndex + 1}/${c.webQualityLevels.length}'
+              else if (c.resolutionText.isNotEmpty)
+                c.resolutionText,
+              if (!c.webPageActive)
+                '线路 ${c.sourceIndex + 1}/${c.sourceCount}',
+            ].where((s) => s.isNotEmpty).join(' · '),
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: AppTypography.of(context).caption,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          )
+        else
+          Wrap(
+            spacing: 10,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              // 有 EPG 时大字行已是节目名，这里才需要频道名；
+              // 无 EPG 时大字行本身就是频道名，避免重复
+              if (hasChannel && current != null)
+                _metaText(info.channelName, Colors.white70),
+              if (c.webPageActive) ...[
+                // 网页频道：左边显示所选线路的分辨率（线路一 1080P → 1080P）
+                _badge(c.webQualityLabel),
+                _badge(
+                    '线路 ${c.webQualityIndex + 1}/${c.webQualityLevels.length}'),
+              ] else ...[
+                // 普通直播源：取视频实际分辨率显示在左边
+                if (c.resolutionText.isNotEmpty) _badge(c.resolutionText),
+                _badge('线路 ${c.sourceIndex + 1}/${c.sourceCount}'),
+              ],
             ],
-          ],
-        ),
+          ),
         const SizedBox(height: 3),
         // 即将播放（保留结束时间）
         if (next != null)

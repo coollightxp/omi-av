@@ -4087,7 +4087,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final path = await controller.takeScreenshot();
     if (mounted) {
       _showOsd(
-        path != null ? '截图已保存: $path' : '截图失败',
+        path == null
+            ? '截图失败'
+            : (controller.lastCaptureInGallery
+                ? '截图已保存到相册'
+                : '截图已保存: $path'),
         icon: Icons.photo_camera,
         duration: const Duration(seconds: 3),
       );
@@ -4100,7 +4104,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       final path = await controller.stopRecording();
       if (mounted) {
         _showOsd(
-          path != null ? '录制已停止，保存至: $path' : '录制已停止（未捕获到视频数据）',
+          path == null
+              ? '录制已停止（未捕获到视频数据）'
+              : (controller.lastCaptureInGallery
+                  ? '录制已保存到相册'
+                  : '录制已停止，保存至: $path'),
           icon: Icons.stop,
           duration: const Duration(seconds: 3),
         );
@@ -4111,8 +4119,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _showOsd(
           ok
               ? (controller.webPageActive
-                  ? '开始录制网页视频，保存到 recordings 文件夹'
-                  : '开始录制，视频保存到 recordings 文件夹')
+                  ? '开始录制网页视频'
+                  : '开始录制')
               : (controller.lastError ?? '录制失败'),
           icon: Icons.fiber_manual_record,
           duration: const Duration(seconds: 2),

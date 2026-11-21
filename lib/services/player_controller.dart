@@ -80,6 +80,21 @@ class PlayerController extends ChangeNotifier {
   /// MDK 起播失败后的临时降级（不写设置，下次启动仍尊重用户选择）
   bool _forceMpv = false;
 
+  /// MPV 起播失败/黑屏时的一次性兜底：本台改用 MDK 重开。
+  /// 只对当前频道生效（换台复位），不写设置——用户下次仍用自己的选择。
+  bool _forceMdkOnce = false;
+
+  /// 本台是否已经做过一次「换引擎重开」，防止 mpv↔mdk 来回死循环
+  bool _engineFallbackTried = false;
+
+  /// 起播后「有声音没画面」的看门狗（mpv 黑屏兜底）
+  Timer? _noPicTimer;
+
+  /// 最近一次截图/录制是否已进系统相册（安卓 MediaStore）。
+  /// 界面提示据此从「保存至: 路径」改成「已保存到相册」。
+  bool _lastCaptureInGallery = false;
+  bool get lastCaptureInGallery => _lastCaptureInGallery;
+
   PlayerSettings _settings = const PlayerSettings();
 
   /// 时钟显隐的独立通知器：切换它只重建时钟本身，不触发整棵播放
@@ -255,6 +270,9 @@ class PlayerController extends ChangeNotifier {
   // 网页录制：MediaRecorder 分块（base64）经 JS bridge 追加写入 .webm
   int _webRecBytes = 0;
   Completer<void>? _webRecDone;
+  // 起录阶段 JS 分片可能先于文件路径就绪到达：先缓存，路径好了再补写
+  bool _webRecStarting = false;
+  final List<String> _pendingWebChunks = <String>[];
 
   // 播放进度定时刷新（进度条/倒计时）
   Timer? _tickTimer;
@@ -2000,6 +2018,11 @@ class PlayerController extends ChangeNotifier {
     // 换频道：失败重载计数清零（同一频道最多自动重试 retryTimes 次），
     // 并取消上个频道挂起的自动重试
     _autoReloadCount = 0;
+    // 换台复位「换引擎兜底」：每个频道允许一次 mpv↔mdk 互换
+    _engineFallbackTried = false;
+    _forceMdkOnce = false;
+    _noPicTimer?.cancel();
+    _noPicTimer = null;
     _softErrPending = false;
     _softErrSecondRound = false;
     _softErrTimer?.cancel();
@@ -2692,11 +2715,13 @@ class PlayerController extends ChangeNotifier {
   /// 换台/退出网页时复位网页录制状态（旧 WebView 销毁后 JS 上下文
   /// 随之消失，无法再取回末尾分块，已落盘部分保留为可用文件）
   void _resetWebRecording() {
-    if (!_isRecording || !_webPageActive) return;
+    if (!_isRecording && !_webRecStarting) return;
     _isRecording = false;
     _recordPath = null;
     _webRecDone = null;
     _webRecBytes = 0;
+    _webRecStarting = false;
+    _pendingWebChunks.clear();
   }
 
   /// 切换到上一个播放源（网页频道前台时 = 降一档清晰度）
@@ -3001,7 +3026,8 @@ class PlayerController extends ChangeNotifier {
     // 电台固定走 MPV：纯音频流的 ICY 曲目、录音、真电平都依赖 libmpv，
     // 而电台没有画面，MDK 的「不闪黑」在这里没有收益，不走这条新路径
     final useMdk =
-        _settings.playEngine == 'mdk' && !_forceMpv && !channel.isRadio;
+        !channel.isRadio && !_forceMpv &&
+        (_settings.playEngine == 'mdk' || _forceMdkOnce);
     final c = createOmiVideoBackend(
       url: Uri.parse(streamUrl),
       useMdk: useMdk,
@@ -3084,6 +3110,10 @@ class PlayerController extends ChangeNotifier {
       _lastError = null;
       _autoRetryTimer?.cancel();
       _autoRetryTimer = null;
+      // mpv 黑屏兜底：init 成功、状态已 playing，但 8 秒内连视频尺寸
+      // 都没上报（= 只有声音没有画面），就换另一个引擎重开本台。
+      // 用户实测：同一个源 MPV 黑屏、MDK 正常，手动切引擎太麻烦
+      _armNoPictureWatchdog(c, channel);
       // 嗅探流起播成功：清回退标记
       _sniffedFromWeb = false;
       // 记录当前频道，下次启动时恢复。网页嗅探接管时保存的是原网页
@@ -3127,6 +3157,9 @@ class PlayerController extends ChangeNotifier {
         _sniffPlaybackFailed();
         return;
       }
+      // 所有源都失败：先换另一个内核再试一次（MPV 起不来但 MDK 能播，
+      // 或反过来），仍失败才按设置自动重试
+      if (_tryEngineFallback(c, channel)) return;
       // 所有源都失败：按设置自动重试，次数用尽判定链接失效
       _enterErrorOrRetry();
     } catch (e) {
@@ -3150,6 +3183,7 @@ class PlayerController extends ChangeNotifier {
         _sniffPlaybackFailed();
         return;
       }
+      if (_tryEngineFallback(c, channel)) return;
       _enterErrorOrRetry();
     }
     notifyListeners();
@@ -3208,6 +3242,11 @@ class PlayerController extends ChangeNotifier {
         final earlyStart = born != null &&
             DateTime.now().difference(born) < const Duration(seconds: 8);
         _softErrPending = true;
+        // 定位用：把内核名与底层错误写进 CastLog（用户反馈「MPV 黑屏、
+        // MDK 正常」时，日志里能直接看到 mpv 到底报了什么）
+        CastLog.write('play error engine=${self.engine} '
+            'ch=${_currentChannel?.name ?? '-'} '
+            'err=${v.errorDescription ?? '-'}');
         final startPos = v.position;
         _softErrTimer?.cancel();
         // 后台（卡片在操作）把复检压到 1.2 秒：用户看不到界面，长时间
@@ -4135,6 +4174,60 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  /// 起播「有声音没画面」看门狗（mpv 黑屏兜底）。
+  ///
+  /// 判据用「视频尺寸是否上报」而不是帧率/截图：mpv 只要解码出视频轨就会
+  /// 上报 width/height，8 秒仍为 0 基本可以断定画面管线没起来（用户实测
+  /// 同一个源 MPV 黑屏、MDK 正常）。已上报尺寸的慢源不再折腾。
+  void _armNoPictureWatchdog(OmiVideoBackend c, Channel channel) {
+    _noPicTimer?.cancel();
+    _noPicTimer = null;
+    if (channel.isRadio ||
+        channel.isWebPage ||
+        _isCasting ||
+        _isBackgroundNow) {
+      return;
+    }
+    _noPicTimer = Timer(const Duration(seconds: 8), () {
+      _noPicTimer = null;
+      if (!identical(c, _videoController)) return;
+      // 用户已暂停（或已进错误页）：不是「起播黑屏」，不折腾
+      if (_state != PlayerState.playing) return;
+      final v = c.value;
+      if (!v.isInitialized || v.hasError) return;
+      if (v.size.width > 0 && v.size.height > 0) return;
+      CastLog.write('no-picture watchdog fired: engine=${c.engine} '
+          'ch=${channel.name}');
+      _tryEngineFallback(c, channel);
+    });
+  }
+
+  /// 当前内核起不来/没画面：换另一个内核重开本台（每台最多一次）。
+  /// 返回 true 表示已发起重开，调用方不要再走重试/错误页。
+  bool _tryEngineFallback(OmiVideoBackend c, Channel channel) {
+    if (_engineFallbackTried || channel.isRadio || _isCasting) return false;
+    final cur = c.engine;
+    if (cur != 'mpv' && cur != 'mdk') return false;
+    // MDK 在本机已经失败过（已锁回 MPV）：不要再往坏环境里撞一次
+    if (cur == 'mpv' && _forceMpv) return false;
+    _engineFallbackTried = true;
+    _noPicTimer?.cancel();
+    _noPicTimer = null;
+    if (cur == 'mpv') {
+      _forceMdkOnce = true;
+    } else {
+      _forceMpv = true;
+    }
+    CastLog.write('engine fallback: $cur -> ${cur == 'mpv' ? 'mdk' : 'mpv'} '
+        'ch=${channel.name}');
+    OsdBus.show(
+      cur == 'mpv' ? 'MPV 内核未能出画面，已切换 MDK 重试' : 'MDK 内核未能出画面，已切换 MPV 重试',
+      icon: Icons.memory,
+    );
+    unawaited(_playCurrentSource());
+    return true;
+  }
+
   void _enterErrorOrRetry() {
     _autoRetryTimer?.cancel();
     _autoRetryTimer = null;
@@ -4707,6 +4800,8 @@ class PlayerController extends ChangeNotifier {
     final next = engine == 'mdk' ? 'mdk' : 'mpv';
     if (_settings.playEngine == next) return;
     _forceMpv = false;
+    _forceMdkOnce = false;
+    _engineFallbackTried = false;
     updateSettings(_settings.copyWith(playEngine: next));
     OsdBus.show(
       next == 'mdk' ? '播放内核：MDK（画面更稳）' : '播放内核：MPV（功能完整）',
@@ -5296,11 +5391,17 @@ class PlayerController extends ChangeNotifier {
   // ==================== 录制与截图（fvp/MDK 原生，桌面端） ====================
 
   /// 开始录制当前画面到固定文件夹，返回是否成功。
-  /// 普通频道走 fvp/MDK 原生录制；网页频道用 MediaRecorder 录制
-  /// 播放中的 <video>（captureStream），分块经 JS bridge 落盘为 .webm；
+  /// 普通频道走内核原生录制（mpv stream-record / MDK record）；网页频道
+  /// 优先用嗅探到的真实流做流级录制，拿不到可直连流才退回 MediaRecorder；
   /// 投屏走流级录制（CastStreamRecorder，直接下载原始媒体字节）。
   Future<bool> startRecording() async {
-    if (_webPageActive) return _startWebRecording();
+    // 网页频道：优先用嗅探到的真实流做流级录制（CastStreamRecorder），
+    // 不依赖页面内的 captureStream/MediaRecorder——WebView2 上后者常因
+    // 跨域 iframe / DRM / JS 桥消息体积限制失败（用户实测录出空文件）。
+    if (_webPageActive) {
+      if (await _startWebStreamRecording()) return true;
+      return _startWebRecording();
+    }
     // 诊断：逐个判定失败原因。投屏 URL 与普通频道不同（非 HLS 走本地
     // 代理、HLS 直连），失败点必须精确到分支才能定位，不能笼统返回 false。
     if (_currentChannel == null) {
@@ -5403,15 +5504,14 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  /// 停止录制，返回文件路径
+  /// 停止录制，返回保存位置（安卓进相册时为相册 URI）
   Future<String?> stopRecording() async {
     if (!_isRecording) return null;
     // 手动停止：以后不再替这次录制做预约收尾
     _reservationRecActive = false;
     _reservationRecordTimer?.cancel();
     _reservationRecordTimer = null;
-    if (_webPageActive) return _stopWebRecording();
-    // 投屏流级录制：不碰内核，直接收尾下载文件
+    // 流级录制与播放内核/网页态无关，必须先分流（网页频道也可能走它）
     if (_usingCastRecorder) {
       _usingCastRecorder = false;
       _isRecording = false;
@@ -5420,7 +5520,11 @@ class PlayerController extends ChangeNotifier {
       _recordPath = null;
       CastLog.write('rec stop cast path=$path');
       notifyListeners();
-      return path;
+      return _publishToGallery(path, video: true);
+    }
+    if (_webPageActive) {
+      final path = await _stopWebRecording();
+      return _publishToGallery(path, video: true);
     }
     final vc = _videoController;
     try {
@@ -5432,7 +5536,7 @@ class PlayerController extends ChangeNotifier {
     _isRecording = false;
     _recordPath = null;
     notifyListeners();
-    return path;
+    return _publishToGallery(path, video: true);
   }
 
   /// 投屏流级录制自然结束（VOD 播完/断流/失败）回调。
@@ -5449,10 +5553,27 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     final path = CastStreamRecorder.lastPath;
-    OsdBus.show(
-      path == null ? '投屏录制已结束' : '录制已保存: $path',
-      icon: Icons.videocam,
-    );
+    unawaited(() async {
+      final saved = await _publishToGallery(path, video: true);
+      OsdBus.show(
+        saved == null
+            ? '投屏录制已结束'
+            : (_lastCaptureInGallery ? '录制已保存到相册' : '录制已保存: $saved'),
+        icon: Icons.videocam,
+      );
+    }());
+  }
+
+  /// 安卓：截图/录制落盘后再搬进系统相册（失败保持原路径）。
+  /// 返回给界面的「位置」：相册内为 MediaStore URI，其余平台为文件路径。
+  Future<String?> _publishToGallery(String? path, {required bool video}) async {
+    _lastCaptureInGallery = false;
+    if (path == null || path.isEmpty) return null;
+    if (!MediaCaptureService.isAndroid) return path;
+    final uri = await captureService.publishToGallery(path, video: video);
+    if (uri == null) return path;
+    _lastCaptureInGallery = true;
+    return uri;
   }
 
   /// 离开投屏/切换投屏/切台前收尾本轮录制（能保存就保存）。
@@ -5462,7 +5583,10 @@ class PlayerController extends ChangeNotifier {
     final path = await stopRecording();
     if (path != null) {
       CastLog.write('record saved reason=$reason path=$path');
-      OsdBus.show('录制已保存（$reason）', icon: Icons.videocam);
+      OsdBus.show(
+        _lastCaptureInGallery ? '录制已保存到相册（$reason）' : '录制已保存（$reason）',
+        icon: Icons.videocam,
+      );
     }
   }
 
@@ -5565,8 +5689,18 @@ class PlayerController extends ChangeNotifier {
     for (var m=0;m<cands.length;m++){
       try { if (MediaRecorder.isTypeSupported(cands[m])) { mime = cands[m]; break; } } catch(e){}
     }
-    var rec = mime ? new MediaRecorder(stream, {mimeType: mime})
-                   : new MediaRecorder(stream);
+    // isTypeSupported 说支持、构造时仍可能抛（WebView2 的 mp4 录制就
+    // 有过「声明支持但 new MediaRecorder 直接抛 NotSupportedError」），
+    // 逐个候选兜底，最后再退回默认构造
+    var rec = null;
+    var tries = mime ? [mime] : cands;
+    for (var t=0;t<tries.length && !rec;t++){
+      try { rec = new MediaRecorder(stream, {mimeType: tries[t]}); mime = tries[t]; }
+      catch(e) { rec = null; }
+    }
+    if (!rec) {
+      try { rec = new MediaRecorder(stream); mime = ''; } catch(e) { return 'err'; }
+    }
     window.__omRec = rec;
     window.__omRecChain = Promise.resolve();
     rec.ondataavailable = function(e){
@@ -5620,15 +5754,84 @@ class PlayerController extends ChangeNotifier {
 })();
 ''';
 
+  /// 网页频道走「真实流」录制：用嗅探到的可直连媒体流直接下载字节。
+  /// 这条路不碰 WebView 的 captureStream/MediaRecorder，所以在 WebView2
+  /// 上也稳（用户实测 MediaRecorder 那条路录出来是空的）。
+  /// 拿不到可直连流（blob:/DRM/未嗅探到）返回 false，由调用方退回 JS 录制。
+  Future<bool> _startWebStreamRecording() async {
+    final t = _sniffTarget;
+    if (t == null || t.url.isEmpty || CastStreamRecorder.isRecording) {
+      return false;
+    }
+    final kind = _sniffKindOf(t.url);
+    if (kind == null) return false;
+    // HLS/DASH/FLV 先预检（DRM/加密的录了也是坏文件）；直连 mp4/mp3 不预检
+    final playable = kind == 'direct'
+        ? true
+        : await checkSniffedStreamPlayable(
+            url: t.url,
+            kind: kind,
+            referer: t.referer,
+            userAgent: t.ua,
+          );
+    if (!playable) {
+      CastLog.write('web rec: sniffed stream not directly recordable ($kind)');
+      return false;
+    }
+    final err = await CastStreamRecorder.start(
+      url: t.url,
+      name: _currentChannel?.name ?? 'web',
+      userAgent: t.ua,
+      referer: t.referer,
+      subDir: 'recordings',
+      throttle: !_settings.castRecordFullSpeed,
+    );
+    if (err != null) {
+      CastLog.write('web rec direct failed: $err -> mediarecorder');
+      return false;
+    }
+    CastStreamRecorder.onFinished = _onCastRecorderFinished;
+    if (!CastStreamRecorder.isRecording) {
+      CastStreamRecorder.onFinished = null;
+      return false;
+    }
+    _usingCastRecorder = true;
+    _isRecording = true;
+    _recordPath = CastStreamRecorder.filePath;
+    CastLog.write('web rec direct path=$_recordPath kind=$kind');
+    notifyListeners();
+    return true;
+  }
+
+  /// 嗅探流类型（给 [checkSniffedStreamPlayable] 用）
+  static String? _sniffKindOf(String url) {
+    final u = url.toLowerCase();
+    if (u.contains('.m3u8') || u.contains('.m3u')) return 'hls';
+    if (u.contains('.mpd')) return 'dash';
+    if (u.contains('.flv')) return 'flv';
+    final p = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+    if (p.endsWith('.m3u8')) return 'hls';
+    if (p.endsWith('.mpd')) return 'dash';
+    if (p.endsWith('.flv')) return 'flv';
+    // 无后缀的直连 mp4/mp3 也能录（直连下载），其它类型先不猜
+    if (p.endsWith('.mp4') || p.endsWith('.m4a') || p.endsWith('.mp3')) {
+      return 'direct';
+    }
+    return null;
+  }
+
   /// 网页录制启动（由 startRecording 在网页频道时调用）
   Future<bool> _startWebRecording() async {
     final eval = _webEval;
     if (eval == null || !isDesktop || _isRecording) return false;
     try {
       _webRecBytes = 0;
+      _webRecStarting = true;
+      _pendingWebChunks.clear();
       final r = await eval(_webRecStartJs);
       final rs = r?.toString() ?? '';
       if (!rs.startsWith('ok')) {
+        _webRecStarting = false;
         _lastError = rs == 'novideo' ? '网页中未找到可录制的视频' : '网页不支持视频录制';
         return false;
       }
@@ -5638,9 +5841,28 @@ class PlayerController extends ChangeNotifier {
           'recordings', _currentChannel?.name ?? 'web', ext);
       _webRecDone = Completer<void>();
       _isRecording = true;
+      // JS 起录后第一批分片可能比 buildFilePath 先到：一次性补写成一段，
+      // 避免开头 1-2 秒丢帧（分块单独 await 还可能打乱先后顺序）
+      _webRecStarting = false;
+      if (_pendingWebChunks.isNotEmpty) {
+        final bytes = BytesBuilder(copy: false);
+        for (final b64 in _pendingWebChunks) {
+          try {
+            bytes.add(base64Decode(b64));
+          } catch (_) {}
+        }
+        _pendingWebChunks.clear();
+        final data = bytes.takeBytes();
+        if (data.isNotEmpty) {
+          await captureService.appendBytes(_recordPath!, data);
+          _webRecBytes += data.length;
+        }
+      }
       notifyListeners();
       return true;
     } catch (e) {
+      _webRecStarting = false;
+      _pendingWebChunks.clear();
       _lastError = '网页录制启动失败: $e';
       _recordPath = null;
       return false;
@@ -5662,14 +5884,22 @@ class PlayerController extends ChangeNotifier {
     _recordPath = null;
     _webRecDone = null;
     _webRecBytes = 0;
+    _webRecStarting = false;
+    _pendingWebChunks.clear();
     notifyListeners();
     return path;
   }
 
   /// JS bridge 回传的录制分块（base64），追加写入录制文件
   Future<void> appendWebRecordingChunk(String b64) async {
+    if (b64.isEmpty) return;
     final path = _recordPath;
-    if (!_isRecording || path == null || b64.isEmpty) return;
+    if (path == null) {
+      // 起录阶段路径还没就绪：先缓存（见 _startWebRecording）
+      if (_webRecStarting) _pendingWebChunks.add(b64);
+      return;
+    }
+    if (!_isRecording) return;
     try {
       final bytes = base64Decode(b64);
       await captureService.appendBytes(path, bytes);
@@ -5698,7 +5928,7 @@ class PlayerController extends ChangeNotifier {
         final path =
             await captureService.buildFilePath('screenshots', name, 'png');
         await captureService.saveBytes(path, Uint8List.fromList(bytes));
-        return path;
+        return _publishToGallery(path, video: false);
       } catch (e) {
         _lastError = '网页截图失败: $e';
         return null;
@@ -5714,7 +5944,7 @@ class PlayerController extends ChangeNotifier {
       final path =
           await captureService.buildFilePath('screenshots', name, 'png');
       await captureService.saveBytes(path, png);
-      return path;
+      return _publishToGallery(path, video: false);
     } catch (e) {
       _lastError = '截图失败: $e';
       return null;
@@ -5932,6 +6162,8 @@ class PlayerController extends ChangeNotifier {
   Future<void> _disposeVideoController() async {
     // 先尝试释放上一轮 dispose 挂起的孤儿实例
     _retryOrphanDispose();
+    _noPicTimer?.cancel();
+    _noPicTimer = null;
     final c = _videoController;
     if (c != null) {
       final closure = _videoListenerClosure;
@@ -6052,6 +6284,8 @@ class PlayerController extends ChangeNotifier {
     _reservationRecordTimer?.cancel();
     _reservationRecordTimer = null;
     _softErrTimer?.cancel();
+    _noPicTimer?.cancel();
+    _noPicTimer = null;
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
     _resetWebRecording();

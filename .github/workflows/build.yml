@@ -127,10 +127,12 @@ jobs:
 
           import android.Manifest
           import android.app.PictureInPictureParams
+          import android.content.ContentValues
           import android.content.Intent
           import android.content.pm.PackageManager
           import android.content.res.Configuration
           import android.os.Build
+          import android.provider.MediaStore
           import android.provider.Settings
           import android.util.Rational
           import android.view.View
@@ -138,6 +140,7 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.io.File
 
           class MainActivity : FlutterActivity() {
               private val channelName = "omi/pip"
@@ -273,6 +276,15 @@ jobs:
                                   MediaService.stop(this)
                                   result.success(true)
                               }
+                              // 截图/录像进系统相册（MediaStore）。应用
+                              // 文档目录在手机相册/文件管理器里看不到，
+                              // 用户截完图找不到东西
+                              "saveToGallery" -> {
+                                  result.success(saveToGallery(
+                                      call.argument<String>("path") ?: "",
+                                      call.argument<String>("name") ?: "omi",
+                                      call.argument<String>("mime") ?: "video/mp4"))
+                              }
                               else -> result.notImplemented()
                           }
                       }
@@ -282,6 +294,42 @@ jobs:
               // 前台服务的卡片会被系统吞掉（电台看不到通知栏/锁屏控件）
               /** 申请通知权限，并把「用户到底点没点允许」回给 Dart。
                *  系统窗只在首次真正弹出；用户拒绝过之后这里会立刻回调 false。 */
+              /** 把应用私有目录里的截图/录像复制进系统相册（MediaStore）。
+               *  Android 10+ 用 RELATIVE_PATH 写 Pictures/Omi、Movies/Omi，
+               *  无需存储权限；Android 9 及以下没有免权限写公共目录的
+               *  办法，返回 null，文件继续留在应用目录。成功后删源文件，
+               *  避免相册里一份、私有目录里还占一份。 */
+              private fun saveToGallery(path: String, name: String, mime: String): String? {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+                  return try {
+                      val src = File(path)
+                      if (!src.exists() || !src.isFile) return null
+                      val video = mime.startsWith("video")
+                      val collection = if (video)
+                          MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                      else
+                          MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                      val values = ContentValues().apply {
+                          put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                          put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                          put(MediaStore.MediaColumns.RELATIVE_PATH,
+                              if (video) "Movies/Omi" else "Pictures/Omi")
+                          put(MediaStore.MediaColumns.IS_PENDING, 1)
+                      }
+                      val uri = contentResolver.insert(collection, values) ?: return null
+                      contentResolver.openOutputStream(uri)?.use { out ->
+                          src.inputStream().use { it.copyTo(out) }
+                      }
+                      values.clear()
+                      values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                      contentResolver.update(uri, values, null, null)
+                      src.delete()
+                      uri.toString()
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+
               private fun askNotifPermission(result: MethodChannel.Result) {
                   if (Build.VERSION.SDK_INT < 33 || isTv()) {
                       result.success(
@@ -1149,10 +1197,12 @@ jobs:
 
           import android.Manifest
           import android.app.PictureInPictureParams
+          import android.content.ContentValues
           import android.content.Intent
           import android.content.pm.PackageManager
           import android.content.res.Configuration
           import android.os.Build
+          import android.provider.MediaStore
           import android.provider.Settings
           import android.util.Rational
           import android.view.View
@@ -1160,6 +1210,7 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.io.File
 
           class MainActivity : FlutterActivity() {
               private val channelName = "omi/pip"
@@ -1295,6 +1346,15 @@ jobs:
                                   MediaService.stop(this)
                                   result.success(true)
                               }
+                              // 截图/录像进系统相册（MediaStore）。应用
+                              // 文档目录在手机相册/文件管理器里看不到，
+                              // 用户截完图找不到东西
+                              "saveToGallery" -> {
+                                  result.success(saveToGallery(
+                                      call.argument<String>("path") ?: "",
+                                      call.argument<String>("name") ?: "omi",
+                                      call.argument<String>("mime") ?: "video/mp4"))
+                              }
                               else -> result.notImplemented()
                           }
                       }
@@ -1304,6 +1364,42 @@ jobs:
               // 前台服务的卡片会被系统吞掉（电台看不到通知栏/锁屏控件）
               /** 申请通知权限，并把「用户到底点没点允许」回给 Dart。
                *  系统窗只在首次真正弹出；用户拒绝过之后这里会立刻回调 false。 */
+              /** 把应用私有目录里的截图/录像复制进系统相册（MediaStore）。
+               *  Android 10+ 用 RELATIVE_PATH 写 Pictures/Omi、Movies/Omi，
+               *  无需存储权限；Android 9 及以下没有免权限写公共目录的
+               *  办法，返回 null，文件继续留在应用目录。成功后删源文件，
+               *  避免相册里一份、私有目录里还占一份。 */
+              private fun saveToGallery(path: String, name: String, mime: String): String? {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+                  return try {
+                      val src = File(path)
+                      if (!src.exists() || !src.isFile) return null
+                      val video = mime.startsWith("video")
+                      val collection = if (video)
+                          MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                      else
+                          MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                      val values = ContentValues().apply {
+                          put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                          put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                          put(MediaStore.MediaColumns.RELATIVE_PATH,
+                              if (video) "Movies/Omi" else "Pictures/Omi")
+                          put(MediaStore.MediaColumns.IS_PENDING, 1)
+                      }
+                      val uri = contentResolver.insert(collection, values) ?: return null
+                      contentResolver.openOutputStream(uri)?.use { out ->
+                          src.inputStream().use { it.copyTo(out) }
+                      }
+                      values.clear()
+                      values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                      contentResolver.update(uri, values, null, null)
+                      src.delete()
+                      uri.toString()
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+
               private fun askNotifPermission(result: MethodChannel.Result) {
                   if (Build.VERSION.SDK_INT < 33 || isTv()) {
                       result.success(

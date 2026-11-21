@@ -51,6 +51,9 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
   @override
   OmiVideoValue get value => _value;
 
+  @override
+  String get engine => 'mpv';
+
   void _set(OmiVideoValue next) {
     if (_disposed) return;
     _value = next;

@@ -19,6 +19,10 @@ import 'omi_video_value.dart';
 abstract class OmiVideoBackend extends ChangeNotifier {
   OmiVideoValue get value;
 
+  /// 引擎标识：`mpv` / `mdk` / `web`。
+  /// 上层据此做「起播无画面就换个引擎再试」的兜底（不依赖具体实现类型）。
+  String get engine;
+
   Future<void> initialize();
   Future<void> play();
   Future<void> pause();
