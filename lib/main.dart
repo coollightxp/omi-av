@@ -37,7 +37,7 @@ void main() async {
 
   // Windows：先压掉系统级崩溃弹窗（Exception Processing Message
   // 0xc0000005 随机弹出，要点「确定」才消失）。必须尽早执行，
-  // 抢在 mpv/WebView2 原生线程起来之前
+  // 抢在播放内核/WebView2 原生线程起来之前
   suppressWindowsCrashDialogs();
 
   // 注意：不能让 SharedPreferences 失败阻塞 runApp——平台通道一失败

@@ -2372,9 +2372,9 @@ class _PlayerSettingsTab extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
             _buildQualitySelector(controller),
-            // 播放内核不再提供切换：视频统一走 MDK（老机器/安卓兼容性、
-            // 截图与录制都更好），MPV 只保留给电台（ICY 曲目名、后台
-            // 原地换台依赖 libmpv），对用户不可见。
+            // 播放内核不提供切换：视频、投屏、电台统一走 MDK
+            // （老机器/安卓兼容性、截图与录制都更好）；电台的歌名由
+            // 自研 ICY 读取器补齐，对用户不可见。
             // 网页/内置切换按钮默认不占面板：很不常用，常驻反而挤占
             // 遥控器焦点路径；开关打开才在底部面板显示（用户要求）
             SwitchListTile(

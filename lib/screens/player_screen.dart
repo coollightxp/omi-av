@@ -328,7 +328,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           c.exitWebPage();
           await Future<void>.delayed(const Duration(milliseconds: 600));
         }
-        // 落盘设置 + 停掉播放内核（mpv 线程在引擎 shutdown 期间被拆会
+        // 落盘设置 + 停掉播放内核（内核线程在引擎 shutdown 期间被拆会
         // 抛 0xc0000005，先自己释放）
         try {
           await c.prepareForExit();
@@ -964,7 +964,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
                       // 待机壳：投屏等待 / 投屏播完等待下一条 / 待选台
                       // （方案 3.7、第九节）。播完等待必须盖住视频层：
-                      // mpv 播到 EOF 默认停在最后一帧，配合「等待下一条」
+                      // 内核播到 EOF 通常停在最后一帧，配合「等待下一条」
                       // 的 OSD 像是卡死（用户实测：定格画面不好看）
                       if (!mini &&
                           (controller.castWaiting ||
@@ -1456,7 +1456,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     switch (action) {
       case 'exit':
         // 退出前先把播放停干净：安卓 finish Activity 会连带销毁 Dart
-        // isolate，mpv 的原生实例没人释放 → 声音继续响，再从桌面点图标
+        // isolate，内核的原生实例没人释放 → 声音继续响，再从桌面点图标
         // 就是两路同时在放（用户实测「退不出去、再开一个两个声音」）
         await c.shutdownForExit();
         // SystemNavigator.pop() 只在 Android/iOS 有效，桌面端需要用 windowManager
@@ -1475,7 +1475,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           await SystemNavigator.pop();
           // 移动端把进程杀干净：pop 之后 Activity finish 了，但进程可能
           // 作为缓存再活几十秒。这段时间里从桌面点图标会复用残留进程，
-          // 旧 mpv 线程还挂着 → 起播崩溃（实测「再进来闪退，第二次才
+          // 旧内核线程还挂着 → 起播崩溃（实测「再进来闪退，第二次才
           // 正常」）或两路声音。上面已手动收尾完毕，这里直接退出进程
           if (!kIsWeb &&
               (defaultTargetPlatform == TargetPlatform.android ||

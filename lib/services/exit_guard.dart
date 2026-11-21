@@ -12,7 +12,7 @@ import 'win_hotkeys.dart';
 ///
 /// 背景：退出时崩溃（0xc0000005 / "已停止工作"）的根因是**析构顺序**——
 /// WebView2 平台视图随引擎一起拆，COM 释放与 Flutter 引擎关停并发；
-/// 有时还会连带 mpv 的解码线程。正确顺序是：
+/// 有时还会连带播放内核的解码线程。正确顺序是：
 ///
 ///   ① 先让播放页退出网页态（WebView 平台视图销毁）
 ///   ② 释放 WebView2 环境与宿主子进程
@@ -59,7 +59,7 @@ class ExitGuard {
     } catch (_) {}
     // runner 侧摘低级键盘钩子、恢复系统光标；旧 runner 无此指令也无妨
     unawaited(WinHotkeys.quitApp());
-    // 给 WebView2 子进程与 mpv 线程一点收尾时间（实测 <500ms 够用）
+    // 给 WebView2 子进程与播放内核线程一点收尾时间（实测 <500ms 够用）
     await Future<void>.delayed(const Duration(milliseconds: 500));
     // Windows：到这里一切该保存的都已落盘，直接 ExitProcess 结束进程。
     // 不再走 destroy + 引擎/CRT 拆解——用户实测退出时仍会偶发
