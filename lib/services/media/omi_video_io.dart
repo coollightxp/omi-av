@@ -331,7 +331,11 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
         await platform.setProperty('stream-record', path);
         return true;
       }
-    } catch (_) {}
+    } catch (e) {
+      // 诊断：向上抛，由 PlayerController 记录具体原因，便于投屏录制定位
+      debugPrint('[OmiVideo/mpv] record start failed: $e');
+      rethrow;
+    }
     return false;
   }
 

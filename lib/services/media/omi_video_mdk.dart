@@ -211,8 +211,10 @@ class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
       fvp.FVPControllerExtensions(_pc).record(to: path);
       return true;
     } catch (e) {
+      // 诊断：把底层异常向上抛，由 PlayerController 记录到 CastLog/OSD，
+      // 避免投屏录制失败时只看到笼统的「内核不支持录制」
       debugPrint('[OmiVideo/mdk] record start failed: $e');
-      return false;
+      rethrow;
     }
   }
 

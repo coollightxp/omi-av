@@ -4100,9 +4100,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       final path = await controller.stopRecording();
       if (mounted) {
         _showOsd(
-          path != null
-              ? '录制已停止，保存至: $path'
-              : (controller.lastError ?? '录制已停止（未捕获到视频数据）'),
+          path != null ? '录制已停止，保存至: $path' : '录制已停止（未捕获到视频数据）',
           icon: Icons.stop,
           duration: const Duration(seconds: 3),
         );

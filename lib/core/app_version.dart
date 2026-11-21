@@ -10,5 +10,5 @@ class AppVersion {
   AppVersion._();
 
   /// 与 `pubspec.yaml` 的 `version:` 前半段严格一致
-  static const String value = '2.3.74';
+  static const String value = '2.3.75';
 }

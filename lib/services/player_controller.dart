@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -24,6 +23,7 @@ import '../models/radio_station.dart';
 import '../models/reservation.dart';
 import 'auto_launch.dart';
 import 'cast_stream_proxy.dart';
+import 'cast_stream_recorder.dart';
 import 'dlna_service.dart';
 import 'win_hotkeys.dart';
 import 'cast_log.dart';
@@ -39,7 +39,6 @@ import 'channel_blacklist.dart';
 import 'channel_alias.dart';
 import 'scene_favorites.dart';
 import 'radio_recorder.dart';
-import 'screen_recorder.dart';
 import 'tray_service.dart';
 import 'builtin_epg.dart';
 import 'radio_catalog.dart';
@@ -246,27 +245,12 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // 录制状态（fvp 原生录制 / 网页 MediaRecorder 录制）
+  // 录制状态（内核录制 / 网页 MediaRecorder / 投屏流级录制）
   bool _isRecording = false;
   String? _recordPath;
-  // 本轮录制是否走系统级（omi_screen_recorder）；停止路径据此分流
-  bool _usingSystemRecorder = false;
-  // 本轮为什么没用上系统录制（回退内核时的原因）。
-  // 最终失败提示会带上它——否则只能用「此流没有数据」一句话概括，
-  // 用户截图也看不出是 WGC 哪一步挂的（v2.3.73）
-  String? _recFallbackReason;
-  // 本轮录制对应的「源标识」（频道 id + 源下标 + 地址）。
-  // 换台 / 换源 / 切投屏时标识变了 = 前一段内容已经播完，必须在旧内核
-  // 被拆掉之前把文件收尾（mp4 的 moov 靠 Finalize 写，内核一释放就废）
-  String? _recSourceKey;
-
-  /// 当前正在播的源的录制标识；拿不到时返回 null
-  String? get _currentSourceKey {
-    final ch = _currentChannel;
-    if (ch == null || ch.streamUrls.isEmpty) return null;
-    if (_sourceIndex < 0 || _sourceIndex >= ch.streamUrls.length) return null;
-    return '${ch.id}#$_sourceIndex#${ch.streamUrls[_sourceIndex]}';
-  }
+  // 本轮录制是否走投屏流级录制（CastStreamRecorder）。
+  // 它与播放内核解耦，停止路径必须单独分流，不能调内核的 stopRecord。
+  bool _usingCastRecorder = false;
 
   // 网页录制：MediaRecorder 分块（base64）经 JS bridge 追加写入 .webm
   int _webRecBytes = 0;
@@ -1456,6 +1440,8 @@ class PlayerController extends ChangeNotifier {
     // 新投屏：上一次挂起的续播 Seek 已无意义
     _castPendingSeek = null;
     _castPendingSeekAt = null;
+    // 换投屏内容：上一段录制收尾保存，新内容由用户重新点录制
+    await _stopCastRecordingIfAny('切换投屏');
     CastLog.write('cast play url: $title');
     // 诊断：记录 URL 类型与 host（不落完整 URL 里的鉴权参数）
     try {
@@ -1525,15 +1511,18 @@ class PlayerController extends ChangeNotifier {
   /// 手动断开是明确意图，直接回直播，不再进入等待画面。
   Future<void> _doStopCastAndRestore({bool userInitiated = false}) async {
     if (!_isCasting) return;
-    // 投屏结束（手动断开 / 对方停止 / 出错）先收尾录制，再释放播放器，
-    // 否则系统级录制的 Finalize 赶不上、文件不完整（用户诉求）
-    await _finalizeRecording(userInitiated ? '手动断开投屏' : '投屏结束');
+    // 投屏结束先把流级录制收尾（最后分片/文件尾落盘）
+    await _stopCastRecordingIfAny(userInitiated ? '手动断开投屏' : '投屏结束');
     _isCasting = false;
     _watchPosMs = -1;
     _watchAdvanceAt = null;
     _castPendingSeek = null;
     _castPendingSeekAt = null;
     unawaited(CastStreamProxy.instance.stop());
+    // 本机主动断开：清 DLNA 媒体 + 推 STOPPED + 终止订阅 + SSDP
+    // byebye 一轮——微信视频号不解析 GENA 事件、订阅不续订，只有
+    // 设备从 SSDP 消失 + 查询返回无媒体双管齐下才会清掉投屏 UI
+    dlnaService.kickCastClients();
     // 注意：**不在这里把 _preCastChannel 置 null**。
     // 它记的是「最后一次真实播放的台」，投屏可以连投很多次，每次都要能
     // 回到同一个直播；旧代码在这里取走即清，第二次投屏时当前频道已是
@@ -1545,10 +1534,6 @@ class PlayerController extends ChangeNotifier {
     // （电视剧下一集）留窗口；0=马上返回，-1=一直等
     final wait = _settings.castEndWaitSeconds;
     if (!userInitiated && (wait < 0 || wait > 0)) {
-      // 等待态**不摘设备**（v2.3.69）：只清媒体 + 推 STOPPED，让发送端
-      // 知道这一条播完了，设备仍留在它的列表里，下一集还能推过来。
-      // 此时发 SSDP byebye 会让设备从发送端列表消失，连播就断了。
-      dlnaService.clearCurrentMedia();
       _pendingRestoreChannel = restore;
       await _disposeVideoController();
       WakelockPlus.disable();
@@ -1556,11 +1541,6 @@ class PlayerController extends ChangeNotifier {
       _enterCastWait(wait);
       return;
     }
-    // 真正离开投屏（回直播 / 手动断开 / 不等待）：完整断开并通知发送端
-    // ——清 DLNA 媒体 + 推 STOPPED + 终止订阅 + SSDP byebye 两轮。
-    // 微信视频号不解析 GENA 事件，只有"设备消失 + 查询无媒体"双管齐下
-    // 才会清掉投屏 UI。
-    dlnaService.kickCastClients();
     if (restore != null) {
       await playChannel(restore);
     } else {
@@ -1603,10 +1583,6 @@ class PlayerController extends ChangeNotifier {
     _castWaitTimer = null;
     if (!_castWaiting) return;
     _castWaiting = false;
-    // 离开等待、回直播＝这一次投屏会话彻底结束，通知发送端（v2.3.69）。
-    // 等待期间一直保持设备在线，是为了让发送端能连推下一集；一旦回直播
-    // 就必须断开，否则对方还显示"投屏中"。
-    dlnaService.kickCastClients();
     _castWaitRemain = 0;
     // 恢复目标双保险：等待期内记下的优先，其次用「最后一次真实播放的台」。
     // 等待期间任何一次 playChannel 都会调 _clearCastWait() 把 pending 清掉，
@@ -1930,6 +1906,7 @@ class PlayerController extends ChangeNotifier {
     // 「无媒体 STOPPED」断联信号（手机端投屏 UI 随之退出），
     // 再走正常播放流程；投屏内部换片不走这里（由 playCastUrl 处理）
     if (_isCasting && !channel.id.startsWith('__dlna_cast__')) {
+      await _stopCastRecordingIfAny('切换频道');
       _isCasting = false;
       // 用户主动切到了新的台：紧接着下面的记录会把恢复目标更新成新台，
       // 这里不再置 null（置空会让"刚切完台又投屏、投完想回去"丢失目标）
@@ -2336,10 +2313,6 @@ class PlayerController extends ChangeNotifier {
     if (_webPageActive && _currentChannel?.id == channel.id) {
       return;
     }
-    // 离开当前网页/换网页：网页录制先把末尾分块收回并落盘
-    if (_isRecording) {
-      await _finalizeRecording('切换频道');
-    }
     _resetWebRecording();
     await _disposeVideoController();
     _currentChannel = channel;
@@ -2377,16 +2350,7 @@ class PlayerController extends ChangeNotifier {
   /// 退出网页频道内嵌模式（隐藏网页控件，回到普通播放界面）
   void exitWebPage() {
     if (!_webPageActive) return;
-    if (_isRecording) {
-      // 网页录制（MediaRecorder）的末尾分块只能由页面 JS 回传：必须趁
-      // WebView 还活着通知停止。这里不 await（exitWebPage 是同步方法），
-      // unawaited 调用会立即同步跑到 _stopWebRecording 的 JS 派发点，
-      // 其内部会清掉 _recordPath/_webRecDone/_webRecBytes，不要再调
-      // _resetWebRecording（会把 path 清掉，导致保存判定失败）
-      unawaited(_finalizeRecording('退出网页播放'));
-    } else {
-      _resetWebRecording();
-    }
+    _resetWebRecording();
     _webViewClosedAt = DateTime.now();
     // 同 playChannel：原生窗口先缩到 0×0 再走销毁，否则这 2.5 秒里
     // 它会一直盖在画面上（白底 + 吃鼠标 + 吃双击）
@@ -2792,21 +2756,6 @@ class PlayerController extends ChangeNotifier {
       _sourceIndex = 0;
     }
     final gen = ++_playGeneration;
-    // 录制只对着「这一路源」：换台、换源、切到投屏，都意味着前面那段
-    // 内容已经结束，必须趁旧内核还在把录制收尾落盘（否则换台后视频
-    // 文件打不开——用户实测）。同源重载（自动重试/手动重载）时系统级
-    // 录制录的是窗口画面，跟内核无关，可以继续往下录；内核录制遇重建
-    // 必然断，只能先保存。
-    final recKey = _currentSourceKey;
-    if (_isRecording) {
-      final sameSource = recKey != null && recKey == _recSourceKey;
-      if (!sameSource || !_usingSystemRecorder) {
-        await _finalizeRecording(sameSource ? '重新起播' : '切换节目');
-      }
-    }
-    _recSourceKey = recKey;
-    // 收尾这段是 await：期间又切了台的话本次起播作废（新调用会接着干）
-    if (gen != _playGeneration) return;
     _instanceBornAt = DateTime.now();
     // 后台换台不要进 loading：卡片会跟着在「播放/暂停」之间闪一下，
     // 而且加载失败时用户看到的是一张不知道在干嘛的卡片。后台保持
@@ -3238,8 +3187,6 @@ class PlayerController extends ChangeNotifier {
     // -1=一直等待新投屏或用户手动切台/断开。
     if (_isCasting && v.isCompleted && _state == PlayerState.playing) {
       _state = PlayerState.ended;
-      // 片子播完就没有后续画面了：录制必须在此收尾并落盘
-      unawaited(_finalizeRecording('投屏播完'));
       notifyListeners();
       _castEndedTimer?.cancel();
       final wait = _settings.castEndWaitSeconds;
@@ -3425,10 +3372,12 @@ class PlayerController extends ChangeNotifier {
   /// 一起被销毁时 mpv 的原生实例不保证释放——声音继续响，再从桌面点图标
   /// 就成了两路同时在放。必须在销毁前主动 pause + stop 服务。
   Future<void> shutdownForExit() async {
-    // 正在录制：先停录并落盘
-    await _finalizeRecording('退出程序');
     _audioCardClosed = true;
     _cardExitAt = DateTime.now();
+    // 投屏录制先收尾，避免退出时文件不完整
+    try {
+      await _stopCastRecordingIfAny('退出程序');
+    } catch (_) {}
     // 作废在飞的换台（同 _exitFromCard），然后**真正释放内核**：
     // 只 pause 的话 isolate 销毁后 mpv 原生实例的清理没有着落，
     // 进程残留 + 再次启动就是两路声音甚至起播崩溃
@@ -3606,8 +3555,7 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.shutdown:
         OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 关机前先收尾录制（落盘），再断投屏链路通知发送端（v2.3.69）
-        await _finalizeRecording('定时关机');
+        // 关机前若还在投屏，先把链路断干净并通知发送端（v2.3.67）
         if (_isCasting) await dlnaService.shutdownCastLink();
         // 先发系统命令再退程序：进程先死也不影响系统照常关闭。
         // shutdown /p 立即关机、无系统倒计时通知（2.1.46 定稿）
@@ -3623,7 +3571,6 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.exit:
         OsdBus.show('定时关闭：退出应用', icon: Icons.bedtime);
         notifyListeners();
-        await _finalizeRecording('定时退出');
         if (_isCasting) await dlnaService.shutdownCastLink();
         if (isDesktop) {
           await ExitGuard.quit();
@@ -3865,8 +3812,6 @@ class PlayerController extends ChangeNotifier {
         // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
         await Future<void>.delayed(const Duration(milliseconds: 60));
         await _restoreHiddenChrome();
-        // 底层尺寸若被小窗污染（420×236），恢复窗体固定尺寸（v2.3.68）
-        await _ensureWindowSize();
       }
       notifyListeners();
     } finally {
@@ -3892,20 +3837,6 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  /// 窗体固定 1280×720（v2.3.68）：退出全屏时窗口回到的是「全屏盖着时的
-  /// 底层尺寸」——小窗播放期间这个底层尺寸被污染成 420×236，之后全屏
-  /// 切窗体就会得到一个小窗。这里做统一兜底：只要不是窗体尺寸就恢复。
-  Future<void> _ensureWindowSize() async {
-    try {
-      final cur = await windowManager.getSize();
-      if (cur.width != _windowSize.width || cur.height != _windowSize.height) {
-        await windowManager.setResizable(true);
-        await windowManager.setSize(_windowSize);
-        await windowManager.setResizable(false);
-      }
-    } catch (_) {}
-  }
-
   /// 若当前处于全屏则退出全屏（用于返回键/ESC）
   Future<bool> exitFullscreenIfNeeded() async {
     if (!_isFullscreen || _fsToggling) return false;
@@ -3918,8 +3849,6 @@ class PlayerController extends ChangeNotifier {
       // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
       await Future<void>.delayed(const Duration(milliseconds: 60));
       await _restoreHiddenChrome();
-      // 底层尺寸若被小窗污染（420×236），恢复窗体固定尺寸（v2.3.68）
-      await _ensureWindowSize();
       notifyListeners();
       return true;
     } finally {
@@ -3951,7 +3880,7 @@ class PlayerController extends ChangeNotifier {
   /// 小窗播放（仅桌面端）：窗口缩成 420×236 并置顶，再点一次恢复原尺寸
   bool _miniWindow = false;
   bool get miniWindow => _miniWindow;
-  Size _sizeBeforeMini = _windowSize;
+  Size _sizeBeforeMini = const Size(1280, 720);
 
   /// 进小窗前的窗口状态：退出时原样恢复——
   /// 原来全屏就回全屏，原来最大化就回最大化，原来是普通窗口就回原尺寸
@@ -3963,9 +3892,6 @@ class PlayerController extends ChangeNotifier {
   /// 之后每次恢复都回小窗大小（用户实测「退出小窗后记住了小窗尺寸」）
   bool _miniToggling = false;
   static const _miniSize = Size(420, 236);
-
-  /// 窗体固定尺寸（与 main.dart 初始 1280×720 一致，不再支持拖边缩放）
-  static const _windowSize = Size(1280, 720);
 
   bool _isMiniLikeSize(Size s) =>
       (s.width - _miniSize.width).abs() < 16 &&
@@ -4009,18 +3935,11 @@ class PlayerController extends ChangeNotifier {
           _isFullscreen = true;
           await windowManager.setAlwaysOnTop(false);
           await _prepareFullscreenEnter();
-          // 必须先把底层尺寸放回窗体大小（v2.3.68）：全屏只是「盖在」
-          // 当前窗口尺寸上面，退出全屏时窗口会回到底层尺寸。小窗期间
-          // 底层是 420×236，不补这一步，之后从全屏切窗体就会得到一个
-          // 小窗尺寸（用户实测：小窗→恢复窗口→全屏切窗体 = 小窗大小）
-          await windowManager.setResizable(true);
-          await windowManager.setSize(_sizeBeforeMini);
-          await windowManager.setResizable(false);
           await windowManager.setFullScreen(true);
         } else {
           // _sizeBeforeMini 若已被污染成小窗尺寸，退回默认窗口大小
           if (_isMiniLikeSize(_sizeBeforeMini)) {
-            _sizeBeforeMini = _windowSize;
+            _sizeBeforeMini = const Size(1280, 720);
           }
           await windowManager.setResizable(true);
           await windowManager.setSize(_sizeBeforeMini);
@@ -4076,9 +3995,6 @@ class PlayerController extends ChangeNotifier {
     if (_isCasting) return;
     OsdBus.show('正在重载「${channel.name}」', icon: Icons.refresh);
     if (_webPageActive) {
-      // 整页重新载入 = 旧页面的 MediaRecorder 上下文随之消失，末尾分块
-      // 再不收回就永久丢了：重载前先把录制收尾落盘
-      if (_isRecording) await _finalizeRecording('重载网页');
       _webReloadSerial++;
       setWebForeground(false);
       _webPlaying = false;
@@ -4302,10 +4218,12 @@ class PlayerController extends ChangeNotifier {
   /// 被连带拆除（flutter_windows.dll 内 0xc0000005）。这里主动释放，
   /// 让原生资源先安静下来，再由 ExitGuard 结束进程。
   Future<void> prepareForExit() async {
-    // 正在录制：先停录并落盘，退出/关机不能把文件丢了
-    await _finalizeRecording('退出程序');
     try {
       await flushSettings();
+    } catch (_) {}
+    // 投屏录制先收尾，避免进程退出时最后分片/文件尾丢失
+    try {
+      await _stopCastRecordingIfAny('退出程序');
     } catch (_) {}
     // 关窗 / 托盘退出 / 定时退出都收敛到 ExitGuard → 这里（v2.3.67）。
     // 在投屏态下必须先通知发送端再停内核，否则手机端一直显示「已连接」。
@@ -5255,112 +5173,121 @@ class PlayerController extends ChangeNotifier {
   // ==================== 录制与截图（fvp/MDK 原生，桌面端） ====================
 
   /// 开始录制当前画面到固定文件夹，返回是否成功。
-  /// Windows 优先系统级录制（Graphics Capture + WASAPI 进程回环 + Media
-  /// Foundation，omi_screen_recorder 插件）：录的是播放器窗口画面，
-  /// 与内核无关，内核转封装出不去的流（投屏 HLS、视频号等）照样能录。
-  /// Win10 1809+ 可用（有画面就能录，声音拿不到退化成纯视频），
-  /// 不可用或启动失败时回退内核录制（mpv stream-record / mdk record），
-  /// 并在界面上说明回退原因。网页频道用 MediaRecorder 录制 video 元素。
+  /// 普通频道走 fvp/MDK 原生录制；网页频道用 MediaRecorder 录制
+  /// 播放中的 <video>（captureStream），分块经 JS bridge 落盘为 .webm；
+  /// 投屏走流级录制（CastStreamRecorder，直接下载原始媒体字节）。
   Future<bool> startRecording() async {
     if (_webPageActive) return _startWebRecording();
+    // 诊断：逐个判定失败原因。投屏 URL 与普通频道不同（非 HLS 走本地
+    // 代理、HLS 直连），失败点必须精确到分支才能定位，不能笼统返回 false。
+    if (_currentChannel == null) {
+      _lastError = '录制失败：当前无频道';
+      CastLog.write('record start failed: no current channel');
+      return false;
+    }
+    if (!isDesktop) {
+      _lastError = '录制失败：非桌面平台';
+      return false;
+    }
+    if (_isRecording) {
+      _lastError = '录制失败：已在录制中';
+      return false;
+    }
+    // 投屏：流级录制，不依赖内核。
+    // 投屏源多为 HLS 分片 + 鉴权 CDN，内核的 stream-record/record 对这类
+    // 流不写数据（实测白录）；这里直接下载原始媒体字节，产物无 UI、原声。
+    if (_isCasting) {
+      final urls = _currentChannel!.streamUrls;
+      final idx =
+          (_sourceIndex >= 0 && _sourceIndex < urls.length) ? _sourceIndex : 0;
+      // 必须用频道里的原始 URL，不能用 CastStreamProxy 包过的 127.0.0.1
+      final castUrl = urls.isEmpty ? '' : urls[idx];
+      if (castUrl.isNotEmpty) {
+        final err = await CastStreamRecorder.start(
+          url: castUrl,
+          name: _currentChannel!.name,
+          userAgent: _currentChannel!.userAgent,
+          referer: _currentChannel!.httpReferer,
+        );
+        if (err == null) {
+          CastStreamRecorder.onFinished = _onCastRecorderFinished;
+          // 极端情况：流已瞬间结束（空流），别把界面卡在「REC」
+          if (!CastStreamRecorder.isRecording) {
+            CastStreamRecorder.onFinished = null;
+            _lastError = '投屏流已结束，未录到数据';
+            return false;
+          }
+          _usingCastRecorder = true;
+          _isRecording = true;
+          _recordPath = CastStreamRecorder.filePath;
+          CastLog.write('record start cast path=$_recordPath');
+          notifyListeners();
+          return true;
+        }
+        _lastError = _castRecordError(err);
+        CastLog.write('record start cast FAILED: $err -> kernel');
+        OsdBus.show(_lastError!, icon: Icons.videocam_off);
+        // 加密 HLS 内核同样解不了，没必要再回退
+        if (err == 'encrypted') return false;
+      }
+    }
     final vc = _videoController;
-    if (_currentChannel == null || !isDesktop || _isRecording) {
+    if (vc == null) {
+      _lastError = '录制失败：播放器未就绪';
+      CastLog.write('record start failed: videoController is null '
+          '(casting=$_isCasting state=$_state)');
+      return false;
+    }
+    if (!vc.value.isInitialized) {
+      _lastError = '录制失败：播放器未初始化完成';
+      CastLog.write('record start failed: not initialized '
+          '(casting=$_isCasting state=$_state)');
       return false;
     }
     try {
       _recordPath = await captureService.buildFilePath(
           'recordings', _currentChannel!.name, 'mp4');
-      // 系统级录制（v2.3.68）：与引擎无关
-      if (Platform.isWindows && await ScreenRecorder.isSupported()) {
-        final err = await ScreenRecorder.start(_recordPath!);
-        if (err == null) {
-          _usingSystemRecorder = true;
-          _isRecording = true;
-          _recSourceKey = _currentSourceKey;
-          _recFallbackReason = null;
-          CastLog.write('rec start system path=$_recordPath');
-          notifyListeners();
-          return true;
-        }
-        // 系统级失败：回退内核录制
-        _lastError = '系统录制启动失败（$err），已回退内核';
-        _recFallbackReason = '启动失败：$err';
-        CastLog.write('rec start system FAILED: $err -> kernel');
-        OsdBus.show(_lastError!, icon: Icons.videocam_off);
-      } else if (Platform.isWindows) {
-        // 不能再静默回退：v2.3.70 之前这里只写日志，用户以为在录屏，
-        // 实际走的是注定失败的内核转封装（投屏一录就「没有数据」）
-        final diag = await ScreenRecorder.diagnose();
-        CastLog.write('rec start system unsupported -> kernel '
-            'diag=${diag ?? "(plugin missing)"}');
-        _lastError = diag == null
-            ? '系统录制插件未加载，已回退内核'
-            : '系统录制不可用（$diag），已回退内核';
-        _recFallbackReason = diag == null ? '插件未加载' : '不可用：$diag';
-        OsdBus.show(_lastError!, icon: Icons.videocam_off);
-      }
-      if (vc == null || !vc.value.isInitialized) {
-        _lastError = '当前内核不支持录制';
-        _isRecording = false;
-        notifyListeners();
-        return false;
-      }
+      final host = _currentChannel!.streamUrls.isNotEmpty
+          ? (Uri.tryParse(_currentChannel!.streamUrls.first)?.host ?? '?')
+          : '?';
+      CastLog.write('record start: vc=${vc.runtimeType} '
+          'casting=$_isCasting host=$host path=$_recordPath');
       // libmpv 的 stream-record 直接落盘原始流（TS/MP4 容器由流本身决定）
       final ok = await vc.startRecord(_recordPath!);
       if (!ok) {
-        _lastError = '当前内核不支持录制';
+        _lastError = '当前内核不支持录制（内核：${vc.runtimeType}）';
+        CastLog.write('record start failed: vc.startRecord returned false '
+            '(vc=${vc.runtimeType} casting=$_isCasting)');
         _isRecording = false;
         notifyListeners();
         return false;
       }
-      _usingSystemRecorder = false;
       _isRecording = true;
-      _recSourceKey = _currentSourceKey;
       notifyListeners();
       return true;
     } catch (e) {
       _lastError = '录制启动失败: $e';
+      CastLog.write('record start exception: $e');
       _isRecording = false;
       notifyListeners();
       return false;
     }
   }
 
-  /// 停止录制，返回文件路径；没有生成有效文件时返回 null
-  /// （UI 提示「未捕获到视频数据」，不再假成功）
+  /// 停止录制，返回文件路径
   Future<String?> stopRecording() async {
     if (!_isRecording) return null;
     if (_webPageActive) return _stopWebRecording();
-    final path = _recordPath;
-    _isRecording = false;
-    _recordPath = null;
-    if (_usingSystemRecorder) {
-      // 系统级录制：stop 内部 Finalize 落盘，无需额外等待
-      _usingSystemRecorder = false;
+    // 投屏流级录制：不碰内核，直接收尾下载文件
+    if (_usingCastRecorder) {
+      _usingCastRecorder = false;
+      _isRecording = false;
+      CastStreamRecorder.onFinished = null;
+      final path = await CastStreamRecorder.stop();
+      _recordPath = null;
+      CastLog.write('rec stop cast path=$path');
       notifyListeners();
-      final st = await ScreenRecorder.stop();
-      int size = 0;
-      if (path != null) {
-        try {
-          final f = File(path);
-          if (await f.exists()) size = await f.length();
-        } catch (_) {}
-      }
-      CastLog.write('rec stop system ms=${st.durationMs} '
-          'frames=${st.frames} encoded=${st.encoded} size=$size');
-      // 64KB 以下视为没录上（几秒的 H.264 不止这个数）
-      if (path != null && size > 64 * 1024) return path;
-      // 诊断分流：0 帧=窗口没出画面；有帧没编码=编码器没吃样本；
-      // 编码了但文件小=落盘失败
-      if (st.frames == 0) {
-        _lastError = '录制失败：窗口未产生画面（最小化、被独占或驱动不支持）';
-      } else if (st.encoded == 0) {
-        _lastError = '录制失败：编码器未接收画面（${st.frames} 帧已捕获）';
-      } else {
-        _lastError = '录制失败：文件未落盘（编码 ${st.encoded} 帧，仅 $size 字节）';
-      }
-      CastLog.write('rec stop system FAILED: $_lastError');
-      return null;
+      return path;
     }
     final vc = _videoController;
     try {
@@ -5368,39 +5295,61 @@ class PlayerController extends ChangeNotifier {
       // 给编码器一点时间刷新文件尾
       await Future.delayed(const Duration(milliseconds: 800));
     } catch (_) {}
-    CastLog.write('rec stop kernel path=$path');
+    final path = _recordPath;
+    _isRecording = false;
+    _recordPath = null;
     notifyListeners();
-    // 产物校验（v2.3.68）：mdk 的 record 是 fire-and-forget，流不支持时
-    // 它不报错、文件根本不生成（投屏的 HLS 点播/视频号流实测白录）。
-    // 停止时查一次大小，0 字节按失败算，UI 才能给真实提示。
-    if (path != null && isDesktop) {
-      try {
-        final f = File(path);
-        if (!await f.exists() || await f.length() == 0) {
-          final why = _recFallbackReason;
-          _lastError = why == null
-              ? '录制失败：当前内核未能写出数据（该流不支持转封装）'
-              : '录制失败：系统录制未生效（$why），内核也无法转封装该流';
-          CastLog.write('rec stop kernel FAILED: no data '
-              'fallback=${why ?? "(none)"}');
-          return null;
-        }
-      } catch (_) {}
-    }
     return path;
   }
 
-  /// 异常/被动结束时收尾录制：能保存就保存，失败只写日志，不打断流程。
-  /// 用于投屏播完、对方断开、退出程序、关机、定时退出等路径。
-  Future<void> _finalizeRecording(String reason) async {
-    if (!_isRecording) return;
-    CastLog.write('rec auto-stop reason=$reason');
-    try {
-      final path = await stopRecording().timeout(const Duration(seconds: 6));
-      if (path != null) {
-        OsdBus.show('录制已保存（$reason）', icon: Icons.videocam);
-      }
-    } catch (_) {}
+  /// 投屏流级录制自然结束（VOD 播完/断流/失败）回调。
+  void _onCastRecorderFinished(String? error) {
+    if (!_usingCastRecorder) return;
+    _usingCastRecorder = false;
+    _isRecording = false;
+    _recordPath = null;
+    notifyListeners();
+    if (error != null) {
+      _lastError = _castRecordError(error);
+      CastLog.write('record cast auto-stop FAILED: $error');
+      OsdBus.show(_lastError!, icon: Icons.videocam_off);
+      return;
+    }
+    final path = CastStreamRecorder.lastPath;
+    OsdBus.show(
+      path == null ? '投屏录制已结束' : '录制已保存: $path',
+      icon: Icons.videocam,
+    );
+  }
+
+  /// 离开投屏/切换投屏前收尾流级录制（能保存就保存）。
+  Future<void> _stopCastRecordingIfAny(String reason) async {
+    if (!_usingCastRecorder) return;
+    final path = await stopRecording();
+    if (path != null) {
+      CastLog.write('record cast saved reason=$reason path=$path');
+      OsdBus.show('录制已保存（$reason）', icon: Icons.videocam);
+    }
+  }
+
+  /// 投屏录制失败原因码 → 界面文案
+  String _castRecordError(String code) {
+    switch (code) {
+      case 'encrypted':
+        return '投屏流已加密（AES-128），暂不支持录制';
+      case 'hls':
+        return '投屏播放列表无法解析，暂不支持录制';
+      case 'http':
+        return '投屏流拉取失败，无法录制';
+      case 'io':
+        return '录制文件创建失败（磁盘不可写？）';
+      case 'busy':
+        return '已有录制在进行中';
+      case 'platform':
+        return '当前平台不支持投屏录制';
+      default:
+        return '投屏录制启动失败（$code）';
+    }
   }
 
   // ---- 网页频道录制（MediaRecorder） ----
@@ -5532,7 +5481,6 @@ class PlayerController extends ChangeNotifier {
           'recordings', _currentChannel?.name ?? 'web', ext);
       _webRecDone = Completer<void>();
       _isRecording = true;
-      _recSourceKey = _currentSourceKey ?? 'web:${_currentChannel?.id}';
       notifyListeners();
       return true;
     } catch (e) {
@@ -5948,6 +5896,10 @@ class PlayerController extends ChangeNotifier {
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
     _resetWebRecording();
+    if (_usingCastRecorder) {
+      CastStreamRecorder.onFinished = null;
+      unawaited(CastStreamRecorder.stop());
+    }
     if (_isRecording && _videoController != null) {
       unawaited(_videoController!.stopRecord());
     }

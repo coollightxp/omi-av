@@ -1,7 +1,7 @@
 name: omi
 description: 欧米视听 (Omi) — 跨平台直播视听应用：电视直播、电台、投屏接收。
 publish_to: 'none'
-version: 2.3.74+145
+version: 2.3.75+146
 
 environment:
   sdk: '>=3.10.0 <4.0.0'
@@ -13,11 +13,6 @@ dependencies:
   flutter_localizations:
     sdk: flutter
   cupertino_icons: ^1.0.6
-
-  # Windows 系统级录制（本地插件）：Graphics Capture + WASAPI 进程回环
-  # + Media Foundation，与播放内核无关（2.3.68）
-  omi_screen_recorder:
-    path: omi_screen_recorder
 
   # 视频播放 - Web 端保留 video_player（HTML video 元素）
   video_player: ^2.8.6
