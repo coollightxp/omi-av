@@ -52,7 +52,8 @@ class CastStreamRecorder {
   /// 小水管/限速 CDN 下容易把播放器饿到转圈。压到 1.5 倍后总占用约
   /// 2.5 倍源码率，仍比实时快，整片下载时间是时长的 2/3 左右。
   /// 直播流不适用（分片本身按实时产生，越快下越能追平窗口）。
-  static const double _paceRatio = 1.5;
+  /// 设置里可切「全速下载」（[start] 的 throttle=false），此时为 0。
+  static double _paceRatio = 1.5;
 
   /// 直连流限速的检查粒度（每写满 512KB 校正一次，避免每块都 sleep）
   static int _lastPaceBytes = 0;
@@ -71,11 +72,14 @@ class CastStreamRecorder {
     String referer = '',
     double durationSeconds = 0,
     String subDir = 'recordings',
+    bool throttle = true,
   }) async {
     if (kIsWeb) return 'platform';
     if (isRecording) return 'busy';
 
     _subDir = subDir;
+    // 限速只在 VOD 直连/分片时生效；全速下载时置 0（各限速点直接跳过）
+    _paceRatio = throttle ? 1.5 : 0;
 
     final headers = <String, String>{};
     if (userAgent.trim().isNotEmpty) headers['User-Agent'] = userAgent.trim();
@@ -446,7 +450,7 @@ class CastStreamRecorder {
   /// 按分片时长给 VOD 分片限速（1.5 倍速：6 秒分片最少用 4 秒下完）
   static Future<void> _paceSegment(
       DateTime started, double durationSeconds) async {
-    if (durationSeconds <= 0 || _stopRequested) return;
+    if (durationSeconds <= 0 || _paceRatio <= 0 || _stopRequested) return;
     final targetMs = (durationSeconds * 1000 / _paceRatio).round();
     final elapsedMs = DateTime.now().difference(started).inMilliseconds;
     final diff = targetMs - elapsedMs;

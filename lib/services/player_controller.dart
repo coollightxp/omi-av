@@ -1449,6 +1449,9 @@ class PlayerController extends ChangeNotifier {
     await _stopRecordingIfAny('切换投屏');
     // 投屏意味着离开电台：电台录音是独立连接，也要收尾
     if (RadioRecorder.isRecording) {
+      _reservationRecActive = false;
+      _reservationRecordTimer?.cancel();
+      _reservationRecordTimer = null;
       final p = await RadioRecorder.stop();
       if (p != null) OsdBus.show('录音已保存（切换投屏）', icon: Icons.mic);
     }
@@ -1636,7 +1639,10 @@ class PlayerController extends ChangeNotifier {
   /// 预约触发回调 - 自动切换/录制
   Future<void> _onReservationTriggered(ProgramReservation r) async {
     Channel? channel;
-    if (r.autoSwitch || (r.autoRecord && isDesktop)) {
+    // 已存在的频道（用于拿到电台标记、UA/Referer：预约记录只存地址）
+    final known = _resolveReservationChannel(r) ?? _findInRadioCatalog(r.channelId);
+    if (r.autoSwitch ||
+        ((r.autoRecord || _settings.reservationRecord) && canCapture)) {
       // 优先使用预约时记录的播放地址直接播放（不依赖当前播放列表）
       if (r.streamUrls.isNotEmpty) {
         channel = Channel(
@@ -1647,23 +1653,97 @@ class PlayerController extends ChangeNotifier {
           categoryId: '',
           tvgId: r.tvgId,
           tvgName: r.tvgName,
+          userAgent: known?.userAgent ?? '',
+          httpReferer: known?.httpReferer ?? '',
+          channelType: known?.channelType ?? ChannelType.tv,
         );
       } else {
         // 兼容旧预约记录：按 ID/tvgId/名称从当前播放列表反查
-        channel = _resolveReservationChannel(r);
+        channel = known;
       }
     }
     if (r.autoSwitch && channel != null) {
       await playChannel(channel);
     }
-    if (r.autoRecord && isDesktop && channel != null) {
+    // 自动录制：单条预约勾了「自动录制」，或设置里开了「预约到点自动录音」
+    if ((r.autoRecord || _settings.reservationRecord) &&
+        canCapture &&
+        channel != null) {
       // 保证录制针对的是预约频道
       if (_currentChannel?.id != channel.id) {
         await playChannel(channel);
       }
-      startRecording();
+      await _startReservationRecording(channel, r);
     }
     notifyListeners();
+  }
+
+  /// 预约自动录制/录音是否由本次预约发起（用于到点收尾，
+  /// 避免误停用户手动开始的录制）
+  bool _reservationRecActive = false;
+  Timer? _reservationRecordTimer;
+
+  Future<void> _startReservationRecording(
+      Channel channel, ProgramReservation r) async {
+    // 上一条预约还没收尾：先收掉，避免两条预约共用一个文件
+    if (_reservationRecActive) {
+      await _stopReservationRecording(silent: true);
+    }
+    if (channel.isRadio) {
+      if (RadioRecorder.isRecording) return;
+      final err = await RadioRecorder.start(
+        url: channel.streamUrl,
+        name: ChannelAlias.displayName(channel),
+        userAgent: channel.userAgent,
+        referer: channel.httpReferer,
+      );
+      if (err != null) {
+        OsdBus.show(
+          err == 'hls' ? '预约录音失败：DASH/M3U 列表不支持' : '预约录音失败：流不可直连',
+          icon: Icons.error_outline,
+        );
+        return;
+      }
+      _reservationRecActive = true;
+    } else {
+      if (_isRecording) return;
+      final ok = await startRecording();
+      if (!ok) {
+        OsdBus.show(_lastError ?? '预约录制启动失败', icon: Icons.videocam_off);
+        return;
+      }
+      _reservationRecActive = true;
+    }
+    OsdBus.show('预约${channel.isRadio ? '录音' : '录制'}已开始：${channel.name}',
+        icon: Icons.fiber_manual_record);
+    // 到节目结束自动收尾；节目已快结束（<1 分钟）也给 1 分钟
+    final dur = r.endTime.difference(DateTime.now());
+    _reservationRecordTimer?.cancel();
+    _reservationRecordTimer = Timer(
+      dur.isNegative ? const Duration(minutes: 1) : dur,
+      () => unawaited(_stopReservationRecording()),
+    );
+  }
+
+  /// 收尾预约录制（silent = 被下一条预约顶掉时不弹「已保存」）
+  Future<void> _stopReservationRecording({bool silent = false}) async {
+    _reservationRecordTimer?.cancel();
+    _reservationRecordTimer = null;
+    if (!_reservationRecActive) return;
+    _reservationRecActive = false;
+    if (RadioRecorder.isRecording) {
+      final path = await RadioRecorder.stop();
+      notifyListeners();
+      if (path != null && !silent) {
+        OsdBus.show('预约录音已保存：${path.split(RegExp(r'[\\/]')).last}',
+            icon: Icons.check_circle_outline);
+      }
+    } else if (_isRecording) {
+      final path = await stopRecording();
+      if (path != null && !silent) {
+        OsdBus.show('预约录制已保存', icon: Icons.videocam);
+      }
+    }
   }
 
   /// 解析预约对应的频道：先按播放列表频道 ID 精确查找，
@@ -4141,6 +4221,9 @@ class PlayerController extends ChangeNotifier {
   static const _kLyricsVariant = 'settings_lyrics_variant';
   static const _kShowWebNativeToggle = 'settings_show_web_native_toggle';
   static const _kHideUnavailable = 'settings_hide_unavailable_channels';
+  static const _kReservationRecord = 'settings_reservation_record';
+  static const _kRecordSaveDir = 'settings_record_save_dir';
+  static const _kCastRecordFullSpeed = 'settings_cast_record_full_speed';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -4192,7 +4275,13 @@ class PlayerController extends ChangeNotifier {
         lyricsEnabled: p.getBool(_kLyricsEnabled) ?? false,
         lyricsOffsetMs: p.getInt(_kLyricsOffset) ?? 0,
         lyricsVariant: p.getInt(_kLyricsVariant) ?? 0,
+        reservationRecord: p.getBool(_kReservationRecord) ?? false,
+        recordSaveDir: p.getString(_kRecordSaveDir) ?? '',
+        castRecordFullSpeed: p.getBool(_kCastRecordFullSpeed) ?? false,
       );
+      // 录制目录覆盖（桌面端）：必须在任何录制/截图之前生效
+      MediaCaptureService.overrideDir =
+          isDesktop ? _settings.recordSaveDir : '';
       // 同步独立通知器的初值
       clockVisible.value = _settings.showClock;
       settingsNotifier.value = _settings;
@@ -4319,6 +4408,9 @@ class PlayerController extends ChangeNotifier {
       // 用户实测「开关打开点 ✕ 退出后，开关自己变回去」
       await putBool(_kCloseToTray, _settings.closeToTray);
       await putBool(_kFishHotkey, _settings.fishHotkey);
+      await putBool(_kReservationRecord, _settings.reservationRecord);
+      await putString(_kRecordSaveDir, _settings.recordSaveDir);
+      await putBool(_kCastRecordFullSpeed, _settings.castRecordFullSpeed);
     } catch (_) {}
   }
 
@@ -4363,6 +4455,8 @@ class PlayerController extends ChangeNotifier {
         settings.lyricsOffsetMs != _settings.lyricsOffsetMs;
     final lyricsVariantChanged =
         settings.lyricsVariant != _settings.lyricsVariant;
+    final recordDirChanged =
+        settings.recordSaveDir != _settings.recordSaveDir;
     _settings = settings;
     _settingsDirty = true;
     _scheduleSaveSettings();
@@ -4373,6 +4467,11 @@ class PlayerController extends ChangeNotifier {
     }
     if (lyricsVariantChanged) {
       RadioLyrics.instance.setVariant(settings.lyricsVariant);
+    }
+    // 录制目录立即生效：之后开始的录制/截图/录音都写到新目录
+    if (recordDirChanged) {
+      MediaCaptureService.overrideDir =
+          isDesktop ? settings.recordSaveDir : '';
     }
     if (launchChanged && isDesktop) {
       setAutoLaunchEnabled(settings.launchAtStartup);
@@ -5068,6 +5167,9 @@ class PlayerController extends ChangeNotifier {
   /// 开始/停止录音。开始失败时弹原因；成功落盘后弹保存路径。
   Future<void> toggleRadioRecord() async {
     if (RadioRecorder.isRecording) {
+      _reservationRecActive = false;
+      _reservationRecordTimer?.cancel();
+      _reservationRecordTimer = null;
       final path = await RadioRecorder.stop();
       notifyListeners();
       if (path != null) {
@@ -5234,6 +5336,7 @@ class PlayerController extends ChangeNotifier {
           userAgent: _currentChannel!.userAgent,
           referer: _currentChannel!.httpReferer,
           durationSeconds: durationSec,
+          throttle: !_settings.castRecordFullSpeed,
         );
         if (err == null) {
           CastStreamRecorder.onFinished = _onCastRecorderFinished;
@@ -5303,6 +5406,10 @@ class PlayerController extends ChangeNotifier {
   /// 停止录制，返回文件路径
   Future<String?> stopRecording() async {
     if (!_isRecording) return null;
+    // 手动停止：以后不再替这次录制做预约收尾
+    _reservationRecActive = false;
+    _reservationRecordTimer?.cancel();
+    _reservationRecordTimer = null;
     if (_webPageActive) return _stopWebRecording();
     // 投屏流级录制：不碰内核，直接收尾下载文件
     if (_usingCastRecorder) {
@@ -5942,6 +6049,8 @@ class PlayerController extends ChangeNotifier {
     _castEndedTimer?.cancel();
     _castWaitTimer?.cancel();
     _autoRetryTimer?.cancel();
+    _reservationRecordTimer?.cancel();
+    _reservationRecordTimer = null;
     _softErrTimer?.cancel();
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();

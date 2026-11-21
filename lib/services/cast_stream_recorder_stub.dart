@@ -22,6 +22,7 @@ class CastStreamRecorder {
     String referer = '',
     double durationSeconds = 0,
     String subDir = 'recordings',
+    bool throttle = true,
   }) async {
     return 'platform';
   }

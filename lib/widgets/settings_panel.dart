@@ -1895,6 +1895,9 @@ class _RecordingsSection extends StatefulWidget {
 class _RecordingsSectionState extends State<_RecordingsSection> {
   List<File> _files = const [];
 
+  /// 当前保存目录（录音/录制共用，显示实际落盘位置）
+  String _dir = '';
+
   /// 文件元数据缓存：一次批量 stat。以前每个文件挂一个 FutureBuilder，
   /// 每次面板重建（拨开关/切页签/播放状态变化）都重发一轮 stat IO，
   /// 录多了之后就是「切到这页签卡一两秒」的主因之一
@@ -1907,6 +1910,7 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
   }
 
   Future<void> _refresh() async {
+    final dir = await RadioRecorder.saveDir();
     final files = await RadioRecorder.list();
     for (final f in files) {
       if (_statCache.containsKey(f.path)) continue;
@@ -1918,7 +1922,54 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
     }
     // 只留现存文件的缓存
     _statCache.removeWhere((k, _) => files.every((f) => f.path != k));
-    if (mounted) setState(() => _files = files);
+    if (mounted) {
+      setState(() {
+        _files = files;
+        _dir = dir;
+      });
+    }
+  }
+
+  /// 能否选目录：仅桌面端（安卓固定用应用文档目录，且无系统目录选择器）
+  bool get _canPickDir =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux ||
+          defaultTargetPlatform == TargetPlatform.macOS);
+
+  /// 选保存目录。Windows 主窗口默认置顶，系统目录对话框会被压住，
+  /// 所以与选文件同款：先临时取消置顶，选完恢复
+  Future<void> _pickDir() async {
+    bool wasTopmost = false;
+    try {
+      wasTopmost = await windowManager.isAlwaysOnTop();
+      if (wasTopmost) {
+        await windowManager.setAlwaysOnTop(false);
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      }
+    } catch (_) {
+      wasTopmost = false;
+    }
+    try {
+      final dir = await FilePicker.getDirectoryPath(dialogTitle: '选择录音/录制保存目录');
+      if (dir == null || dir.trim().isEmpty || !mounted) return;
+      final c = context.read<PlayerController>();
+      c.updateSettings(c.settings.copyWith(recordSaveDir: dir.trim()));
+      await _refresh();
+      OsdBus.show('保存目录已改为：$dir', icon: Icons.folder);
+    } finally {
+      if (wasTopmost) {
+        try {
+          await windowManager.setAlwaysOnTop(true);
+        } catch (_) {}
+      }
+    }
+  }
+
+  void _resetDir() {
+    final c = context.read<PlayerController>();
+    c.updateSettings(c.settings.copyWith(recordSaveDir: ''));
+    unawaited(_refresh());
   }
 
   Future<void> _play(File f) async {
@@ -1997,6 +2048,48 @@ class _RecordingsSectionState extends State<_RecordingsSection> {
             const Text(
               '播放电台时点底部面板「录音」即边听边录（原始流直存，不转码）',
               style: TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+            const SizedBox(height: 6),
+            // 实际保存目录：换过目录后要能看见落在哪，否则「我的录音呢」
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 2),
+                  child: Icon(Icons.folder_outlined,
+                      size: 14, color: Colors.white38),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    _dir.isEmpty ? '保存到：正在读取…' : '保存到：$_dir',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: Colors.white54, fontSize: 11.5, height: 1.4),
+                  ),
+                ),
+                if (_canPickDir)
+                  TextButton(
+                    onPressed: _pickDir,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 30),
+                    ),
+                    child: const Text('选择目录',
+                        style: TextStyle(fontSize: 12)),
+                  ),
+                if (_canPickDir && controller.settings.recordSaveDir.isNotEmpty)
+                  TextButton(
+                    onPressed: _resetDir,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 30),
+                    ),
+                    child: const Text('恢复默认',
+                        style: TextStyle(fontSize: 12)),
+                  ),
+              ],
             ),
             const SizedBox(height: 8),
             if (recording)
@@ -2256,6 +2349,10 @@ class _EpgTabState extends State<_EpgTab> {
                   ],
                 );
               }),
+            // 内置央视节目单：自动刷新失败时日期会一直停在旧值，
+            // 这里把上次成功更新时间、条数和失败原因摆出来
+            const Divider(color: Colors.white12),
+            const _BuiltinEpgStatus(),
           ],
         );
       },
@@ -2336,6 +2433,31 @@ class _PlayerSettingsTab extends StatelessWidget {
               value: s.resumeLastChannel,
               onChanged: (v) =>
                   controller.updateSettings(s.copyWith(resumeLastChannel: v)),
+              activeColor: Colors.blueAccent,
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.fiber_manual_record,
+                  color: Colors.white70),
+              title: const Text('预约到点自动录音',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: const Text('预约节目开始时自动切台并录制/录音，'
+                  '节目结束自动保存；单条预约的「自动录制」仍各自有效',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              value: s.reservationRecord,
+              onChanged: (v) =>
+                  controller.updateSettings(s.copyWith(reservationRecord: v)),
+              activeColor: Colors.blueAccent,
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.speed, color: Colors.white70),
+              title: const Text('投屏录制全速下载',
+                  style: TextStyle(color: Colors.white, fontSize: 15)),
+              subtitle: const Text('默认按源码率 1.5 倍限速（整片约 2/3 时长下完，'
+                  '不抢播放带宽）；打开后满速下载，小宽带下可能卡播放',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              value: s.castRecordFullSpeed,
+              onChanged: (v) => controller
+                  .updateSettings(s.copyWith(castRecordFullSpeed: v)),
               activeColor: Colors.blueAccent,
             ),
             // 换台跳过：关键词命中台名/分组名即跳过（列表里仍可见可点播）
@@ -4241,6 +4363,123 @@ class _BuiltinListConfig {
   });
 }
 
+/// 内置央视节目单（EPG）更新状态。
+///
+/// 自动刷新是静默的：成功时日期会变，失败时日期一直停在旧值，
+/// 用户分不清「没到期」和「一直失败」。这里显示上次成功更新时间、
+/// 节目条数、最近一次失败原因，并提供手动更新入口。
+class _BuiltinEpgStatus extends StatefulWidget {
+  const _BuiltinEpgStatus();
+
+  @override
+  State<_BuiltinEpgStatus> createState() => _BuiltinEpgStatusState();
+}
+
+class _BuiltinEpgStatusState extends State<_BuiltinEpgStatus> {
+  DateTime? _at;
+  int _count = 0;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final at = await BuiltinEpg.fetchedAt();
+    final count = await BuiltinEpg.programCount();
+    if (!mounted) return;
+    setState(() {
+      _at = at;
+      _count = count;
+    });
+  }
+
+  String get _atText {
+    final at = _at;
+    if (at == null) return '从未更新（无内置节目单）';
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${at.year}-${two(at.month)}-${two(at.day)} '
+        '${two(at.hour)}:${two(at.minute)}';
+  }
+
+  Future<void> _refresh() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    // 走 controller：它会顺带让 EPG 缓存失效并重载当前节目单，
+    // 只调 BuiltinEpg.refresh 会出现「缓存已更新、界面还是旧节目」
+    await context.read<PlayerController>().updateBuiltinEpg();
+    if (!mounted) return;
+    setState(() => _busy = false);
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.event_note, size: 16, color: Colors.white60),
+              const SizedBox(width: 8),
+              const Text('内置央视节目单',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600)),
+              const Spacer(),
+              Text('$_count 条节目',
+                  style:
+                      const TextStyle(color: Colors.white38, fontSize: 12)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '内置节目单（央视网今天+明天）每天到期自动刷新；'
+            '只影响内置央视频道，不影响上面导入的其它 EPG 源。',
+            style: TextStyle(
+                color: Colors.white38, fontSize: 11.5, height: 1.5),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Text('节目单更新时间：',
+                  style: TextStyle(color: Colors.white54, fontSize: 12.5)),
+              Text(_atText,
+                  style:
+                      const TextStyle(color: Colors.white70, fontSize: 12.5)),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: _busy ? null : _refresh,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 13,
+                        height: 13,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.sync, size: 16),
+                label: Text(_busy ? '更新中…' : '立即更新',
+                    style: const TextStyle(fontSize: 12.5)),
+              ),
+            ],
+          ),
+          if ((BuiltinEpg.lastAutoUpdateError ?? '').isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              '上次自动更新失败：${BuiltinEpg.lastAutoUpdateError}',
+              style: const TextStyle(
+                  color: Color(0xFFFFB74D), fontSize: 11.5, height: 1.4),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 /// 内置清单（央视频道 / 电台精选）· 更新区。
 ///
 /// 网页型频道（webview://）的页面地址长期有效，会变的是「有哪些台」；
@@ -4352,6 +4591,10 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
     setState(() => _busy = true);
     final c = context.read<PlayerController>();
     final (ok, msg) = await widget.config.update(c.sourceManager);
+    if (widget.config.sourceId == PlaylistSource.builtinRadioId) {
+      // 手动更新同样刷新「上次失败原因」，成功后旧提示要消失
+      SourceManager.lastRadioUpdateError = ok ? null : msg;
+    }
     if (!mounted) return;
     setState(() => _busy = false);
     await _load();
@@ -4428,6 +4671,16 @@ class _BuiltinUpdateSectionState extends State<_BuiltinUpdateSection> {
                       const TextStyle(color: Colors.white70, fontSize: 12.5)),
             ],
           ),
+          // 自动更新失败原因：以前失败是静默的，用户只看到日期不动
+          if (cfg.sourceId == PlaylistSource.builtinRadioId &&
+              (SourceManager.lastRadioUpdateError ?? '').isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              '上次自动更新失败：${SourceManager.lastRadioUpdateError}',
+              style: const TextStyle(
+                  color: Color(0xFFFFB74D), fontSize: 11.5, height: 1.4),
+            ),
+          ],
           const SizedBox(height: 10),
           Row(
             children: [

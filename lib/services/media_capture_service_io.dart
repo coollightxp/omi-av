@@ -15,8 +15,21 @@ class MediaCaptureService {
   /// 安卓也支持截图/录制（应用文档目录，无需存储权限）
   static bool get isAndroid => !kIsWeb && Platform.isAndroid;
 
+  /// 用户指定的保存根目录（设置里选的）。空 = 用默认位置。
+  /// 截图/录制/录音全部走 [getSaveDir]，改一处即全部生效。
+  static String overrideDir = '';
+
   /// 获取保存目录（截图/录制优先保存到 程序所在目录/screenshots、recordings）
   Future<String> getSaveDir(String subDir) async {
+    // 用户指定目录优先（桌面端）。仍按子目录分开放，
+    // 避免 recordings / radio_records / screenshots 混在一个文件夹里
+    if (overrideDir.trim().isNotEmpty && !isAndroid) {
+      try {
+        final target = Directory('${overrideDir.trim()}/$subDir');
+        await target.create(recursive: true);
+        return target.path;
+      } catch (_) {}
+    }
     // 安卓：应用文档目录。与 RadioRecorder 的 radio_records 同根，
     // 避免「录音库打开一个文件夹、实际文件在另一个」。
     if (isAndroid) {

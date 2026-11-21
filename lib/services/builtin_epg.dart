@@ -62,6 +62,11 @@ class BuiltinEpg {
     return RegExp(r'<programme\b').allMatches(xml).length;
   }
 
+  /// 最近一次自动刷新内置节目单的失败原因（成功则清空）。
+  /// 自动刷新是静默的，失败后界面只能看到日期停在旧值；
+  /// 设置页用它把真实原因显示出来
+  static String? lastAutoUpdateError;
+
   /// 到期就后台刷一次（启动时调，失败静默）。
   /// 返回是否真的更新了数据——只有更新过才需要让界面重解析。
   static Future<bool> maybeAutoRefresh() async {
@@ -74,7 +79,8 @@ class BuiltinEpg {
         DateTime.now().difference(at).inDays < days) {
       return false;
     }
-    final (ok, _) = await refresh();
+    final (ok, msg) = await refresh();
+    if (!ok) lastAutoUpdateError = msg;
     return ok;
   }
 
@@ -152,6 +158,7 @@ class BuiltinEpg {
     final p = await SharedPreferences.getInstance();
     await p.setString(_kCache, xml);
     await p.setInt(_kAt, DateTime.now().millisecondsSinceEpoch);
+    lastAutoUpdateError = null;
     return (true, '已更新 ${merged.length} 个频道 / $count 条节目');
   }
 

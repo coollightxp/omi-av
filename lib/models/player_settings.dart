@@ -137,6 +137,18 @@ class PlayerSettings {
   /// 只影响内置电台精选——死台源在清单里保留，恢复后自动回到列表
   final bool hideUnavailableChannels;
 
+  /// 预约到点自动录音（默认关）：预约开始时除了切台，还自动开始录制。
+  /// 单条预约仍可单独勾选「自动录制」，这里是全局开关
+  final bool reservationRecord;
+
+  /// 录制/录音保存目录（空 = 用默认：桌面端程序目录、安卓应用文档目录）。
+  /// 只对桌面端生效，安卓路径固定
+  final String recordSaveDir;
+
+  /// 投屏录制全速下载（默认关 = 按 1.5 倍速限速）。
+  /// 打开后满速拉取，整片更快下完，但会和播放器抢带宽
+  final bool castRecordFullSpeed;
+
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -170,6 +182,9 @@ class PlayerSettings {
     this.lyricsOffsetMs = 0,
     this.lyricsVariant = 0,
     this.hideUnavailableChannels = true,
+    this.reservationRecord = false,
+    this.recordSaveDir = '',
+    this.castRecordFullSpeed = false,
   });
 
   PlayerSettings copyWith({
@@ -205,6 +220,9 @@ class PlayerSettings {
     int? lyricsOffsetMs,
     int? lyricsVariant,
     bool? hideUnavailableChannels,
+    bool? reservationRecord,
+    String? recordSaveDir,
+    bool? castRecordFullSpeed,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -241,6 +259,10 @@ class PlayerSettings {
       lyricsVariant: lyricsVariant ?? this.lyricsVariant,
       hideUnavailableChannels:
           hideUnavailableChannels ?? this.hideUnavailableChannels,
+      reservationRecord: reservationRecord ?? this.reservationRecord,
+      recordSaveDir: recordSaveDir ?? this.recordSaveDir,
+      castRecordFullSpeed:
+          castRecordFullSpeed ?? this.castRecordFullSpeed,
     );
   }
 }

@@ -351,6 +351,11 @@ class SourceManager {
         .length;
   }
 
+  /// 最近一次自动更新内置电台的失败原因（成功则清空）。
+  /// 设置页用它显示「上次自动更新失败：…」，否则失败是静默的，
+  /// 用户只看到清单日期一直不变，不知道是网络问题还是源失效
+  static String? lastRadioUpdateError;
+
   /// 到期就后台拉一次（启动时调，失败静默）
   Future<void> maybeAutoUpdateBuiltinRadio() async {
     final days = await getBuiltinRadioIntervalDays();
@@ -359,7 +364,8 @@ class SourceManager {
     if (at != null && DateTime.now().difference(at).inDays < days) {
       return;
     }
-    await updateBuiltinRadio();
+    final (ok, msg) = await updateBuiltinRadio();
+    lastRadioUpdateError = ok ? null : msg;
   }
 
   /// 拉取远程央视频道清单并落缓存。返回 (成功?, 说明)。

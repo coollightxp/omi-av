@@ -94,8 +94,46 @@ class RadioCatalog {
     required List<Channel> tvChannels,
     required List<ChannelCategory> builtin,
   }) {
-    final cats = [...RadioLibrary.buildCategories(), ...builtin];
-    return withTvCompanion(cats, tvChannels);
+    // 按播放地址去重：同一个台可能在「我的电台」和内置精选里各有一份，
+    // 分组里出现两遍（用户容易以为是重复添加）。先出现者优先
+    // （「我的电台」在前），后出现的同址频道直接丢弃；分类因此变空则整组去掉。
+    // 仅按地址判断：不同台共用同一地址（极少）本来也只能播其中一个。
+    final seen = <String>{};
+    final merged = <ChannelCategory>[];
+    for (final cat in [...RadioLibrary.buildCategories(), ...builtin]) {
+      final channels = <Channel>[];
+      for (final ch in cat.channels) {
+        final key = _dedupeKey(ch);
+        if (key != null && !seen.add(key)) continue;
+        channels.add(ch);
+      }
+      if (channels.isEmpty) continue;
+      merged.add(cat.copyWith(channels: channels));
+    }
+    return withTvCompanion(merged, tvChannels);
+  }
+
+  /// 去重键：取播放地址的 host+port+path+query（忽略协议，http/https
+  /// 视为同一路）。保留 query：不少电台门户用 `?id=` 区分不同台，
+  /// 丢掉会把两个不同的台误合成一个。
+  /// 无地址的频道返回 null（不参与去重）。
+  static String? _dedupeKey(Channel ch) {
+    if (ch.streamUrls.isEmpty) return null;
+    final raw = ch.streamUrls.first.trim();
+    if (raw.isEmpty) return null;
+    final key = () {
+      try {
+        final u = Uri.parse(raw);
+        final host = u.host.toLowerCase();
+        if (host.isEmpty) return raw.toLowerCase();
+        final port = u.port == 0 ? '' : ':${u.port}';
+        final query = u.hasQuery ? '?${u.query}' : '';
+        return '$host$port${u.path}$query';
+      } catch (_) {
+        return raw.toLowerCase();
+      }
+    }();
+    return key;
   }
 
   /// 电视伴音自动匹配（方案 12.6 第一组）。

@@ -5,6 +5,9 @@ class MediaCaptureService {
   static bool get isDesktop => false;
   static bool get isAndroid => false;
 
+  /// 用户指定的保存根目录（Web 端无文件系统，恒为空）
+  static String overrideDir = '';
+
   Future<String> getSaveDir(String subDir) async => '';
 
   Future<String> buildFilePath(String subDir, String name, String ext) async =>
