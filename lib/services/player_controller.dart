@@ -251,6 +251,10 @@ class PlayerController extends ChangeNotifier {
   String? _recordPath;
   // 本轮录制是否走系统级（omi_screen_recorder）；停止路径据此分流
   bool _usingSystemRecorder = false;
+  // 本轮为什么没用上系统录制（回退内核时的原因）。
+  // 最终失败提示会带上它——否则只能用「此流没有数据」一句话概括，
+  // 用户截图也看不出是 WGC 哪一步挂的（v2.3.73）
+  String? _recFallbackReason;
   // 本轮录制对应的「源标识」（频道 id + 源下标 + 地址）。
   // 换台 / 换源 / 切投屏时标识变了 = 前一段内容已经播完，必须在旧内核
   // 被拆掉之前把文件收尾（mp4 的 moov 靠 Finalize 写，内核一释放就废）
@@ -5273,12 +5277,14 @@ class PlayerController extends ChangeNotifier {
           _usingSystemRecorder = true;
           _isRecording = true;
           _recSourceKey = _currentSourceKey;
+          _recFallbackReason = null;
           CastLog.write('rec start system path=$_recordPath');
           notifyListeners();
           return true;
         }
         // 系统级失败：回退内核录制
         _lastError = '系统录制启动失败（$err），已回退内核';
+        _recFallbackReason = '启动失败：$err';
         CastLog.write('rec start system FAILED: $err -> kernel');
         OsdBus.show(_lastError!, icon: Icons.videocam_off);
       } else if (Platform.isWindows) {
@@ -5290,6 +5296,7 @@ class PlayerController extends ChangeNotifier {
         _lastError = diag == null
             ? '系统录制插件未加载，已回退内核'
             : '系统录制不可用（$diag），已回退内核';
+        _recFallbackReason = diag == null ? '插件未加载' : '不可用：$diag';
         OsdBus.show(_lastError!, icon: Icons.videocam_off);
       }
       if (vc == null || !vc.value.isInitialized) {
@@ -5370,8 +5377,12 @@ class PlayerController extends ChangeNotifier {
       try {
         final f = File(path);
         if (!await f.exists() || await f.length() == 0) {
-          _lastError = '录制失败：当前内核未能写出数据（该流不支持转封装）';
-          CastLog.write('rec stop kernel FAILED: no data');
+          final why = _recFallbackReason;
+          _lastError = why == null
+              ? '录制失败：当前内核未能写出数据（该流不支持转封装）'
+              : '录制失败：系统录制未生效（$why），内核也无法转封装该流';
+          CastLog.write('rec stop kernel FAILED: no data '
+              'fallback=${why ?? "(none)"}');
           return null;
         }
       } catch (_) {}

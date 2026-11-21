@@ -18,6 +18,7 @@
 #include <winrt/base.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -454,6 +455,15 @@ bool ScreenRecorder::IsSupported() {
 }
 
 namespace {
+std::string HexHr(HRESULT hr) {
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "0x%08lX",
+                static_cast<unsigned long>(hr));
+  return std::string(buf);
+}
+}  // namespace
+
+namespace {
 std::string Narrow(const std::wstring& w) {
   if (w.empty()) return {};
   const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
@@ -493,6 +503,9 @@ std::string ScreenRecorder::Diagnose() {
 RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
                                      int fps, int bitrateMbps) {
   RecorderResult r;
+  // 只回中文消息时，日志里只剩「不支持此接口」，看不出是哪一步：
+  // CreateForWindow、QI IDirect3DDevice、还是帧池创建（v2.3.73）
+  std::string step = "enter";
   if (running_) {
     r.error = "already recording";
     return r;
@@ -502,49 +515,72 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     return r;
   }
   try {
-    if (FAILED(MFStartup(MF_VERSION))) {
-      r.error = "MFStartup failed";
+    // 先问系统有没有 Graphics Capture：没有的话早说清，
+    // 别等到 get_activation_factory 抛 E_NOINTERFACE 才知道
+    step = "GraphicsCaptureSession::IsSupported";
+    if (!wgc::GraphicsCaptureSession::IsSupported()) {
+      r.error = "GraphicsCaptureSession not supported step=" + step;
+      return r;
+    }
+    step = "MFStartup";
+    const HRESULT hrMF = MFStartup(MF_VERSION);
+    if (FAILED(hrMF)) {
+      r.error = "MFStartup failed hr=" + HexHr(hrMF);
       return r;
     }
 
     // ---- D3D 设备（BGRA 支持，WGC 互通需要） ----
+    step = "D3D11CreateDevice";
     D3D_FEATURE_LEVEL fl{};
-    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                                 D3D11_SDK_VERSION, g.d3d.put(), &fl,
-                                 g.ctx.put())) ||
-        g.d3d == nullptr) {
+    const HRESULT hrD3D =
+        D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                          D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                          D3D11_SDK_VERSION, g.d3d.put(), &fl, g.ctx.put());
+    if (FAILED(hrD3D) || g.d3d == nullptr) {
       MFShutdown();
-      r.error = "D3D11CreateDevice failed";
+      r.error = "D3D11CreateDevice failed hr=" + HexHr(hrD3D);
       return r;
     }
 
     // ---- 包装成 WinRT IDirect3DDevice ----
+    step = "QueryInterface(IDXGIDevice)";
     winrt::com_ptr<IDXGIDevice> dxgiDev;
-    g.d3d->QueryInterface(winrt::guid_of<IDXGIDevice>(), dxgiDev.put_void());
-    winrt::com_ptr<::IInspectable> inspectable;
-    if (FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDev.get(),
-                                                    inspectable.put())) ||
-        inspectable == nullptr) {
+    const HRESULT hrQi =
+        g.d3d->QueryInterface(winrt::guid_of<IDXGIDevice>(), dxgiDev.put_void());
+    if (FAILED(hrQi) || dxgiDev == nullptr) {
       MFShutdown();
-      r.error = "CreateDirect3D11DeviceFromDXGIDevice failed";
+      r.error = "QueryInterface(IDXGIDevice) failed hr=" + HexHr(hrQi);
       return r;
     }
+    step = "CreateDirect3D11DeviceFromDXGIDevice";
+    winrt::com_ptr<::IInspectable> inspectable;
+    const HRESULT hrWrap =
+        CreateDirect3D11DeviceFromDXGIDevice(dxgiDev.get(), inspectable.put());
+    if (FAILED(hrWrap) || inspectable == nullptr) {
+      MFShutdown();
+      r.error =
+          "CreateDirect3D11DeviceFromDXGIDevice failed hr=" + HexHr(hrWrap);
+      return r;
+    }
+    step = "QueryInterface(IDirect3DDevice)";
     wgdx11::IDirect3DDevice d3dDevice =
         inspectable.as<wgdx11::IDirect3DDevice>();
 
     // ---- 捕获目标：播放器窗口 ----
+    step = "get_activation_factory(GraphicsCaptureItem)";
     auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem,
                                                  ::IGraphicsCaptureItemInterop>();
+    step = "CreateForWindow";
     wgc::GraphicsCaptureItem item{nullptr};
-    if (FAILED(interop->CreateForWindow(
-            hwnd, winrt::guid_of<wgc::GraphicsCaptureItem>(),
-            winrt::put_abi(item))) ||
-        item == nullptr) {
+    const HRESULT hrItem =
+        interop->CreateForWindow(hwnd, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                 winrt::put_abi(item));
+    if (FAILED(hrItem) || item == nullptr) {
       MFShutdown();
-      r.error = "CreateForWindow failed (窗口捕获不可用)";
+      r.error = "CreateForWindow failed hr=" + HexHr(hrItem);
       return r;
     }
+    step = "item.Size";
     const winrt::Windows::Graphics::SizeInt32 size = item.Size();
     g.width = size.Width & ~1;  // H.264 要求偶数尺寸
     g.height = size.Height & ~1;
@@ -557,6 +593,7 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     }
 
     // ---- CPU 可读的中转纹理 ----
+    step = "CreateTexture2D(staging)";
     D3D11_TEXTURE2D_DESC sd{};
     sd.Width = static_cast<UINT>(g.width);
     sd.Height = static_cast<UINT>(g.height);
@@ -574,6 +611,7 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     }
 
     // ---- 帧池（FreeThreaded：无需 DispatcherQueue） ----
+    step = "CreateFreeThreaded(FramePool)";
     g.item = item;
     g.pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
         d3dDevice, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2,
@@ -583,6 +621,7 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
       r.error = "CaptureFramePool create failed";
       return r;
     }
+    step = "FrameArrived";
     g.frameRevoker = g.pool.FrameArrived(
         winrt::auto_revoke,
         [](wgc::Direct3D11CaptureFramePool const& sender,
@@ -591,13 +630,16 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
         });
 
     // ---- SinkWriter：H.264 + AAC -> mp4 ----
+    step = "MFCreateSinkWriterFromURL";
     const std::wstring path = Utf8ToWide(pathUtf8);
     IMFSinkWriter* writer = nullptr;
-    if (path.empty() ||
-        FAILED(MFCreateSinkWriterFromURL(path.c_str(), nullptr, nullptr,
-                                         &writer)) ||
-        writer == nullptr) {
-      r.error = "MFCreateSinkWriterFromURL failed";
+    const HRESULT hrWriter =
+        path.empty() ? E_INVALIDARG
+                     : MFCreateSinkWriterFromURL(path.c_str(), nullptr, nullptr,
+                                                 &writer);
+    if (FAILED(hrWriter) || writer == nullptr) {
+      r.error = "MFCreateSinkWriterFromURL failed hr=" + HexHr(hrWriter) +
+                " pathEmpty=" + (path.empty() ? "1" : "0");
       // 清理帧池
       g.frameRevoker.revoke();
       g.pool = nullptr;
@@ -623,7 +665,7 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     HRESULT hr = writer->AddStream(vOut, &g.videoIdx);
     vOut->Release();
     if (FAILED(hr)) {
-      r.error = "AddStream(video) failed";
+      r.error = "AddStream(video) failed hr=" + HexHr(hr);
       Stop();
       return r;
     }
@@ -640,7 +682,9 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     hr = writer->SetInputMediaType(g.videoIdx, vIn, nullptr);
     vIn->Release();
     if (FAILED(hr)) {
-      r.error = "SetInputMediaType(video) failed";
+      r.error = "SetInputMediaType(video) failed hr=" + HexHr(hr) +
+                " size=" + std::to_string(g.width) + "x" +
+                std::to_string(g.height);
       Stop();
       return r;
     }
@@ -680,8 +724,10 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
       }
     }
 
-    if (FAILED(writer->BeginWriting())) {
-      r.error = "BeginWrite failed";
+    step = "BeginWriting";
+    const HRESULT hrBegin = writer->BeginWriting();
+    if (FAILED(hrBegin)) {
+      r.error = "BeginWriting failed hr=" + HexHr(hrBegin);
       Stop();
       return r;
     }
@@ -698,25 +744,29 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     g.running = true;
     running_ = true;
     // 显式会话：新投影里帧池没有 StartCapture(item) 便捷方法
+    step = "CreateCaptureSession";
     g.session = g.pool.CreateCaptureSession(g.item);
+    step = "StartCapture";
     g.session.StartCapture();
     g.encodeThread = std::thread(EncodeLoop);
     g.audioThread = std::thread(AudioLoop);
     r.ok = true;
     return r;
   } catch (const winrt::hresult_error& e) {
+    const HRESULT hr = e.code();
+    const std::string msg = winrt::to_string(e.message());
     try {
       Stop();
     } catch (...) {
     }
-    r.error = winrt::to_string(e.message());
+    r.error = "winrt step=" + step + " msg=" + msg + " hr=" + HexHr(hr);
     return r;
   } catch (...) {
     try {
       Stop();
     } catch (...) {
     }
-    r.error = "unknown error";
+    r.error = "unknown error step=" + step;
     return r;
   }
 }
