@@ -1441,7 +1441,7 @@ class PlayerController extends ChangeNotifier {
     _castPendingSeek = null;
     _castPendingSeekAt = null;
     // 换投屏内容：上一段录制收尾保存，新内容由用户重新点录制
-    await _stopCastRecordingIfAny('切换投屏');
+    await _stopRecordingIfAny('切换投屏');
     CastLog.write('cast play url: $title');
     // 诊断：记录 URL 类型与 host（不落完整 URL 里的鉴权参数）
     try {
@@ -1512,7 +1512,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> _doStopCastAndRestore({bool userInitiated = false}) async {
     if (!_isCasting) return;
     // 投屏结束先把流级录制收尾（最后分片/文件尾落盘）
-    await _stopCastRecordingIfAny(userInitiated ? '手动断开投屏' : '投屏结束');
+    await _stopRecordingIfAny(userInitiated ? '手动断开投屏' : '投屏结束');
     _isCasting = false;
     _watchPosMs = -1;
     _watchAdvanceAt = null;
@@ -1875,6 +1875,12 @@ class PlayerController extends ChangeNotifier {
     }
     // 手动切台 = 放弃等待投屏
     _clearCastWait();
+    // 内核录制绑定当前内核：换台/重播/重载都会重建内核，先把文件收尾，
+    // 否则旧内核一释放录制文件就打不开。投屏流级录制与内核无关，不在这里停
+    // （换投屏由 playCastUrl 处理）。
+    if (_isRecording && !_usingCastRecorder) {
+      await _stopRecordingIfAny('切换频道');
+    }
     // 电台不需要小窗（只有带画面的直播才值得置顶小窗）。从视频小窗切到
     // 电台时顺手还原主窗口——否则小窗里只剩一块电台底图，Windows 上
     // 还会因为原生小窗切换露一帧白底，看着像个大白框
@@ -1906,7 +1912,7 @@ class PlayerController extends ChangeNotifier {
     // 「无媒体 STOPPED」断联信号（手机端投屏 UI 随之退出），
     // 再走正常播放流程；投屏内部换片不走这里（由 playCastUrl 处理）
     if (_isCasting && !channel.id.startsWith('__dlna_cast__')) {
-      await _stopCastRecordingIfAny('切换频道');
+      await _stopRecordingIfAny('切换频道');
       _isCasting = false;
       // 用户主动切到了新的台：紧接着下面的记录会把恢复目标更新成新台，
       // 这里不再置 null（置空会让"刚切完台又投屏、投完想回去"丢失目标）
@@ -3374,9 +3380,9 @@ class PlayerController extends ChangeNotifier {
   Future<void> shutdownForExit() async {
     _audioCardClosed = true;
     _cardExitAt = DateTime.now();
-    // 投屏录制先收尾，避免退出时文件不完整
+    // 退出前：先保存录制，再通知投屏发送端断开（设备即将消失）
     try {
-      await _stopCastRecordingIfAny('退出程序');
+      await finishForExit('退出程序');
     } catch (_) {}
     // 作废在飞的换台（同 _exitFromCard），然后**真正释放内核**：
     // 只 pause 的话 isolate 销毁后 mpv 原生实例的清理没有着落，
@@ -3555,8 +3561,8 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.shutdown:
         OsdBus.show('定时关闭：15 秒后关机', icon: Icons.power_settings_new);
         notifyListeners();
-        // 关机前若还在投屏，先把链路断干净并通知发送端（v2.3.67）
-        if (_isCasting) await dlnaService.shutdownCastLink();
+        // 关机前先保存录制、再断开投屏并通知发送端（v2.3.67）
+        await finishForExit('定时关机');
         // 先发系统命令再退程序：进程先死也不影响系统照常关闭。
         // shutdown /p 立即关机、无系统倒计时通知（2.1.46 定稿）
         if (isDesktop) {
@@ -3571,7 +3577,7 @@ class PlayerController extends ChangeNotifier {
       case SleepAction.exit:
         OsdBus.show('定时关闭：退出应用', icon: Icons.bedtime);
         notifyListeners();
-        if (_isCasting) await dlnaService.shutdownCastLink();
+        await finishForExit('定时退出');
         if (isDesktop) {
           await ExitGuard.quit();
         } else if (!kIsWeb) {
@@ -4221,14 +4227,9 @@ class PlayerController extends ChangeNotifier {
     try {
       await flushSettings();
     } catch (_) {}
-    // 投屏录制先收尾，避免进程退出时最后分片/文件尾丢失
+    // 退出前：先保存录制，再通知投屏发送端断开（设备即将消失，不补 alive）
     try {
-      await _stopCastRecordingIfAny('退出程序');
-    } catch (_) {}
-    // 关窗 / 托盘退出 / 定时退出都收敛到 ExitGuard → 这里（v2.3.67）。
-    // 在投屏态下必须先通知发送端再停内核，否则手机端一直显示「已连接」。
-    try {
-      await dlnaService.shutdownCastLink();
+      await finishForExit('退出程序');
     } catch (_) {}
     // 网页态由播放页负责拆（平台视图随 widget 树销毁），这里只停内核
     try {
@@ -5203,11 +5204,16 @@ class PlayerController extends ChangeNotifier {
       // 必须用频道里的原始 URL，不能用 CastStreamProxy 包过的 127.0.0.1
       final castUrl = urls.isEmpty ? '' : urls[idx];
       if (castUrl.isNotEmpty) {
+        // 点播时长用于直连流限速：按总长度/时长估算码率，避免满速抢带宽
+        final vc0 = _videoController;
+        final durationSec =
+            vc0 == null ? 0.0 : vc0.value.duration.inMilliseconds / 1000.0;
         final err = await CastStreamRecorder.start(
           url: castUrl,
           name: _currentChannel!.name,
           userAgent: _currentChannel!.userAgent,
           referer: _currentChannel!.httpReferer,
+          durationSeconds: durationSec,
         );
         if (err == null) {
           CastStreamRecorder.onFinished = _onCastRecorderFinished;
@@ -5322,14 +5328,38 @@ class PlayerController extends ChangeNotifier {
     );
   }
 
-  /// 离开投屏/切换投屏前收尾流级录制（能保存就保存）。
-  Future<void> _stopCastRecordingIfAny(String reason) async {
-    if (!_usingCastRecorder) return;
+  /// 离开投屏/切换投屏/切台前收尾本轮录制（能保存就保存）。
+  /// 不区分投屏流级录制还是内核录制，避免回退内核时留下半截文件。
+  Future<void> _stopRecordingIfAny(String reason) async {
+    if (!_isRecording) return;
     final path = await stopRecording();
     if (path != null) {
-      CastLog.write('record cast saved reason=$reason path=$path');
+      CastLog.write('record saved reason=$reason path=$path');
       OsdBus.show('录制已保存（$reason）', icon: Icons.videocam);
     }
+  }
+
+  /// 退出/关机前的统一收尾：先把录制落盘，再通知投屏发送端断开。
+  ///
+  /// 顺序不能反：先通知发送端会让它立即清 UI，而本地录制可能还在写
+  /// 最后的分片/文件尾。这里用 [DlnaService.shutdownCastLink]（不补
+  /// alive），因为设备马上要消失；投屏结束回直播走的是
+  /// [stopCastAndRestore] 里的 kickCastClients（补 alive）。
+  Future<void> finishForExit(String reason) async {
+    if (_isRecording) {
+      final path = await stopRecording();
+      CastLog.write(
+          'rec saved before exit reason=$reason path=${path ?? "-"}');
+    }
+    // 电台录音是独立的一路下载，不受 _isRecording 管理，单独收尾
+    if (RadioRecorder.isRecording) {
+      final path = await RadioRecorder.stop();
+      CastLog.write(
+          'radio rec saved before exit reason=$reason path=${path ?? "-"}');
+    }
+    // 无论当前是否在投屏都断开 DLNA：设备即将消失，要把 byebye 发出去
+    // 并释放端口（等待投屏态的 _isCasting 已经是 false，不能只看它）
+    await dlnaService.shutdownCastLink();
   }
 
   /// 投屏录制失败原因码 → 界面文案
@@ -5896,6 +5926,9 @@ class PlayerController extends ChangeNotifier {
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
     _resetWebRecording();
+    if (RadioRecorder.isRecording) {
+      unawaited(RadioRecorder.stop());
+    }
     if (_usingCastRecorder) {
       CastStreamRecorder.onFinished = null;
       unawaited(CastStreamRecorder.stop());

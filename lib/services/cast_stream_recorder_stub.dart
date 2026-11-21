@@ -20,6 +20,7 @@ class CastStreamRecorder {
     required String name,
     String userAgent = '',
     String referer = '',
+    double durationSeconds = 0,
   }) async {
     return 'platform';
   }

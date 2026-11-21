@@ -46,6 +46,17 @@ class CastStreamRecorder {
   static const Duration _headerTimeout = Duration(seconds: 15);
   static const Duration _readTimeout = Duration(seconds: 30);
 
+  /// VOD 限速倍率：按源码率的 1.5 倍下载。
+  ///
+  /// 满速下载会额外占用约 1 份源码率的带宽（播放器自己还要 1 份），
+  /// 小水管/限速 CDN 下容易把播放器饿到转圈。压到 1.5 倍后总占用约
+  /// 2.5 倍源码率，仍比实时快，整片下载时间是时长的 2/3 左右。
+  /// 直播流不适用（分片本身按实时产生，越快下越能追平窗口）。
+  static const double _paceRatio = 1.5;
+
+  /// 直连流限速的检查粒度（每写满 512KB 校正一次，避免每块都 sleep）
+  static int _lastPaceBytes = 0;
+
   /// 启动录制。成功返回 null；失败返回原因：
   /// 'platform'（非桌面）、'busy'（已在录）、'http'（拉流失败）、
   /// 'hls'（播放列表无法解析）、'encrypted'（AES-128 加密暂不支持）、
@@ -55,6 +66,7 @@ class CastStreamRecorder {
     required String name,
     String userAgent = '',
     String referer = '',
+    double durationSeconds = 0,
   }) async {
     if (kIsWeb) return 'platform';
     if (isRecording) return 'busy';
@@ -66,6 +78,7 @@ class CastStreamRecorder {
     _stopRequested = false;
     _startedAt = null;
     bytes = 0;
+    _lastPaceBytes = 0;
     elapsed.value = Duration.zero;
     lastPath = null;
     _client = HttpClient()..connectionTimeout = _connectTimeout;
@@ -109,8 +122,8 @@ class CastStreamRecorder {
         final text = utf8.decode(body.takeBytes(), allowMalformed: true);
         result = await _startHls(text, url, name, headers);
       } else {
-        result = await _startDirect(
-            it, first, url, name, ct, headers, resp.contentLength);
+        result = await _startDirect(it, first, url, name, ct, headers,
+            resp.contentLength, durationSeconds);
       }
       // 启动失败（加密/解析失败等）时释放连接；成功则连接归录制循环使用
       if (result != null) _closeClient();
@@ -145,17 +158,23 @@ class CastStreamRecorder {
     String contentType,
     Map<String, String> headers,
     int expectedTotal,
+    double durationSeconds,
   ) async {
     final ext = _extFor(url, contentType);
     final path = await _pathFor(name, ext);
+    // 已知总长度 + 播放时长 → 估算源码率，按 1.5 倍限速；拿不到时长则不限速
+    final paceBps = (durationSeconds > 0 && expectedTotal > 0)
+        ? expectedTotal * 8 / durationSeconds * _paceRatio
+        : 0.0;
     try {
       final sink = File(path).openWrite();
       _sink = sink;
       filePath = path;
       _startClock();
       if (first != null) _write(first);
-      CastLog.write('cast rec direct path=$path ext=$ext total=$expectedTotal');
-      _loop = _directLoop(it, url, headers, expectedTotal);
+      CastLog.write('cast rec direct path=$path ext=$ext '
+          'total=$expectedTotal pace=${paceBps.round()}bps');
+      _loop = _directLoop(it, url, headers, expectedTotal, paceBps);
       return null;
     } catch (e) {
       CastLog.write('cast rec direct open file failed: $e');
@@ -250,6 +269,7 @@ class CastStreamRecorder {
     String url,
     Map<String, String> headers,
     int expectedTotal,
+    double paceBps,
   ) async {
     try {
       while (!_stopRequested) {
@@ -257,6 +277,7 @@ class CastStreamRecorder {
           while (await it.moveNext().timeout(_readTimeout)) {
             if (_stopRequested) break;
             _write(it.current);
+            await _paceDirect(paceBps);
           }
         } catch (e) {
           if (_stopRequested) break;
@@ -322,6 +343,8 @@ class CastStreamRecorder {
     var fetchFailures = 0;
     try {
       while (!_stopRequested) {
+        // VOD 列表做限速；直播分片按实时产生，全速下才能追平窗口
+        final isVod = pl.endList;
         for (var i = 0; i < pl.segments.length; i++) {
           if (_stopRequested) break;
           final seq = pl.mediaSequence + i;
@@ -330,6 +353,7 @@ class CastStreamRecorder {
             CastLog.write('cast rec hls gap ${lastSeq + 1}..${seq - 1}');
           }
           final segUrl = _resolve(url, pl.segments[i]);
+          final segStarted = isVod ? DateTime.now() : null;
           var ok = false;
           for (var attempt = 0; attempt < 3 && !_stopRequested; attempt++) {
             ok = await _append(segUrl, headers);
@@ -339,6 +363,9 @@ class CastStreamRecorder {
           }
           if (!ok) {
             CastLog.write('cast rec hls segment failed seq=$seq');
+          } else if (segStarted != null) {
+            final d = i < pl.durations.length ? pl.durations[i] : 0.0;
+            await _paceSegment(segStarted, d);
           }
           lastSeq = seq;
         }
@@ -381,6 +408,33 @@ class CastStreamRecorder {
   static Duration _pollDelay(_HlsPlaylist pl) {
     final ms = (pl.targetDuration * 500).round().clamp(1000, 5000).toInt();
     return Duration(milliseconds: ms);
+  }
+
+  /// 按目标码率给直连流限速：以开始下载时刻为基准，落后才补觉。
+  static Future<void> _paceDirect(double bps) async {
+    if (bps <= 0 || _stopRequested) return;
+    final start = _startedAt;
+    if (start == null) return;
+    if (bytes - _lastPaceBytes < 512 * 1024) return;
+    _lastPaceBytes = bytes;
+    final elapsedMs = DateTime.now().difference(start).inMilliseconds;
+    final targetMs = (bytes * 8000 / bps).round();
+    final diff = targetMs - elapsedMs;
+    if (diff > 300) {
+      await Future<void>.delayed(Duration(milliseconds: diff));
+    }
+  }
+
+  /// 按分片时长给 VOD 分片限速（1.5 倍速：6 秒分片最少用 4 秒下完）
+  static Future<void> _paceSegment(
+      DateTime started, double durationSeconds) async {
+    if (durationSeconds <= 0 || _stopRequested) return;
+    final targetMs = (durationSeconds * 1000 / _paceRatio).round();
+    final elapsedMs = DateTime.now().difference(started).inMilliseconds;
+    final diff = targetMs - elapsedMs;
+    if (diff > 100) {
+      await Future<void>.delayed(Duration(milliseconds: diff));
+    }
   }
 
   // ==================== 网络 ====================
@@ -519,6 +573,7 @@ class _HlsPlaylist {
     required this.isMaster,
     required this.variants,
     required this.segments,
+    required this.durations,
     required this.mediaSequence,
     required this.targetDuration,
     required this.endList,
@@ -529,6 +584,9 @@ class _HlsPlaylist {
   final bool isMaster;
   final List<_HlsVariant> variants;
   final List<String> segments;
+
+  /// 与 [segments] 一一对应的分片时长（秒），用于 VOD 限速
+  final List<double> durations;
   final int mediaSequence;
   final double targetDuration;
   final bool endList;
@@ -546,6 +604,7 @@ class _HlsPlaylist {
     final lines = const LineSplitter().convert(text);
     final variants = <_HlsVariant>[];
     final segments = <String>[];
+    final durations = <double>[];
     var isMaster = false;
     var mediaSequence = 0;
     var targetDuration = 4.0;
@@ -553,6 +612,7 @@ class _HlsPlaylist {
     String? mapUrl;
     var encrypted = false;
     var pendingBandwidth = -1;
+    var pendingDuration = 0.0;
 
     for (final raw in lines) {
       final line = raw.trim();
@@ -574,6 +634,8 @@ class _HlsPlaylist {
           if (method != null && method.toUpperCase() != 'NONE') {
             encrypted = true;
           }
+        } else if (line.startsWith('#EXTINF')) {
+          pendingDuration = _valueDouble(line) ?? 0;
         }
         continue;
       }
@@ -583,6 +645,8 @@ class _HlsPlaylist {
         pendingBandwidth = -1;
       } else {
         segments.add(line);
+        durations.add(pendingDuration);
+        pendingDuration = 0;
       }
     }
 
@@ -590,6 +654,7 @@ class _HlsPlaylist {
       isMaster: isMaster,
       variants: variants,
       segments: segments,
+      durations: durations,
       mediaSequence: mediaSequence,
       targetDuration: targetDuration,
       endList: endList,

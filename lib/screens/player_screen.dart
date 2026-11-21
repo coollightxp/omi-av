@@ -2087,10 +2087,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _shutdownRefresh = null;
     // 卡片确认后才真正关机（系统侧 t=0 立即执行，不再弹系统倒计时框）
     if (result == 'confirm' && mounted) {
-      // 同步/异步：关机前若还在投屏，先断开并通知发送端（v2.3.67），
-      // 否则手机端会一直停在「已连接」直到超时
+      // 关机前先保存录制、再断开投屏并通知发送端（v2.3.75），
+      // 否则手机端会一直停在「已连接」，录制文件也可能没落盘
       final c = context.read<PlayerController>();
-      if (c.isCasting) await c.dlnaService.shutdownCastLink();
+      await c.finishForExit('关机');
       await shutdownSystem();
     }
   }
