@@ -147,6 +147,16 @@ struct RecorderState {
   std::atomic<bool> encodeStop{false};
   std::atomic<bool> audioStop{false};
 
+  // Desktop Duplication 兜底（WGC interop 拿不到时）：抓整个显示器
+  // 输出再裁剪出播放器窗口区域。自建 D3D 设备（与 g.d3d 无关）
+  winrt::com_ptr<ID3D11Device> ddDevice;
+  winrt::com_ptr<ID3D11DeviceContext> ddCtx;
+  winrt::com_ptr<IDXGIOutputDuplication> ddDupl;
+  winrt::com_ptr<ID3D11Texture2D> ddStaging;
+  std::thread ddThread;
+  int ddX0 = 0, ddY0 = 0, ddW = 0, ddH = 0;  // 窗口在桌面像素坐标的裁剪窗
+  bool useDD = false;
+
   // 诊断：累计成功拷贝的帧数 / 写出的视频帧数
   std::atomic<uint64_t> framesCaptured{0};
   std::atomic<uint64_t> framesEncoded{0};
@@ -424,6 +434,142 @@ void EncodeLoop() {
   CoUninitialize();
 }
 
+// ---------------- Desktop Duplication（WGC 不可用时的兜底） ----------------
+// 找窗口所在显示器对应的 DXGI output，DuplicateOutput 抓整个桌面，
+// 采集循环里按窗口矩形裁剪后送 EncodeLoop（复用同一编码管线）。
+bool StartDesktopDuplication(HWND hwnd, std::string& err) {
+  const HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+  MONITORINFOEXW mi{};
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(mon, &mi)) { err = "GetMonitorInfo failed"; return false; }
+
+  winrt::com_ptr<IDXGIFactory1> fac;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(fac.put()))) || !fac) {
+    err = "CreateDXGIFactory1 failed"; return false;
+  }
+  winrt::com_ptr<IDXGIAdapter1> adapter;
+  winrt::com_ptr<IDXGIOutput> target;
+  for (UINT a = 0;; ++a) {
+    winrt::com_ptr<IDXGIAdapter1> ad;
+    if (fac->EnumAdapters1(a, ad.put()) == DXGI_ERROR_NOT_FOUND || !ad) break;
+    for (UINT o = 0;; ++o) {
+      winrt::com_ptr<IDXGIOutput> out;
+      if (ad->EnumOutputs(o, out.put()) == DXGI_ERROR_NOT_FOUND || !out) break;
+      DXGI_OUTPUT_DESC desc{};
+      if (SUCCEEDED(out->GetDesc(&desc)) &&
+          lstrcmpiW(desc.DeviceName, mi.szDevice) == 0) {
+        adapter = ad;
+        target = out;
+        break;
+      }
+    }
+    if (target) break;
+  }
+  if (!target || !adapter) { err = "output not found"; return false; }
+
+  winrt::com_ptr<ID3D11Device> dev;
+  winrt::com_ptr<ID3D11DeviceContext> ctx;
+  D3D_FEATURE_LEVEL fl{};
+  if (FAILED(D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                               0, nullptr, 0, D3D11_SDK_VERSION, dev.put(),
+                               &fl, ctx.put())) ||
+      !dev) {
+    err = "D3D11CreateDevice failed"; return false;
+  }
+  winrt::com_ptr<IDXGIOutput1> out1;
+  if (FAILED(target->QueryInterface(IID_PPV_ARGS(out1.put()))) || !out1) {
+    err = "QI IDXGIOutput1 failed"; return false;
+  }
+  winrt::com_ptr<IDXGIOutputDuplication> dupl;
+  if (FAILED(out1->DuplicateOutput(dev.get(), dupl.put())) || !dupl) {
+    err = "DuplicateOutput failed"; return false;
+  }
+  DXGI_OUTDUPL_DESC ddesc{};
+  dupl->GetDesc(&ddesc);
+  const int outW = static_cast<int>(ddesc.ModeDesc.Width);
+  const int outH = static_cast<int>(ddesc.ModeDesc.Height);
+
+  RECT rc{};
+  if (!GetClientRect(hwnd, &rc) || rc.right < 2 || rc.bottom < 2) {
+    err = "GetClientRect failed"; return false;
+  }
+  POINT tl{0, 0};
+  ClientToScreen(hwnd, &tl);
+  int x0 = tl.x, y0 = tl.y, w = rc.right, h = rc.bottom;
+  if (x0 < 0) { w += x0; x0 = 0; }
+  if (y0 < 0) { h += y0; y0 = 0; }
+  if (x0 + w > outW) w = outW - x0;
+  if (y0 + h > outH) h = outH - y0;
+  w &= ~1;
+  h &= ~1;
+  if (w < 2 || h < 2) { err = "window outside output"; return false; }
+
+  D3D11_TEXTURE2D_DESC sd{};
+  sd.Width = static_cast<UINT>(outW);
+  sd.Height = static_cast<UINT>(outH);
+  sd.MipLevels = 1;
+  sd.ArraySize = 1;
+  sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  sd.SampleDesc.Count = 1;
+  sd.Usage = D3D11_USAGE_STAGING;
+  sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  winrt::com_ptr<ID3D11Texture2D> staging;
+  if (FAILED(dev->CreateTexture2D(&sd, nullptr, staging.put())) || !staging) {
+    err = "CreateTexture2D failed"; return false;
+  }
+
+  g.ddDevice = dev;
+  g.ddCtx = ctx;
+  g.ddDupl = dupl;
+  g.ddStaging = staging;
+  g.ddX0 = x0;
+  g.ddY0 = y0;
+  g.ddW = w;
+  g.ddH = h;
+  g.width = w;
+  g.height = h;
+  return true;
+}
+
+void DdLoop() {
+  while (!g.encodeStop.load()) {
+    DXGI_OUTDUPL_FRAME_INFO info{};
+    winrt::com_ptr<IDXGIResource> res;
+    const HRESULT hr = g.ddDupl->AcquireNextFrame(100, &info, res.put());
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue;
+    if (FAILED(hr)) break;  // ACCESS_LOST 等直接结束捕获
+    winrt::com_ptr<ID3D11Texture2D> tex;
+    if (SUCCEEDED(res->QueryInterface(IID_PPV_ARGS(tex.put()))) && tex) {
+      g.ddCtx->CopyResource(g.ddStaging.get(), tex.get());
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      if (SUCCEEDED(g.ddCtx->Map(g.ddStaging.get(), 0, D3D11_MAP_READ, 0,
+                                 &mapped))) {
+        const int cw = g.ddW < g.width ? g.ddW : g.width;
+        const int ch = g.ddH < g.height ? g.ddH : g.height;
+        {
+          std::lock_guard<std::mutex> lk(g.frameMutex);
+          g.pendingFrame.assign(
+              static_cast<size_t>(g.width) * g.height * 4, 0);
+          const uint8_t* src = static_cast<const uint8_t*>(mapped.pData);
+          for (int y = 0; y < ch; ++y) {
+            std::memcpy(
+                g.pendingFrame.data() +
+                    static_cast<size_t>(y) * g.width * 4,
+                src + static_cast<size_t>(g.ddY0 + y) * mapped.RowPitch +
+                    static_cast<size_t>(g.ddX0) * 4,
+                static_cast<size_t>(cw) * 4);
+          }
+          g.pendingQpc = QpcNow();
+          g.hasPending = true;
+        }
+        g.ddCtx->Unmap(g.ddStaging.get(), 0);
+        g.framesCaptured.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    g.ddDupl->ReleaseFrame();
+  }
+}
+
 }  // namespace
 
 // ---------------- 对外接口 ----------------
@@ -542,92 +688,120 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
       return r;
     }
 
-    // ---- 包装成 WinRT IDirect3DDevice ----
-    step = "QueryInterface(IDXGIDevice)";
-    winrt::com_ptr<IDXGIDevice> dxgiDev;
-    const HRESULT hrQi =
-        g.d3d->QueryInterface(winrt::guid_of<IDXGIDevice>(), dxgiDev.put_void());
-    if (FAILED(hrQi) || dxgiDev == nullptr) {
-      MFShutdown();
-      r.error = "QueryInterface(IDXGIDevice) failed hr=" + HexHr(hrQi);
-      return r;
-    }
-    step = "CreateDirect3D11DeviceFromDXGIDevice";
-    winrt::com_ptr<::IInspectable> inspectable;
-    const HRESULT hrWrap =
-        CreateDirect3D11DeviceFromDXGIDevice(dxgiDev.get(), inspectable.put());
-    if (FAILED(hrWrap) || inspectable == nullptr) {
-      MFShutdown();
-      r.error =
-          "CreateDirect3D11DeviceFromDXGIDevice failed hr=" + HexHr(hrWrap);
-      return r;
-    }
-    step = "QueryInterface(IDirect3DDevice)";
-    wgdx11::IDirect3DDevice d3dDevice =
-        inspectable.as<wgdx11::IDirect3DDevice>();
-
-    // ---- 捕获目标：播放器窗口 ----
-    step = "get_activation_factory(GraphicsCaptureItem)";
-    auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem,
-                                                 ::IGraphicsCaptureItemInterop>();
-    step = "CreateForWindow";
+    // ---- 捕获源：优先 WGC 抓窗口；interop 拿不到就退桌面复制 ----
+    // v2.3.73 实测：两参 get_activation_factory(自定义 interop IID) 在
+    // 部分机器上被 RoGetActivationFactory 以 E_NOINTERFACE 拒绝，而
+    // GraphicsCaptureSession::IsSupported() 明明是 true。改用两步写法
+    // （先拿默认 factory 再 QI），仍失败则走 DXGI Desktop Duplication。
+    g.useDD = false;
+    wgdx11::IDirect3DDevice d3dDevice{nullptr};
     wgc::GraphicsCaptureItem item{nullptr};
-    const HRESULT hrItem =
-        interop->CreateForWindow(hwnd, winrt::guid_of<wgc::GraphicsCaptureItem>(),
-                                 winrt::put_abi(item));
-    if (FAILED(hrItem) || item == nullptr) {
-      MFShutdown();
-      r.error = "CreateForWindow failed hr=" + HexHr(hrItem);
-      return r;
+    std::string wgcErr;
+    {
+      step = "QueryInterface(IDXGIDevice)";
+      winrt::com_ptr<IDXGIDevice> dxgiDev;
+      const HRESULT hrQi =
+          g.d3d->QueryInterface(winrt::guid_of<IDXGIDevice>(), dxgiDev.put_void());
+      if (FAILED(hrQi) || dxgiDev == nullptr) {
+        wgcErr = "QueryInterface(IDXGIDevice) hr=" + HexHr(hrQi);
+      } else {
+        step = "CreateDirect3D11DeviceFromDXGIDevice";
+        winrt::com_ptr<::IInspectable> inspectable;
+        const HRESULT hrWrap = CreateDirect3D11DeviceFromDXGIDevice(
+            dxgiDev.get(), inspectable.put());
+        if (FAILED(hrWrap) || inspectable == nullptr) {
+          wgcErr = "CreateDirect3D11DeviceFromDXGIDevice hr=" + HexHr(hrWrap);
+        } else {
+          step = "QueryInterface(IDirect3DDevice)";
+          try {
+            d3dDevice = inspectable.as<wgdx11::IDirect3DDevice>();
+          } catch (...) {
+            wgcErr = "QueryInterface(IDirect3DDevice) failed";
+          }
+        }
+      }
+      if (wgcErr.empty()) {
+        step = "get_activation_factory(GraphicsCaptureItem)";
+        try {
+          auto itemFactory =
+              winrt::get_activation_factory<wgc::GraphicsCaptureItem>();
+          step = "factory.as(IGraphicsCaptureItemInterop)";
+          auto interop = itemFactory.as<::IGraphicsCaptureItemInterop>();
+          step = "CreateForWindow";
+          const HRESULT hrItem = interop->CreateForWindow(
+              hwnd, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+              winrt::put_abi(item));
+          if (FAILED(hrItem) || item == nullptr) {
+            wgcErr = "CreateForWindow hr=" + HexHr(hrItem);
+          }
+        } catch (const winrt::hresult_error& e) {
+          wgcErr = winrt::to_string(e.message()) + " hr=" + HexHr(e.code());
+        } catch (...) {
+          wgcErr = "unknown winrt error";
+        }
+      }
+      if (wgcErr.empty()) {
+        step = "item.Size";
+        const winrt::Windows::Graphics::SizeInt32 size = item.Size();
+        g.width = size.Width & ~1;  // H.264 要求偶数尺寸
+        g.height = size.Height & ~1;
+        if (g.width < 2 || g.height < 2) wgcErr = "window size invalid";
+      }
     }
-    step = "item.Size";
-    const winrt::Windows::Graphics::SizeInt32 size = item.Size();
-    g.width = size.Width & ~1;  // H.264 要求偶数尺寸
-    g.height = size.Height & ~1;
+    const bool wgc = wgcErr.empty();
     g.fps = fps > 0 && fps <= 60 ? fps : 30;
     g.bitrateMbps = bitrateMbps > 0 && bitrateMbps <= 60 ? bitrateMbps : 8;
-    if (g.width < 2 || g.height < 2) {
-      MFShutdown();
-      r.error = "window size invalid";
-      return r;
+
+    if (!wgc) {
+      // ---- 桌面复制兜底：DXGI Output Duplication，Win8+ 都有 ----
+      step = "DesktopDuplication";
+      std::string ddErr;
+      if (!StartDesktopDuplication(hwnd, ddErr)) {
+        MFShutdown();
+        r.error = "WGC(" + wgcErr + ") 且桌面复制(" + ddErr + ")";
+        return r;
+      }
+      g.useDD = true;
     }
 
-    // ---- CPU 可读的中转纹理 ----
-    step = "CreateTexture2D(staging)";
-    D3D11_TEXTURE2D_DESC sd{};
-    sd.Width = static_cast<UINT>(g.width);
-    sd.Height = static_cast<UINT>(g.height);
-    sd.MipLevels = 1;
-    sd.ArraySize = 1;
-    sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    sd.SampleDesc.Count = 1;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    if (FAILED(g.d3d->CreateTexture2D(&sd, nullptr, g.staging.put())) ||
-        g.staging == nullptr) {
-      MFShutdown();
-      r.error = "CreateTexture2D(staging) failed";
-      return r;
-    }
+    if (wgc) {
+      // ---- CPU 可读的中转纹理 ----
+      step = "CreateTexture2D(staging)";
+      D3D11_TEXTURE2D_DESC sd{};
+      sd.Width = static_cast<UINT>(g.width);
+      sd.Height = static_cast<UINT>(g.height);
+      sd.MipLevels = 1;
+      sd.ArraySize = 1;
+      sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      sd.SampleDesc.Count = 1;
+      sd.Usage = D3D11_USAGE_STAGING;
+      sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      if (FAILED(g.d3d->CreateTexture2D(&sd, nullptr, g.staging.put())) ||
+          g.staging == nullptr) {
+        MFShutdown();
+        r.error = "CreateTexture2D(staging) failed";
+        return r;
+      }
 
-    // ---- 帧池（FreeThreaded：无需 DispatcherQueue） ----
-    step = "CreateFreeThreaded(FramePool)";
-    g.item = item;
-    g.pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
-        d3dDevice, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2,
-        winrt::Windows::Graphics::SizeInt32{g.width, g.height});
-    if (!g.pool) {
-      MFShutdown();
-      r.error = "CaptureFramePool create failed";
-      return r;
+      // ---- 帧池（FreeThreaded：无需 DispatcherQueue） ----
+      step = "CreateFreeThreaded(FramePool)";
+      g.item = item;
+      g.pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
+          d3dDevice, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2,
+          winrt::Windows::Graphics::SizeInt32{g.width, g.height});
+      if (!g.pool) {
+        MFShutdown();
+        r.error = "CaptureFramePool create failed";
+        return r;
+      }
+      step = "FrameArrived";
+      g.frameRevoker = g.pool.FrameArrived(
+          winrt::auto_revoke,
+          [](wgc::Direct3D11CaptureFramePool const& sender,
+             winrt::Windows::Foundation::IInspectable const&) {
+            OnFrame(sender);
+          });
     }
-    step = "FrameArrived";
-    g.frameRevoker = g.pool.FrameArrived(
-        winrt::auto_revoke,
-        [](wgc::Direct3D11CaptureFramePool const& sender,
-           winrt::Windows::Foundation::IInspectable const&) {
-          OnFrame(sender);
-        });
 
     // ---- SinkWriter：H.264 + AAC -> mp4 ----
     step = "MFCreateSinkWriterFromURL";
@@ -743,11 +917,16 @@ RecorderResult ScreenRecorder::Start(HWND hwnd, const std::string& pathUtf8,
     g.framesEncoded = 0;
     g.running = true;
     running_ = true;
-    // 显式会话：新投影里帧池没有 StartCapture(item) 便捷方法
-    step = "CreateCaptureSession";
-    g.session = g.pool.CreateCaptureSession(g.item);
-    step = "StartCapture";
-    g.session.StartCapture();
+    if (g.useDD) {
+      step = "StartDesktopDuplicationLoop";
+      g.ddThread = std::thread(DdLoop);
+    } else {
+      // 显式会话：新投影里帧池没有 StartCapture(item) 便捷方法
+      step = "CreateCaptureSession";
+      g.session = g.pool.CreateCaptureSession(g.item);
+      step = "StartCapture";
+      g.session.StartCapture();
+    }
     g.encodeThread = std::thread(EncodeLoop);
     g.audioThread = std::thread(AudioLoop);
     r.ok = true;
@@ -807,6 +986,14 @@ int64_t ScreenRecorder::Stop() {
   g.staging = nullptr;
   g.ctx = nullptr;
   g.d3d = nullptr;
+
+  // 桌面复制资源（encodeStop 已置位，ddThread 会自行退出）
+  if (g.ddThread.joinable()) g.ddThread.join();
+  g.ddDupl = nullptr;
+  g.ddStaging = nullptr;
+  g.ddCtx = nullptr;
+  g.ddDevice = nullptr;
+  g.useDD = false;
 
   // 音频资源
   if (g.aClient != nullptr) {
