@@ -49,12 +49,23 @@ constexpr GUID kVirtualAudioDeviceProcessLoopback = {
 constexpr GUID kIeeeFloatSubtype = {
     0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 
-// ActivateAudioInterface 在部分 SDK 版本的 mmdeviceapi.h 里被多重守卫
-// 挡住（NTDDI 之外还有其他条件），签名固定，这里直接自声明，
-// 符号由 mmdevapi.lib 提供；与头文件声明重复时也兼容
-extern "C" HRESULT __stdcall ActivateAudioInterface(
-    const GUID* virtualAudioDevice, const PROPVARIANT* activationParams,
-    REFIID riid, void** outInterface);
+// ActivateAudioInterface 在部分 SDK 的导入库/头文件守卫不一致（静态链接
+// LNK2019），改为运行时从 mmdevapi.dll 动态解析，签名固定、行为一致
+typedef HRESULT(__stdcall* ActivateAudioInterfaceProc)(const GUID*,
+                                                       const PROPVARIANT*,
+                                                       REFIID, void**);
+
+ActivateAudioInterfaceProc ResolveActivateAudioInterface() {
+  static ActivateAudioInterfaceProc proc = nullptr;
+  if (proc == nullptr) {
+    HMODULE h = LoadLibraryW(L"mmdevapi.dll");
+    if (h != nullptr) {
+      proc = reinterpret_cast<ActivateAudioInterfaceProc>(
+          GetProcAddress(h, "ActivateAudioInterface"));
+    }
+  }
+  return proc;
+}
 
 std::wstring Utf8ToWide(const std::string& s) {
   if (s.empty()) return std::wstring();
@@ -202,8 +213,11 @@ bool SetupAudioCapture() {
     pv.blob.cbSize = sizeof(params);
     pv.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
     IAudioClient* client = nullptr;
-    const HRESULT hr = ActivateAudioInterface(
-        &kVirtualAudioDeviceProcessLoopback, &pv, IID_PPV_ARGS(&client));
+    const auto activate = ResolveActivateAudioInterface();
+    const HRESULT hr = activate != nullptr
+                           ? activate(&kVirtualAudioDeviceProcessLoopback, &pv,
+                                      IID_PPV_ARGS(&client))
+                           : E_NOTIMPL;
     if (SUCCEEDED(hr) && client != nullptr) {
       WAVEFORMATEX* fmt = nullptr;
       if (SUCCEEDED(client->GetMixFormat(&fmt)) && IsFloatFormat(fmt)) {

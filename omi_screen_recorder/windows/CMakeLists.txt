@@ -29,14 +29,13 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE
   flutter
-  flutter_wrapper_app
+  flutter_wrapper_plugin
   d3d11
   dxgi
   mfplat
   mfuuid
   mfreadwrite
   wmcodecdspuuid
-  mmdevapi
   windowsapp
   ole32
 )
