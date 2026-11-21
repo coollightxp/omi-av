@@ -4095,7 +4095,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   }
 
   Future<void> _toggleRecording(PlayerController controller) async {
-    if (!controller.isDesktop) return;
+    if (!controller.canCapture) return;
     if (controller.isRecording) {
       final path = await controller.stopRecording();
       if (mounted) {
@@ -4111,8 +4111,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _showOsd(
           ok
               ? (controller.webPageActive
-                  ? '开始录制网页视频，保存到程序所在文件夹的 recordings 子文件夹'
-                  : '开始录制，视频保存到程序所在文件夹的 recordings 子文件夹')
+                  ? '开始录制网页视频，保存到 recordings 文件夹'
+                  : '开始录制，视频保存到 recordings 文件夹')
               : (controller.lastError ?? '录制失败'),
           icon: Icons.fiber_manual_record,
           duration: const Duration(seconds: 2),

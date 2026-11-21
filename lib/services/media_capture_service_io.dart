@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// 媒体捕获服务 - 桌面端录制与截图的文件存储
 /// 录制/截帧由 fvp(MDK) 原生完成，这里只负责固定目录与 PNG 编码
@@ -11,8 +12,19 @@ class MediaCaptureService {
   static bool get isDesktop =>
       !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
 
+  /// 安卓也支持截图/录制（应用文档目录，无需存储权限）
+  static bool get isAndroid => !kIsWeb && Platform.isAndroid;
+
   /// 获取保存目录（截图/录制优先保存到 程序所在目录/screenshots、recordings）
   Future<String> getSaveDir(String subDir) async {
+    // 安卓：应用文档目录。与 RadioRecorder 的 radio_records 同根，
+    // 避免「录音库打开一个文件夹、实际文件在另一个」。
+    if (isAndroid) {
+      final docs = await getApplicationDocumentsDirectory();
+      final target = Directory('${docs.path}/$subDir');
+      await target.create(recursive: true);
+      return target.path;
+    }
     // 优先：exe 所在文件夹下的子文件夹
     try {
       final exeDir = File(Platform.resolvedExecutable).parent.path;

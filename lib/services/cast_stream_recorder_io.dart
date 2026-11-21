@@ -57,6 +57,9 @@ class CastStreamRecorder {
   /// 直连流限速的检查粒度（每写满 512KB 校正一次，避免每块都 sleep）
   static int _lastPaceBytes = 0;
 
+  /// 保存子目录：投屏录制用 recordings，电台 HLS 录音用 radio_records
+  static String _subDir = 'recordings';
+
   /// 启动录制。成功返回 null；失败返回原因：
   /// 'platform'（非桌面）、'busy'（已在录）、'http'（拉流失败）、
   /// 'hls'（播放列表无法解析）、'encrypted'（AES-128 加密暂不支持）、
@@ -67,9 +70,12 @@ class CastStreamRecorder {
     String userAgent = '',
     String referer = '',
     double durationSeconds = 0,
+    String subDir = 'recordings',
   }) async {
     if (kIsWeb) return 'platform';
     if (isRecording) return 'busy';
+
+    _subDir = subDir;
 
     final headers = <String, String>{};
     if (userAgent.trim().isNotEmpty) headers['User-Agent'] = userAgent.trim();
@@ -206,7 +212,19 @@ class CastStreamRecorder {
       CastLog.write('cast rec hls encrypted (AES-128) unsupported');
       return 'encrypted';
     }
-    final ext = pl.mapUrl != null ? 'mp4' : 'ts';
+    // 音频 HLS（电台常见）分片多是 .aac：直接拼成 .aac，播放器识别更好；
+    // 其余（含视频）仍按 TS/fMP4 落盘
+    final firstSegPath = pl.segments.isEmpty
+        ? ''
+        : Uri.parse(_resolve(url, pl.segments.first)).path.toLowerCase();
+    final String ext;
+    if (pl.mapUrl != null) {
+      ext = 'mp4';
+    } else if (_subDir == 'radio_records' && firstSegPath.endsWith('.aac')) {
+      ext = 'aac';
+    } else {
+      ext = 'ts';
+    }
     final path = await _pathFor(name, ext);
     // fMP4 的初始化段必须先写一次
     Uint8List? mapBytes;
@@ -504,7 +522,7 @@ class CastStreamRecorder {
   // ==================== 落盘与状态 ====================
 
   static Future<String> _pathFor(String name, String ext) =>
-      MediaCaptureService().buildFilePath('recordings', name, ext);
+      MediaCaptureService().buildFilePath(_subDir, name, ext);
 
   static void _write(List<int> chunk) {
     final sink = _sink;

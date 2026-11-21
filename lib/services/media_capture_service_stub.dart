@@ -1,8 +1,9 @@
 import 'dart:typed_data';
 
-/// Web/无文件系统平台的空实现（截图/录制入口仅桌面端开放）
+/// Web/无文件系统平台的空实现（截图/录制入口仅桌面端与安卓开放）
 class MediaCaptureService {
   static bool get isDesktop => false;
+  static bool get isAndroid => false;
 
   Future<String> getSaveDir(String subDir) async => '';
 

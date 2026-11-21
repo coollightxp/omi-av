@@ -21,6 +21,7 @@ class CastStreamRecorder {
     String userAgent = '',
     String referer = '',
     double durationSeconds = 0,
+    String subDir = 'recordings',
   }) async {
     return 'platform';
   }

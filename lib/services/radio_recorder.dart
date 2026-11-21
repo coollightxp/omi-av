@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'cast_stream_recorder.dart';
 import 'media_capture_service.dart';
 
 /// 电台录音（方案 12.3 第一档）：边听边录。
@@ -21,14 +22,23 @@ class RadioRecorder {
   static StreamSubscription<List<int>>? _sub;
   static IOSink? _sink;
 
-  static bool get isRecording => _sink != null;
+  /// HLS 电台走 [CastStreamRecorder]（分片下载/拼接），其余走直连落盘
+  static bool _usingStream = false;
+
+  static bool get isRecording =>
+      _usingStream ? CastStreamRecorder.isRecording : _sink != null;
 
   static String? filePath;
   static String title = '';
-  static int bytes = 0;
+
+  static int _bytes = 0;
+  static int get bytes => _usingStream ? CastStreamRecorder.bytes : _bytes;
 
   /// 录制时长（每秒走字，播放页徽标直接订阅）
-  static final ValueNotifier<Duration> elapsed = ValueNotifier(Duration.zero);
+  static final ValueNotifier<Duration> _elapsed =
+      ValueNotifier(Duration.zero);
+  static ValueNotifier<Duration> get elapsed =>
+      _usingStream ? CastStreamRecorder.elapsed : _elapsed;
 
   static DateTime? _startedAt;
   static Timer? _tick;
@@ -44,11 +54,29 @@ class RadioRecorder {
     if (kIsWeb) return 'platform';
     if (isRecording) return 'busy';
     final lower = url.toLowerCase().split('?').first;
-    if (lower.endsWith('.m3u8') ||
-        lower.endsWith('.mpd') ||
-        lower.endsWith('.m3u')) {
+    // HLS 交给流级录制器：分片下载/拼接与投屏录制共用一套实现，
+    // 产物为 .ts/.mp4，原始字节不转码；DASH(.mpd)/.m3u 仍不支持。
+    if (lower.endsWith('.m3u8')) {
+      final err = await CastStreamRecorder.start(
+        url: url,
+        name: name,
+        userAgent: userAgent,
+        referer: referer,
+        subDir: 'radio_records',
+      );
+      if (err == null) {
+        _usingStream = true;
+        filePath = CastStreamRecorder.filePath;
+        title = name;
+      }
+      return err;
+    }
+    if (lower.endsWith('.mpd') || lower.endsWith('.m3u')) {
       return 'hls';
     }
+    // 上一次 HLS 录制自然结束后 _usingStream 仍为 true，这里复位，
+    // 否则 isRecording 会去代理已经停止的流录制器
+    _usingStream = false;
     var ext = 'mp3';
     for (final e in const ['aac', 'm4a', 'ogg', 'opus', 'flac', 'wav']) {
       if (lower.endsWith('.$e')) {
@@ -71,15 +99,15 @@ class RadioRecorder {
       final sink = File(path).openWrite();
       filePath = path;
       title = name;
-      bytes = 0;
+      _bytes = 0;
       _startedAt = DateTime.now();
-      elapsed.value = Duration.zero;
+      _elapsed.value = Duration.zero;
       _sink = sink;
       _req = req;
       _client = client;
       _sub = resp.listen(
         (chunk) {
-          bytes += chunk.length;
+          _bytes += chunk.length;
           sink.add(chunk);
         },
         onError: (_) => unawaited(stop()),
@@ -88,7 +116,7 @@ class RadioRecorder {
       );
       _tick = Timer.periodic(const Duration(seconds: 1), (_) {
         final s = _startedAt;
-        if (s != null) elapsed.value = DateTime.now().difference(s);
+        if (s != null) _elapsed.value = DateTime.now().difference(s);
       });
       return null;
     } catch (_) {
@@ -103,6 +131,15 @@ class RadioRecorder {
 
   /// 停止录音，返回落盘文件路径（未在录返回 null）
   static Future<String?> stop() async {
+    // HLS 分支：由流级录制器收尾
+    if (_usingStream) {
+      _usingStream = false;
+      final path = await CastStreamRecorder.stop();
+      filePath = null;
+      _startedAt = null;
+      _elapsed.value = Duration.zero;
+      return path;
+    }
     if (_sink == null) return null;
     final path = filePath;
     _tick?.cancel();
@@ -126,7 +163,7 @@ class RadioRecorder {
     _client = null;
     filePath = null;
     _startedAt = null;
-    elapsed.value = Duration.zero;
+    _elapsed.value = Duration.zero;
     return path;
   }
 

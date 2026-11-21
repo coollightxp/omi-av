@@ -345,6 +345,11 @@ class PlayerController extends ChangeNotifier {
   /// 网页录制已落盘字节数（录制指示器显示）
   int get webRecordingBytes => _webRecBytes;
   bool get isDesktop => !kIsWeb && MediaCaptureService.isDesktop;
+
+  /// 能否截图/录制：桌面端 + 安卓（安卓内核同样提供截帧与录制）
+  bool get canCapture =>
+      !kIsWeb &&
+      (MediaCaptureService.isDesktop || MediaCaptureService.isAndroid);
   bool get isFullscreen => _isFullscreen;
   bool get isCasting => _isCasting;
   bool get isMuted => _isMuted;
@@ -1442,6 +1447,11 @@ class PlayerController extends ChangeNotifier {
     _castPendingSeekAt = null;
     // 换投屏内容：上一段录制收尾保存，新内容由用户重新点录制
     await _stopRecordingIfAny('切换投屏');
+    // 投屏意味着离开电台：电台录音是独立连接，也要收尾
+    if (RadioRecorder.isRecording) {
+      final p = await RadioRecorder.stop();
+      if (p != null) OsdBus.show('录音已保存（切换投屏）', icon: Icons.mic);
+    }
     CastLog.write('cast play url: $title');
     // 诊断：记录 URL 类型与 host（不落完整 URL 里的鉴权参数）
     try {
@@ -1880,6 +1890,15 @@ class PlayerController extends ChangeNotifier {
     // （换投屏由 playCastUrl 处理）。
     if (_isRecording && !_usingCastRecorder) {
       await _stopRecordingIfAny('切换频道');
+    }
+    // 电台录音是独立连接：切到别的台前先收尾，否则界面显示新台在录，
+    // 实际录的还是旧台的流
+    if (RadioRecorder.isRecording && _currentChannel?.id != channel.id) {
+      final path = await RadioRecorder.stop();
+      notifyListeners();
+      if (path != null) {
+        OsdBus.show('录音已保存（切换频道）', icon: Icons.mic);
+      }
     }
     // 电台不需要小窗（只有带画面的直播才值得置顶小窗）。从视频小窗切到
     // 电台时顺手还原主窗口——否则小窗里只剩一块电台底图，Windows 上
@@ -5072,7 +5091,8 @@ class PlayerController extends ChangeNotifier {
       case 'busy':
         break;
       case 'hls':
-        OsdBus.show('该台是 HLS 流，暂不支持录音', icon: Icons.warning_amber_rounded);
+        OsdBus.show('该台是 DASH/M3U 列表，暂不支持录音',
+            icon: Icons.warning_amber_rounded);
       default:
         OsdBus.show('录音启动失败（流不可直连）', icon: Icons.error_outline);
     }
@@ -5186,8 +5206,8 @@ class PlayerController extends ChangeNotifier {
       CastLog.write('record start failed: no current channel');
       return false;
     }
-    if (!isDesktop) {
-      _lastError = '录制失败：非桌面平台';
+    if (!canCapture) {
+      _lastError = '录制失败：当前平台不支持';
       return false;
     }
     if (_isRecording) {
