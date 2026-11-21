@@ -2628,6 +2628,21 @@ jobs:
       - name: Build Windows
         run: flutter build windows --release
 
+      # 硬门禁：插件 dll 必须在 Release 目录里。以前只有 generated_plugins.cmake
+      # 的自检，那只证明「参与编译」，不证明「进了包」——CMakeLists 少了
+      # install() 时 dll 会留在 build\windows\x64\plugins\ 下，包里的程序
+      # 运行时注册不上插件，用户端看到的就是「投屏录制没有数据」。
+      - name: Verify recorder dll in bundle
+        shell: pwsh
+        run: |
+          $dll = 'build/windows/x64/runner/Release/omi_screen_recorder_plugin.dll'
+          if (Test-Path $dll) {
+            'recorder dll OK: ' + (Get-Item $dll).Length + ' bytes'
+          } else {
+            Write-Host '::error::omi_screen_recorder_plugin.dll MISSING from Release bundle'
+            Get-ChildItem build/windows/x64/runner/Release -Filter *.dll | ForEach-Object { $_.Name }
+          }
+
       - name: Zip Windows build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath Omi-windows.zip
 

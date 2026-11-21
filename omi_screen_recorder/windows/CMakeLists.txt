@@ -44,3 +44,18 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
 # <omi_screen_recorder/...>，头文件目录必须传播给 runner 目标
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+# 必须 install 到 runner 的 Release 目录：flutter 的插件模板里这一行就是
+# 「把 dll 拷进包里」的唯一途径。缺了它 —— dll 只躺在
+# build\windows\x64\plugins\ 下，打包出来的 Release 里没有它，
+# 运行时注册不上 -> MissingPluginException -> isSupported 恒 false ->
+# 静默回退内核转封装（投屏因此永远「没有数据」）。v2.3.72 补上。
+if(NOT DEFINED INSTALL_BUNDLE_LIB_DIR)
+  set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/.")
+endif()
+# Windows 上 DLL 属于 RUNTIME 产物，只写 LIBRARY 有不被安装的风险；
+# 三个都写上，保证 dll 一定落到 Release 目录
+install(TARGETS ${PLUGIN_NAME}
+  RUNTIME DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime
+  LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime
+  ARCHIVE DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
