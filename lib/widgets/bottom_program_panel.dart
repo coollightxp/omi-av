@@ -569,7 +569,10 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.canToggleWebNative ? widget.onSwitchWebNative : null,
         ),
       if (c.isCasting)
-        _KbAction('cast', Icons.cast_connected, '断开投屏', c.stopCastAndRestore),
+        // userInitiated=true：手动断开要立刻给发送端发断开信号，
+        // 而不是等 800ms 的连播防抖窗口
+        _KbAction('cast', Icons.cast_connected, '断开投屏',
+            () => c.stopCastAndRestore(userInitiated: true)),
       // 电台录音（电台专属）：边听边录，流内直抓不转码——
       // 显示在面板最尾部，声明也必须放在最后
       if (isRadio)

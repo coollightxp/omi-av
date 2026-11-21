@@ -56,6 +56,14 @@ class DlnaService {
   String _currentTitle = '';
   String _currentMetaData = '';
 
+  /// 每张非回环网卡各绑一个 UDP 发送 socket。
+  ///
+  /// Dart 没有 IP_MULTICAST_IF，绑定本机 IP 是唯一能强制组播出口网卡的
+  /// 办法。多网卡机器（有线 + WiFi、VMware/VirtualBox 虚拟网卡、VPN）上，
+  /// 只从主 socket 发会走默认路由那张卡，手机所在子网根本收不到 alive/
+  /// byebye——表现就是「投屏断了，手机还显示投屏中」或「搜不到设备」。
+  final List<RawDatagramSocket> _ifaceSocks = [];
+
   /// GENA 事件订阅：key = 事件路径（/event/AVTransport 等）
   final Map<String, _EventSubscription> _subs = {};
   static const _subLifetime = Duration(seconds: 300);
@@ -85,7 +93,7 @@ class DlnaService {
   /// 终止所有 GENA 订阅 + SSDP byebye 一轮（微信视频号不解析事件、
   /// 不续订订阅，只有设备从 SSDP 消失才会清投屏 UI；byebye 只发一次，
   /// 设备仍在线，正常 alive 周期广播不受影响）
-  void kickCastClients({bool keepAlive = true}) {
+  void kickCastClients({bool keepAlive = true, bool pushStopped = true}) {
     final wasActive = _currentUri != null && _currentUri!.isNotEmpty;
     _currentUri = null;
     _currentTitle = '';
@@ -94,7 +102,7 @@ class DlnaService {
     _lastPushedPosSec = -1;
     // 推 STOPPED + 终止订阅：微信轮询失败后也不会再续上事件通道
     final avt = _subs['/event/AVTransport'];
-    if (wasActive && avt != null) {
+    if (wasActive && avt != null && pushStopped) {
       _lastPushedState = 'STOPPED';
       unawaited(_notify(avt, _avtStoppedEventBody()));
     }
@@ -110,26 +118,35 @@ class DlnaService {
 
   /// 退出程序 / 关机 / 关服务前的最后一次断开通知（v2.3.67）。
   ///
-  /// 与 [kickCastClients] 的区别只有两点，但都是必须的：
+  /// 与 [kickCastClients] 的区别：
   /// 1. **不补 alive**——设备马上要消失，补 alive 会让发送端刚清掉 UI
   ///    又看到「设备在线」；
-  /// 2. **等 150ms 再关 socket**——UDP 无连接，send() 只是入队，
+  /// 2. **STOPPED 事件限时等它发完**——进程随后就退，不能像普通断开那样
+  ///    只 fire-and-forget；
+  /// 3. **无媒体也要 byebye**——「等待投屏」态里 `_currentUri` 已经是空的，
+  ///    但设备本身要离开网络，发送端的设备列表也得清掉；
+  /// 4. **等 150ms 再关 socket**——UDP 无连接，send() 只是入队，
   ///    紧接着 close() 会把 byebye 包直接丢掉，发送端永远收不到。
   Future<void> shutdownCastLink() async {
     final wasActive = _currentUri != null && _currentUri!.isNotEmpty;
-    kickCastClients(keepAlive: false);
-    if (wasActive) {
-      // byebye 是 6 个 USN 的 UDP 突发，给网卡足够时间发出去
-      await Future<void>.delayed(const Duration(milliseconds: 150));
+    final avt = _subs['/event/AVTransport'];
+    if (wasActive && avt != null) {
+      try {
+        await _notify(avt, _avtStoppedEventBody())
+            .timeout(const Duration(milliseconds: 400));
+      } catch (_) {}
     }
+    kickCastClients(keepAlive: false, pushStopped: false);
+    if (!wasActive) _notifyByebye(keepAlive: false);
+    // 两个分支都刚发过 byebye（有媒体时由 kick 发），都要给网卡时间
+    await Future<void>.delayed(const Duration(milliseconds: 150));
     stop();
     CastLog.write('DLNA shutdownCastLink done wasActive=$wasActive');
   }
 
   /// SSDP byebye：设备「消失」一次，强制微信等轮询型 DMC 清掉投屏态
   void _notifyByebye({bool keepAlive = true}) {
-    final socket = _ssdp;
-    if (socket == null) return;
+    if (_ssdp == null) return;
     final usnBase = 'uuid:$_uuid';
     final entries = <List<String>>[
       ['upnp:rootdevice', '$usnBase::upnp:rootdevice'],
@@ -160,7 +177,7 @@ class DlnaService {
           'BOOTID.UPNP.ORG: 1\r\n'
           'CONFIGID.UPNP.ORG: 1\r\n'
           'USN: ${e[1]}\r\n\r\n';
-      socket.send(pkt.codeUnits, InternetAddress('239.255.255.250'), 1900);
+      _multicast(pkt);
     }
     // byebye 后补一轮 alive，让设备不真的从列表里消失（微信已收到
     // byebye 会清投屏态；其他 App 几乎无感）。
@@ -266,6 +283,12 @@ class DlnaService {
     }
     _subs.clear();
     _ssdp?.close();
+    for (final s in _ifaceSocks) {
+      try {
+        s.close();
+      } catch (_) {}
+    }
+    _ifaceSocks.clear();
     _http?.close();
     _aliveTimer = null;
     _positionEventTimer = null;
@@ -387,6 +410,8 @@ class DlnaService {
       } catch (_) {}
     }
     _ssdp = socket;
+    // 每张网卡再绑一个发送 socket：主 socket 只能走默认路由那张卡
+    await _bindIfaceSocks();
     socket.listen((event) {
       if (event != RawSocketEvent.read) return;
       final dg = socket.receive();
@@ -409,6 +434,40 @@ class DlnaService {
     // 想「再投一条」经常刷不出设备；5 秒一轮 6 个小包，开销可忽略
     _aliveTimer =
         Timer.periodic(const Duration(seconds: 5), (_) => _notifyAlive());
+  }
+
+  /// 给每张非回环 IPv4 网卡绑一个 UDP 发送 socket（任意端口）。
+  /// 绑定本机 IP 后，发往 239.255.255.250:1900 的包会强制从这张网卡出去。
+  Future<void> _bindIfaceSocks() async {
+    final seen = <String>{};
+    for (final i in _ifaces) {
+      for (final a in i.addresses) {
+        if (a.isLoopback || a.type != InternetAddressType.IPv4) continue;
+        if (a.address.startsWith('169.254.')) continue;
+        if (!seen.add(a.address)) continue;
+        try {
+          _ifaceSocks.add(await RawDatagramSocket.bind(a, 0));
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// 从主 socket + 每张网卡的 socket 各发一遍组播包。
+  /// 主 socket 覆盖默认路由；绑定各网卡 IP 的 socket 覆盖其余网卡。
+  /// [pktFor] 可按本机 IP 重建包体（alive 的 LOCATION 必须写该网卡的 IP，
+  /// 否则多网卡时发送端拿到的是另一张卡的地址，连不回来）。
+  /// 重复包对 SSDP 无副作用（接收端按 USN 去重）。
+  void _multicast(String pkt, {String Function(String localIp)? pktFor}) {
+    try {
+      _ssdp?.send(pkt.codeUnits, InternetAddress('239.255.255.250'), 1900);
+    } catch (_) {}
+    for (final s in _ifaceSocks) {
+      try {
+        final localIp = s.address.address;
+        final data = (pktFor == null ? pkt : pktFor(localIp)).codeUnits;
+        s.send(data, InternetAddress('239.255.255.250'), 1900);
+      } catch (_) {}
+    }
   }
 
   String? _headerValue(String msg, String field) {
@@ -486,8 +545,7 @@ class DlnaService {
   }
 
   void _notifyAlive() {
-    final socket = _ssdp;
-    if (socket == null) return;
+    if (_ssdp == null) return;
     final usnBase = 'uuid:$_uuid';
     // 全部 6 个 USN（含 3 个 service 类型），与 ssdp:all 回复保持一致
     final entries = <List<String>>[
@@ -511,17 +569,21 @@ class DlnaService {
       ],
     ];
     for (final e in entries) {
-      final pkt = 'NOTIFY * HTTP/1.1\r\n'
+      String build(String location) => 'NOTIFY * HTTP/1.1\r\n'
           'HOST: 239.255.255.250:1900\r\n'
           'CACHE-CONTROL: max-age=1800\r\n'
-          'LOCATION: ${_location}\r\n'
+          'LOCATION: $location\r\n'
           'NT: ${e[0]}\r\n'
           'NTS: ssdp:alive\r\n'
           'SERVER: Omi/1.0 UPnP/1.0\r\n'
           'BOOTID.UPNP.ORG: 1\r\n'
           'CONFIGID.UPNP.ORG: 1\r\n'
           'USN: ${e[1]}\r\n\r\n';
-      socket.send(pkt.codeUnits, InternetAddress('239.255.255.250'), 1900);
+      _multicast(
+        build(_location),
+        // 每张网卡通告自己的 IP，发送端（手机）才能真的连回本机
+        pktFor: (ip) => build('http://$ip:$_port/device.xml'),
+      );
     }
   }
 

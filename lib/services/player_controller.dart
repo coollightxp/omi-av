@@ -479,6 +479,9 @@ class PlayerController extends ChangeNotifier {
     _lifecycleListener = AppLifecycleListener(
       onHide: _onAppHidden,
       onShow: _onAppShown,
+      // 兜底：安卓从最近任务划掉 / 系统回收时不走退出卡片，
+      // 这里最后再试一次 byebye（包已入队，发不出去也不影响别的）
+      onDetach: () => unawaited(dlnaService.shutdownCastLink()),
     );
     // 启动计时：初始化耗时不足最短展示时长时，撤屏前补足等待。
     // 首次启动（无列表/无 EPG/无历史频道）全程只有毫秒级 prefs 读取，
@@ -954,8 +957,10 @@ class PlayerController extends ChangeNotifier {
 
   /// 停止 DLNA 投屏接收服务（设置面板开关）
   void _stopDlna() {
-    // 关服务等于设备从网络消失：正在投屏时先通知发送端（v2.3.67），
-    // 否则对方一直显示「已连接」。shutdownCastLink 内部会等包发出再关。
+    // 关服务等于设备从网络消失：正在投屏时先断开并回直播，
+    // 否则对方一直显示「已连接」，本地也卡在投屏态没有出口
+    if (_isCasting) unawaited(stopCastAndRestore(userInitiated: true));
+    // shutdownCastLink 内部会等包发出再关
     unawaited(dlnaService.shutdownCastLink());
     _dlnaRunning = false;
     _dlnaEndpoint = '';
@@ -1535,6 +1540,11 @@ class PlayerController extends ChangeNotifier {
   /// 初始化会覆盖点播（进度条消失、假重试、有声无画的根因）。
   Future<void> stopCastAndRestore({bool userInitiated = false}) async {
     if (!_isCasting) return;
+    // 手动断开：立刻把断开信号发出去，不等 800ms 防抖。
+    // 防抖窗口是留给「发送端 Stop→几十毫秒→SetURI→Play」连播的，
+    // 用户主动点断开没有后续动作，等 800ms 只会让手机端慢半拍还显示
+    // 投屏中；恢复直播仍走下面的延迟，避免和连播的新投屏抢内核。
+    if (userInitiated) dlnaService.kickCastClients();
     // 恢复延迟已在途：保持原 timer，不取消/重置。
     // 看门狗或重复点击若不断重置这个 timer，会导致几十秒无法真正断开
     if (_castRestoreTimer != null) return;
