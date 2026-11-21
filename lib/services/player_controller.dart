@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -38,6 +39,7 @@ import 'channel_blacklist.dart';
 import 'channel_alias.dart';
 import 'scene_favorites.dart';
 import 'radio_recorder.dart';
+import 'screen_recorder.dart';
 import 'tray_service.dart';
 import 'builtin_epg.dart';
 import 'radio_catalog.dart';
@@ -247,6 +249,8 @@ class PlayerController extends ChangeNotifier {
   // 录制状态（fvp 原生录制 / 网页 MediaRecorder 录制）
   bool _isRecording = false;
   String? _recordPath;
+  // 本轮录制是否走系统级（omi_screen_recorder）；停止路径据此分流
+  bool _usingSystemRecorder = false;
 
   // 网页录制：MediaRecorder 分块（base64）经 JS bridge 追加写入 .webm
   int _webRecBytes = 0;
@@ -3799,6 +3803,8 @@ class PlayerController extends ChangeNotifier {
         // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
         await Future<void>.delayed(const Duration(milliseconds: 60));
         await _restoreHiddenChrome();
+        // 底层尺寸若被小窗污染（420×236），恢复窗体固定尺寸（v2.3.68）
+        await _ensureWindowSize();
       }
       notifyListeners();
     } finally {
@@ -3824,6 +3830,20 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  /// 窗体固定 1280×720（v2.3.68）：退出全屏时窗口回到的是「全屏盖着时的
+  /// 底层尺寸」——小窗播放期间这个底层尺寸被污染成 420×236，之后全屏
+  /// 切窗体就会得到一个小窗。这里做统一兜底：只要不是窗体尺寸就恢复。
+  Future<void> _ensureWindowSize() async {
+    try {
+      final cur = await windowManager.getSize();
+      if (cur.width != _windowSize.width || cur.height != _windowSize.height) {
+        await windowManager.setResizable(true);
+        await windowManager.setSize(_windowSize);
+        await windowManager.setResizable(false);
+      }
+    } catch (_) {}
+  }
+
   /// 若当前处于全屏则退出全屏（用于返回键/ESC）
   Future<bool> exitFullscreenIfNeeded() async {
     if (!_isFullscreen || _fsToggling) return false;
@@ -3836,6 +3856,8 @@ class PlayerController extends ChangeNotifier {
       // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
       await Future<void>.delayed(const Duration(milliseconds: 60));
       await _restoreHiddenChrome();
+      // 底层尺寸若被小窗污染（420×236），恢复窗体固定尺寸（v2.3.68）
+      await _ensureWindowSize();
       notifyListeners();
       return true;
     } finally {
@@ -3867,7 +3889,7 @@ class PlayerController extends ChangeNotifier {
   /// 小窗播放（仅桌面端）：窗口缩成 420×236 并置顶，再点一次恢复原尺寸
   bool _miniWindow = false;
   bool get miniWindow => _miniWindow;
-  Size _sizeBeforeMini = const Size(1280, 720);
+  Size _sizeBeforeMini = _windowSize;
 
   /// 进小窗前的窗口状态：退出时原样恢复——
   /// 原来全屏就回全屏，原来最大化就回最大化，原来是普通窗口就回原尺寸
@@ -3879,6 +3901,9 @@ class PlayerController extends ChangeNotifier {
   /// 之后每次恢复都回小窗大小（用户实测「退出小窗后记住了小窗尺寸」）
   bool _miniToggling = false;
   static const _miniSize = Size(420, 236);
+
+  /// 窗体固定尺寸（与 main.dart 初始 1280×720 一致，不再支持拖边缩放）
+  static const _windowSize = Size(1280, 720);
 
   bool _isMiniLikeSize(Size s) =>
       (s.width - _miniSize.width).abs() < 16 &&
@@ -3922,11 +3947,18 @@ class PlayerController extends ChangeNotifier {
           _isFullscreen = true;
           await windowManager.setAlwaysOnTop(false);
           await _prepareFullscreenEnter();
+          // 必须先把底层尺寸放回窗体大小（v2.3.68）：全屏只是「盖在」
+          // 当前窗口尺寸上面，退出全屏时窗口会回到底层尺寸。小窗期间
+          // 底层是 420×236，不补这一步，之后从全屏切窗体就会得到一个
+          // 小窗尺寸（用户实测：小窗→恢复窗口→全屏切窗体 = 小窗大小）
+          await windowManager.setResizable(true);
+          await windowManager.setSize(_sizeBeforeMini);
+          await windowManager.setResizable(false);
           await windowManager.setFullScreen(true);
         } else {
           // _sizeBeforeMini 若已被污染成小窗尺寸，退回默认窗口大小
           if (_isMiniLikeSize(_sizeBeforeMini)) {
-            _sizeBeforeMini = const Size(1280, 720);
+            _sizeBeforeMini = _windowSize;
           }
           await windowManager.setResizable(true);
           await windowManager.setSize(_sizeBeforeMini);
@@ -5156,21 +5188,38 @@ class PlayerController extends ChangeNotifier {
   // ==================== 录制与截图（fvp/MDK 原生，桌面端） ====================
 
   /// 开始录制当前画面到固定文件夹，返回是否成功。
-  /// 普通频道走 fvp/MDK 原生录制；网页频道用 MediaRecorder 录制
-  /// 播放中的 <video>（captureStream），分块经 JS bridge 落盘为 .webm。
+  /// Windows 优先系统级录制（Graphics Capture + WASAPI 进程回环 + Media
+  /// Foundation，omi_screen_recorder 插件）：录的是播放器窗口画面，
+  /// 与内核无关，内核转封装出不去的流（投屏 HLS、视频号等）照样能录。
+  /// Win10 2004+ 可用，不可用或失败时回退内核录制（mpv stream-record /
+  /// mdk record）。网页频道用 MediaRecorder 录制 <video>，路径不变。
   Future<bool> startRecording() async {
     if (_webPageActive) return _startWebRecording();
     final vc = _videoController;
-    if (_currentChannel == null ||
-        vc == null ||
-        !vc.value.isInitialized ||
-        !isDesktop ||
-        _isRecording) {
+    if (_currentChannel == null || !isDesktop || _isRecording) {
       return false;
     }
     try {
       _recordPath = await captureService.buildFilePath(
           'recordings', _currentChannel!.name, 'mp4');
+      // 系统级录制（v2.3.68）：与引擎无关
+      if (Platform.isWindows && await ScreenRecorder.isSupported()) {
+        final err = await ScreenRecorder.start(_recordPath!);
+        if (err == null) {
+          _usingSystemRecorder = true;
+          _isRecording = true;
+          notifyListeners();
+          return true;
+        }
+        // 系统级失败：回退内核录制
+        _lastError = '系统级录制不可用($err)，已回退内核录制';
+      }
+      if (vc == null || !vc.value.isInitialized) {
+        _lastError = '当前内核不支持录制';
+        _isRecording = false;
+        notifyListeners();
+        return false;
+      }
       // libmpv 的 stream-record 直接落盘原始流（TS/MP4 容器由流本身决定）
       final ok = await vc.startRecord(_recordPath!);
       if (!ok) {
@@ -5179,6 +5228,7 @@ class PlayerController extends ChangeNotifier {
         notifyListeners();
         return false;
       }
+      _usingSystemRecorder = false;
       _isRecording = true;
       notifyListeners();
       return true;
@@ -5190,20 +5240,45 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
-  /// 停止录制，返回文件路径
+  /// 停止录制，返回文件路径；没有生成有效文件时返回 null
+  /// （UI 提示「未捕获到视频数据」，不再假成功）
   Future<String?> stopRecording() async {
     if (!_isRecording) return null;
     if (_webPageActive) return _stopWebRecording();
+    final path = _recordPath;
+    _isRecording = false;
+    _recordPath = null;
+    if (_usingSystemRecorder) {
+      // 系统级录制：stop 内部 Finalize 落盘，无需额外等待
+      _usingSystemRecorder = false;
+      notifyListeners();
+      await ScreenRecorder.stop();
+      if (path != null) {
+        try {
+          final f = File(path);
+          // 64KB 以下视为没录上（几秒的 H.264 不止这个数）
+          if (await f.exists() && await f.length() > 64 * 1024) return path;
+        } catch (_) {}
+      }
+      _lastError = '录制已停止（未捕获到视频数据）';
+      return null;
+    }
     final vc = _videoController;
     try {
       if (vc != null) await vc.stopRecord();
       // 给编码器一点时间刷新文件尾
       await Future.delayed(const Duration(milliseconds: 800));
     } catch (_) {}
-    final path = _recordPath;
-    _isRecording = false;
-    _recordPath = null;
     notifyListeners();
+    // 产物校验（v2.3.68）：mdk 的 record 是 fire-and-forget，流不支持时
+    // 它不报错、文件根本不生成（投屏的 HLS 点播/视频号流实测白录）。
+    // 停止时查一次大小，0 字节按失败算，UI 才能给真实提示。
+    if (path != null && isDesktop) {
+      try {
+        final f = File(path);
+        if (!await f.exists() || await f.length() == 0) return null;
+      } catch (_) {}
+    }
     return path;
   }
 

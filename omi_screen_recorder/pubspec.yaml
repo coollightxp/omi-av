@@ -1,0 +1,14 @@
+name: omi_screen_recorder
+description: Windows 系统级屏幕录制插件（Graphics Capture + WASAPI 进程回环 + Media Foundation）。
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+flutter:
+  plugin:
+    platforms:
+      windows:
+        pluginClass: OmiScreenRecorderPluginCApi
+        fileName: omi_screen_recorder_plugin_c_api.cpp
