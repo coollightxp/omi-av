@@ -5,22 +5,19 @@ import 'package:flutter/widgets.dart';
 
 import 'omi_video_value.dart';
 
-/// 播放内核统一接口（双引擎的门面）。
+/// 播放内核统一接口（门面）。
 ///
-/// 上层（PlayerController / 播放页）只依赖这个类型，不关心底层是
-/// libmpv(media_kit) 还是 MDK(fvp + video_player)：
+/// 上层（PlayerController / 播放页）只依赖这个类型：
 ///
 /// | 引擎 | 实现类 | 用途 |
 /// |---|---|---|
-/// | mdk | `OmiVideoMdkController`（omi_video_mdk.dart） | 视频（含投屏）统一使用 |
-/// | mpv | `OmiVideoController`（omi_video_io.dart） | 仅电台（ICY 曲目名、后台原地换台） |
+/// | mdk | `OmiVideoMdkController`（omi_video_mdk.dart） | 桌面/安卓全部播放（视频、投屏、电台） |
 /// | web | `OmiVideoController`（omi_video_web.dart） | 浏览器 HTML video |
 ///
 abstract class OmiVideoBackend extends ChangeNotifier {
   OmiVideoValue get value;
 
-  /// 引擎标识：`mpv` / `mdk` / `web`。
-  /// 上层据此做「起播无画面就换个引擎再试」的兜底（不依赖具体实现类型）。
+  /// 引擎标识：`mdk` / `web`（日志与诊断用）
   String get engine;
 
   Future<void> initialize();
@@ -33,27 +30,6 @@ abstract class OmiVideoBackend extends ChangeNotifier {
   Future<Uint8List?> snapshotPng();
   Future<bool> startRecord(String path);
   Future<void> stopRecord();
-
-  /// mpv 专属；MDK 下为空实现
-
-  /// 关掉/恢复视频输出（mpv `vid=no`/`auto`）。
-  /// 后台切台（通知栏上一台/下一台）时安卓侧没有 Surface，新播放器
-  /// 等纹理会卡住起播——音频先走 vid=no，回前台再恢复。
-  /// MDK/Web 下为空实现。
-  Future<void> setVideoOutputDisabled(bool disabled);
-
-  /// 原地换源：不重建内核，直接让现有播放器换一路流。
-  ///
-  /// 只给「安卓后台电台切台」用：后台没有 Surface，新建内核的 texture
-  /// 管线拿不到画布，open 会一直停在等纹理上（实测：通知栏点下一台，
-  /// 声音不响，回到界面才跳台）。原地 open 沿用已有的音频输出，
-  /// 后台照样出声。
-  ///
-  /// 默认实现抛 [UnsupportedError]（MDK/Web 不支持），调用方捕获后
-  /// 回退到重建内核的老路径。
-  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
-    throw UnsupportedError('当前内核不支持原地换源');
-  }
 
   /// 异步释放 native 资源（幂等，可重复调用）
   Future<void> release();

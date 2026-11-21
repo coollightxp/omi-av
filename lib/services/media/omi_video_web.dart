@@ -9,10 +9,8 @@ import 'package:video_player/video_player.dart';
 import 'omi_video_backend.dart';
 import 'omi_video_value.dart';
 
-/// Web 端实现：HTML video 元素（video_player）。
-///
-/// media_kit 的 web 支持尚不成熟，Web 保持原有 video_player 路径，
-/// 其余平台统一走 media_kit。两端 API 完全一致。
+/// Web 端实现：浏览器原生 HTML video（video_player_web）。
+/// 与 MDK 实现保持同一套接口。
 class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoController.network(
     Uri url, {
@@ -90,17 +88,7 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
 
   Future<bool> startRecord(String path) async => false;
 
-  /// 音频滤镜（Web 无 mpv）：no-op
-
-  @override
-  Future<void> setVideoOutputDisabled(bool disabled) async {}
-
   Future<void> stopRecord() async {}
-
-  @override
-  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
-    throw UnsupportedError('当前内核不支持原地换源');
-  }
 
   Future<void> release() async {
     if (_disposed) return;

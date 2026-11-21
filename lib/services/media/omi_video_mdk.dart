@@ -12,14 +12,9 @@ import 'omi_video_value.dart';
 
 /// MDK（libmdk）内核实现：fvp 把 `video_player` 的平台实现接管为 MDK。
 ///
-/// 视频节目（含投屏）统一走这条内核：老显卡/老系统上 D3D11 直出比 mpv
-/// 的 OpenGL 纹理更稳，安卓上也一样；截图（fvp snapshot）与录制
-/// （fvp record）在两个平台都可用，所以不再需要双引擎来回切。
-/// MPV 只保留给电台（ICY 曲目名、安卓后台原地换台）。
-///
-/// 能力边界：
-/// - 不支持原地换源（`openInPlace` 抛 UnsupportedError，调用方回退重建）；
-/// - 不支持 `vid=no`（后台由调用方直接停掉画面）。
+/// 桌面与安卓唯一的内核：视频、投屏、电台都走这里。D3D11 直出比
+/// OpenGL 纹理更稳；截图（fvp snapshot）与录制（fvp record）两个平台
+/// 都可用。电台的 ICY 曲目名由 `IcyMetadataReader` 单独补齐。
 class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
   OmiVideoMdkController.network(
     Uri url, {
@@ -228,14 +223,6 @@ class OmiVideoMdkController extends ChangeNotifier implements OmiVideoBackend {
     } catch (e) {
       debugPrint('[OmiVideo/mdk] record stop failed: $e');
     }
-  }
-
-  @override
-  Future<void> setVideoOutputDisabled(bool disabled) async {}
-
-  @override
-  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
-    throw UnsupportedError('当前内核不支持原地换源');
   }
 
   @override

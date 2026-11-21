@@ -1155,7 +1155,6 @@ class PlayerController extends ChangeNotifier {
         'uiScaleAuto': s.uiScaleAuto,
         // 播放器页
         'preferredQuality': s.preferredQuality.name,
-        'playEngine': s.playEngine,
         'showWebNativeToggle': s.showWebNativeToggle,
         'hideUnavailableChannels': s.hideUnavailableChannels,
         'lyricsEnabled': s.lyricsEnabled,
@@ -1270,13 +1269,7 @@ class PlayerController extends ChangeNotifier {
       if (clock != null && clock != cur.showClock) {
         setShowClock(clock);
       }
-      // 播放内核：换台生效（setPlayEngine 内部会重开当前台）
-      final engine = rs('playEngine');
-      if (engine != null &&
-          (engine == 'mpv' || engine == 'mdk') &&
-          engine != cur.playEngine) {
-        await setPlayEngine(engine);
-      }
+      // 旧版播放内核字段：已废弃（视频/电台统一 MDK），忽略远端传来的值
       VideoQuality? quality;
       final qName = rs('preferredQuality');
       for (final v in VideoQuality.values) {
@@ -1394,7 +1387,7 @@ class PlayerController extends ChangeNotifier {
           buffer != _settings.bufferSeconds ||
           (quality != null && quality != _settings.preferredQuality)) {
         // 用 _settings 而非 cur：上面的定时关闭/内核切换可能已经改过设置
-        // 对象，拿旧快照 copyWith 会把刚写入的 sleep*/playEngine 覆盖回去
+        // 对象，拿旧快照 copyWith 会把刚写入的 sleep* 覆盖回去
         updateSettings(_settings.copyWith(
           dlnaEnabled: dlna,
           autoPlayNext: autoPlayNext,
@@ -1980,7 +1973,7 @@ class PlayerController extends ChangeNotifier {
   /// 播放指定频道（从第一个源开始，失败自动尝试下一个源）
   Future<void> playChannel(Channel channel) async {
     // 卡片上刚按了 ❌：这一瞬间正在飞的「下一台」不能把它拉回来。
-    // 时序：后台换台本来就慢（openInPlace 要几秒），用户等不及点了退出，
+    // 时序：后台换台本来就慢（要重建内核），用户等不及点了退出，
     // 迟到的换台随后完成 → 卡片重新出现、声音又响（实测「退不出去」）
     final exitAt = _cardExitAt;
     if (exitAt != null &&
@@ -2936,39 +2929,6 @@ class PlayerController extends ChangeNotifier {
       headers['Referer'] = channel.httpReferer.trim();
     }
 
-    // 安卓后台电台换台（通知栏上一台/下一台）：**复用现有内核原地换源**。
-    //
-    // 后台没有 Surface：新建内核的 texture 管线拿不到画布，mpv 的 open
-    // 会停在等纹理上——用户实测就是「点了下一台，卡片台名变了但没声，
-    // 切回界面才跳台」。原地 open 不碰 texture，直接用已在跑的音频
-    // 输出换流，后台几秒内就出声。失败（内核释放/不支持）回退重建。
-    final live = _videoController;
-    if (channel.isRadio &&
-        _isBackgroundNow &&
-        live != null &&
-        live.engine == 'mpv') {
-      try {
-        await live.openInPlace(
-          Uri.parse(channel.streamUrls[_sourceIndex]),
-          headers: headers.isEmpty ? null : headers,
-        );
-        if (gen != _playGeneration) return;
-        await live.play();
-        _state = PlayerState.playing;
-        _lastError = null;
-        _sniffedFromWeb = false;
-        _softErrPending = false;
-        _softErrSecondRound = false;
-        await _saveLastChannel();
-        // 卡片台名/曲目跟着换（原生只改标题不重建服务）
-        _syncAudioNotification();
-        notifyListeners();
-        return;
-      } catch (e) {
-        debugPrint('[Omi] 后台原地换台失败，回退重建内核: $e');
-      }
-    }
-
     await _disposeVideoController();
 
     // 等待释放期间用户已切新台（新代已接管）：本代直接作废，
@@ -3032,14 +2992,11 @@ class PlayerController extends ChangeNotifier {
     // 新台前播、旧台后台出声的双路直播
     if (gen != _playGeneration) return;
 
-    // 视频与电台统一走 MDK：实测 MDK 在老机器与安卓上的兼容性、截图/录制
-    // 能力都更好。电台原本依赖 libmpv 的 ICY 曲目名，现在由
-    // [IcyMetadataReader] 自己补（见下方起播成功后的启动逻辑）。
-    final useMdk = true;
+    // 视频与电台统一走 MDK。电台原本依赖 libmpv 的 ICY 曲目名，
+    // 现在由 [IcyMetadataReader] 自己补（见起播成功后的启动逻辑）。
     final c = createOmiVideoBackend(
       url: Uri.parse(streamUrl),
-      useMdk: useMdk,
-      // libmpv 通过 http-header-fields 透传 UA/Referer；Web 端直接给 video 元素
+      // UA/Referer 由 fvp 经 ffmpeg 透传；Web 端直接给 video 元素
       headers: headers.isEmpty ? null : headers,
       formatHint: formatHint,
       bufferSeconds: bufSecs,
@@ -3049,18 +3006,7 @@ class PlayerController extends ChangeNotifier {
     // 闭包绑定实例身份：迟到的旧 controller 事件不得读取/修改全局状态
     final closure = () => _onVideoListener(c);
     c.addListener(closure);
-    // 后台切台（通知栏上一台/下一台）：只有**电台**在后台是纯音频。
-    // 安卓侧后台没有 Surface，视频管线一挂着，open 就会停在等纹理上
-    // （用户实测：通知栏切台声音停了，回到界面才接着放），所以电台
-    // 要提前把视频轨摘掉。
-    //
-    // 视频台绝不能这么做：视频在后台是画中画小窗，画面还要用，
-    // 关掉视频轨等于给小窗一块黑布（v2.1.28 曾无条件关，已修）。
-    if (channel.isRadio && _isBackgroundNow) {
-      unawaited(c.setVideoOutputDisabled(true));
-    }
-    // 新内核的音量对齐应用音量：mpv 默认 100，不设的话静音/调音量
-    // 在换台后会失效（新实例满音量）
+    // 新内核的音量对齐应用音量：不设的话静音/调音量在换台后会失效
     unawaited(c.setVolume(_volume));
     // 关键：initialize 完成前绝不能把 c 挂到 _videoController。
     // 4K 等高码率台 initialize 很慢，用户此时切台会进入
@@ -3087,8 +3033,7 @@ class PlayerController extends ChangeNotifier {
         c.removeListener(closure);
       } catch (_) {}
       // 必须真正释放：只移除监听会泄漏整个 native 播放器。
-      // media_kit 的 release 内部串行 cancel 订阅 + dispose player，
-      // 且自身有 _disposed 幂等守卫，重复/并发调用安全
+      // 内核 release 内部 dispose 原生播放器，且自身有幂等守卫
       Future<void>(() async {
         try {
           await c.release().timeout(const Duration(seconds: 5));
@@ -3506,7 +3451,7 @@ class PlayerController extends ChangeNotifier {
     _audioCardClosed = true;
     _cardExitAt = DateTime.now();
     // 作废所有在飞的播放流程：❌ 到达时后台换台可能正跑到一半
-    // （openInPlace / 预检 / 建内核），这些流程的每个 await 检查点都会
+    // （预检 / 建内核），这些流程的每个 await 检查点都会
     // 因代际变化退出。没有这一刀，迟到的换台会建出新内核开播——
     // 卡片没了、界面显示暂停、声音却还在响（用户实测）
     _playGeneration++;
@@ -3522,9 +3467,8 @@ class PlayerController extends ChangeNotifier {
     _state = PlayerState.paused;
     _lastError = null;
     _lastAudioSig = '';
-    // 兜底硬停：pause 在 mpv loadfile 中途不保证生效（后台换台正在
-    // openInPlace 时尤其如此），只有把内核整个释放才能保证「后台一定
-    // 没声」。回前台再按播放会重建内核（见 togglePlayPause）
+    // 兜底硬停：pause 在内核初始化中途不保证生效，只有把内核整个释放
+    // 才能保证「后台一定没声」。回前台再按播放会重建内核
     unawaited(_hardStopForCardExit());
     notifyListeners();
   }
@@ -4289,7 +4233,6 @@ class PlayerController extends ChangeNotifier {
   static const _kResumeLastChannel = 'settings_resume_last_channel';
   static const _kCloseToTray = 'settings_close_to_tray';
   static const _kFishHotkey = 'settings_fish_hotkey';
-  static const _kPlayEngine = 'settings_play_engine';
   static const _kLyricsEnabled = 'settings_lyrics_enabled';
   static const _kLyricsOffset = 'settings_lyrics_offset_ms';
   static const _kLyricsVariant = 'settings_lyrics_variant';
@@ -4341,9 +4284,6 @@ class PlayerController extends ChangeNotifier {
         resumeLastChannel: p.getBool(_kResumeLastChannel) ?? true,
         closeToTray: p.getBool(_kCloseToTray) ?? false,
         fishHotkey: p.getBool(_kFishHotkey) ?? true,
-        // 默认 MDK：实测同机 MPV 叠面板闪黑、MDK 不闪；已存过设置的用户
-        // 保持原选择（尊重手动切换）
-        playEngine: p.getString(_kPlayEngine) ?? 'mdk',
         showWebNativeToggle: p.getBool(_kShowWebNativeToggle) ?? false,
         hideUnavailableChannels: p.getBool(_kHideUnavailable) ?? true,
         lyricsEnabled: p.getBool(_kLyricsEnabled) ?? false,
@@ -4446,7 +4386,6 @@ class PlayerController extends ChangeNotifier {
         await p.setString(k, v);
       }
 
-      await putString(_kPlayEngine, _settings.playEngine);
       await putBool(_kShowWebNativeToggle, _settings.showWebNativeToggle);
       await putBool(
           _kHideUnavailable, _settings.hideUnavailableChannels);
@@ -4702,8 +4641,6 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 播放内核：'mpv'（默认，功能全）/ 'mdk'（D3D11 直出，老显卡更稳）
-  String get playEngine => _settings.playEngine;
   bool get showWebNativeToggle => _settings.showWebNativeToggle;
 
   /// 是否隐藏探测确认不可用的内置频道（死台在清单里保留，恢复即回来）
@@ -4772,14 +4709,6 @@ class PlayerController extends ChangeNotifier {
           : '频道检测完成：$alive 路全部可用',
       icon: Icons.network_check,
     );
-  }
-
-  /// 旧版「播放内核」设置（仅保留兼容：视频已统一 MDK，MPV 只用于电台）。
-  /// 仍接收设置同步，但不再影响任何视频播放。
-  Future<void> setPlayEngine(String engine) async {
-    final next = engine == 'mdk' ? 'mdk' : 'mpv';
-    if (_settings.playEngine == next) return;
-    updateSettings(_settings.copyWith(playEngine: next));
   }
 
 
@@ -4992,7 +4921,7 @@ class PlayerController extends ChangeNotifier {
     final inSeekGrace =
         _seekGraceUntil != null && now.isBefore(_seekGraceUntil!);
     if (isBuf) {
-      // media_kit 只上报"已缓冲末尾"，取该值作为下载推进判据；
+      // 内核只上报"已缓冲末尾"，取该值作为下载推进判据；
       // 悬空区间（seek 留下的空洞）不影响"是否还在下载"的判断
       final bufEnd = v.bufferedEnd.inMilliseconds;
       if (bufEnd > _lastBufferedEndMs) {
@@ -5440,50 +5369,6 @@ class PlayerController extends ChangeNotifier {
       }
     }
     final vc = _videoController;
-    // MPV 内核：`stream-record` 实测安卓/Windows 都录不出可用文件
-    // （HLS 直播只追加 demuxer 收到的原始字节，常是 0 字节或没有文件尾，
-    // 用户反馈「MPV 下两个平台都录不了，MDK 正常」）。改走与投屏同一条
-    // 流级录制：按当前源 URL 直接下载原始字节，与内核/播放状态无关，
-    // 也不打断播放。MDK 的 record 原生可用，保持不动。
-    if (vc != null &&
-        vc.engine == 'mpv' &&
-        !_isCasting &&
-        !_currentChannel!.isRadio) {
-      // 网页嗅探后切内置播放时，真实流在 _sniffTarget 里
-      final sniff = _sniffedFromWeb ? _sniffTarget : null;
-      final url = sniff?.url ?? _currentChannel!.streamUrls[_sourceIndex];
-      if (url.isNotEmpty) {
-        final err = await CastStreamRecorder.start(
-          url: url,
-          name: _currentChannel!.name,
-          userAgent: sniff?.ua ?? _currentChannel!.userAgent,
-          referer: sniff?.referer ?? _currentChannel!.httpReferer,
-          subDir: 'recordings',
-          // 直播录制不限速：1.5 倍码率限速只对已知时长的点播有意义
-          throttle: false,
-        );
-        if (err == null) {
-          CastStreamRecorder.onFinished = _onCastRecorderFinished;
-          if (!CastStreamRecorder.isRecording) {
-            CastStreamRecorder.onFinished = null;
-            _lastError = '录制流已结束，未录到数据';
-            return false;
-          }
-          _usingCastRecorder = true;
-          _isRecording = true;
-          _recordPath = CastStreamRecorder.filePath;
-          CastLog.write('record start mpv-stream path=$_recordPath');
-          notifyListeners();
-          return true;
-        }
-        CastLog.write('mpv stream record failed: $err -> stream-record');
-        // 加密流：stream-record 也落不了可用文件，直接报错
-        if (err == 'encrypted') {
-          _lastError = '该源已加密，无法录制';
-          return false;
-        }
-      }
-    }
     if (vc == null) {
       _lastError = '录制失败：播放器未就绪';
       CastLog.write('record start failed: videoController is null '
@@ -5504,7 +5389,7 @@ class PlayerController extends ChangeNotifier {
           : '?';
       CastLog.write('record start: vc=${vc.runtimeType} '
           'casting=$_isCasting host=$host path=$_recordPath');
-      // libmpv 的 stream-record 直接落盘原始流（TS/MP4 容器由流本身决定）
+      // MDK 原生录制：按容器重新封装直播流，文件尾在 stop 时写入
       final ok = await vc.startRecord(_recordPath!);
       if (!ok) {
         _lastError = '当前内核不支持录制（内核：${vc.runtimeType}）';
@@ -6072,7 +5957,7 @@ class PlayerController extends ChangeNotifier {
     final vc = _videoController;
     if (vc == null || !vc.value.isInitialized) return null;
     try {
-      // libmpv 原生截帧直接返回 PNG 字节，无需 RGBA 再编码
+      // MDK 原生截帧（fvp snapshot）返回 PNG 字节
       final png = await vc.snapshotPng();
       if (png == null || png.isEmpty) return null;
       final name = _currentChannel?.name ?? 'screenshot';
@@ -6307,8 +6192,8 @@ class PlayerController extends ChangeNotifier {
           c.removeListener(closure);
         } catch (_) {}
       }
-      // 先摘监听再释放：media_kit 的 release 串行 cancel 订阅并 dispose
-      // player，自身幂等；超时仅意味着底层仍在释放，绝不重复调用
+      // 先摘监听再释放：内核 release 自身幂等；超时仅意味着底层仍在
+      // 释放，绝不重复调用
       try {
         await c.release().timeout(const Duration(seconds: 5));
       } on TimeoutException {
@@ -6362,15 +6247,13 @@ class PlayerController extends ChangeNotifier {
     unawaited(warmHost(uri.host, port));
   }
 
-  /// App 是否在后台（安卓电台后台切台时关视频输出的判定，
-  /// 见 _playCurrentSource 内的 setVideoOutputDisabled）
+  /// App 是否在后台（后台电台的 UI/通知策略会用到）
   bool _appBackgrounded = false;
 
   /// 现在是否处于后台。
   ///
   /// 不只看 AppLifecycleListener 标记：某些系统/通知栏交互下 onHide
-  /// 不一定及时到，直接问 WidgetsBinding 的当前生命周期兜底，
-  /// 免得该关视频轨的时候没关（电台后台起播就会卡住等 Surface）
+  /// 不一定及时到，直接问 WidgetsBinding 的当前生命周期兜底
   bool get _isBackgroundNow {
     if (_appBackgrounded) return true;
     final s = WidgetsBinding.instance.lifecycleState;
@@ -6379,26 +6262,15 @@ class PlayerController extends ChangeNotifier {
 
   AppLifecycleListener? _lifecycleListener;
 
-  /// 切后台/回前台时的视频轨策略——**只有电台**关。
-  ///
-  /// 两个域在后台走的是两条完全不同的路：
-  /// - 电台：没有画面，后台就是纯音频。安卓后台拿不到 Surface，视频管线
-  ///   挂着会让 open 卡在等纹理上（表现：通知栏切台后声音停住，回到界面
-  ///   才接着放），所以把视频轨摘掉。
-  /// - 视频：后台是画中画小窗，画面还得显示。这里绝不能关视频轨，
-  ///   否则小窗里只有一块黑布。
+  /// 切后台/回前台：只记录状态。
+  /// MDK 没有「摘视频轨」能力；电台本身是纯音频，视频台后台走画中画，
+  /// 都不需要额外处理。
   void _onAppHidden() {
     _appBackgrounded = true;
-    if (_currentChannel?.isRadio ?? false) {
-      unawaited(_videoController?.setVideoOutputDisabled(true));
-    }
   }
 
   void _onAppShown() {
     _appBackgrounded = false;
-    // 回前台一律恢复视频轨：电台可能要用真波形纹理，
-    // 视频台更要画面
-    unawaited(_videoController?.setVideoOutputDisabled(false));
     // 立刻刷一次：后台切台改的是 Dart 侧状态，回前台第一帧就该是新台
     // （不刷的话个别机型会先贴一帧旧界面再跳）
     notifyListeners();

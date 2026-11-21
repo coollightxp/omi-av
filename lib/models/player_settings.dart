@@ -99,18 +99,6 @@ class PlayerSettings {
   /// 注意开关本身只控制快捷键，不会立刻隐藏窗口——进出动作由 F9/托盘触发。
   final bool fishHotkey;
 
-  /// 播放内核（'mpv' / 'mdk'，默认 mdk）。
-  ///
-  /// - mdk：fvp + libmdk（D3D11 直出纹理），画面最稳，老显卡/1607 上
-  ///   叠加面板不闪黑
-  /// - mpv：media_kit + libmpv，功能最全（滤镜/录制/电平/截帧），但个别
-  ///   老显卡在面板动画时会闪一下
-  ///
-  /// 2026-11 用户实测：同机 MPV 闪黑、MDK 不闪，故默认取 MDK；MPV 保留
-  /// 作回退（设置可切，MDK 起播失败也会自动回落）
-  /// 切换后换台生效（当前画面不会热切）
-  final String playEngine;
-
   /// 底部面板是否显示「网页播放器/内置播放器切换」按钮。
   /// 默认关：该按钮很不常用（网页频道嗅探接管场景），常驻面板反而
   /// 挤占遥控器焦点路径（用户要求收进设置，开关控制显隐）
@@ -176,7 +164,6 @@ class PlayerSettings {
     this.resumeLastChannel = true,
     this.closeToTray = false,
     this.fishHotkey = true,
-    this.playEngine = 'mdk',
     this.showWebNativeToggle = false,
     this.lyricsEnabled = false,
     this.lyricsOffsetMs = 0,
@@ -214,7 +201,6 @@ class PlayerSettings {
     bool? resumeLastChannel,
     bool? closeToTray,
     bool? fishHotkey,
-    String? playEngine,
     bool? showWebNativeToggle,
     bool? lyricsEnabled,
     int? lyricsOffsetMs,
@@ -252,7 +238,6 @@ class PlayerSettings {
       resumeLastChannel: resumeLastChannel ?? this.resumeLastChannel,
       closeToTray: closeToTray ?? this.closeToTray,
       fishHotkey: fishHotkey ?? this.fishHotkey,
-      playEngine: playEngine ?? this.playEngine,
       showWebNativeToggle: showWebNativeToggle ?? this.showWebNativeToggle,
       lyricsEnabled: lyricsEnabled ?? this.lyricsEnabled,
       lyricsOffsetMs: lyricsOffsetMs ?? this.lyricsOffsetMs,

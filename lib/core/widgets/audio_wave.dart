@@ -8,7 +8,7 @@ import '../theme/app_colors.dart';
 
 /// 电台「正在出声」可视化（方案 12.3）。
 ///
-/// 关于"真实频谱"：media_kit(libmpv) / video_player 都只给控制面和
+/// 关于"真实频谱"：MDK(fvp) / video_player 都只给控制面和
 /// 元数据，不向 Dart 层吐 PCM 样本，做不了真 FFT。要真谱只能写原生
 /// 采集（Windows WASAPI loopback / Android Visualizer），成本与风险
 /// 都远高于这一屏的收益，所以这里做的是**电平表式模拟**：

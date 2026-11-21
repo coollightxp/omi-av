@@ -33,17 +33,7 @@ class OmiVideoController extends ChangeNotifier implements OmiVideoBackend {
 
   Future<Uint8List?> snapshotPng() async => null;
   Future<bool> startRecord(String path) async => false;
-
-  /// 音频滤镜（Web 无 mpv）：no-op
-
-  @override
-  Future<void> setVideoOutputDisabled(bool disabled) async {}
   Future<void> stopRecord() async {}
-
-  @override
-  Future<void> openInPlace(Uri url, {Map<String, String>? headers}) async {
-    throw UnsupportedError('当前内核不支持原地换源');
-  }
 
   Future<void> release() async {}
 

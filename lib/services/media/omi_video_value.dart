@@ -2,7 +2,7 @@ import 'dart:ui' show Size;
 
 /// 播放器状态快照（与具体内核无关）。
 ///
-/// Web 端由 video_player 提供，桌面/移动端由 media_kit(libmpv) 提供，
+/// Web 端由 video_player 提供，桌面/移动端由 MDK(fvp) 提供，
 /// 上层只依赖这个值对象，不感知内核差异。
 class OmiVideoValue {
   const OmiVideoValue({
@@ -31,9 +31,8 @@ class OmiVideoValue {
   /// 已缓冲到的位置（部分平台不上报，恒为 0 时上层退化为固定超时判定）
   final Duration bufferedEnd;
 
-  /// 内核上报的媒体标题。对电台流：libmpv 会把 ICY 的 `StreamTitle`
-  /// （正在播的歌名/节目名）映射到 `media-title`，是真实元数据；
-  /// 对视频/点播：通常是文件名，业务层按频道类型决定用不用。
+  /// 内核上报的媒体标题（MDK 一般不给）。电台的 ICY `StreamTitle`
+  /// 由 `IcyMetadataReader` 单独读取后写入控制器，不走这个字段。
   final String mediaTitle;
   final String? errorDescription;
 

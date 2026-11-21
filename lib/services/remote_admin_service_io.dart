@@ -946,8 +946,6 @@ function renderPlayer(){
   html+=choiceCard('preferredQuality','画质偏好','网页频道按偏好切档；直播流清晰度由源决定',
     [['auto','自动'],['low','480p'],['medium','720p'],['high','1080p'],['ultra','4K']],
     s.preferredQuality||'auto');
-  html+=choiceCard('playEngine','播放内核','换台生效。MDK 画面最稳、叠面板不闪黑；MPV 滤镜/录制/电平最全',
-    [['mpv','MPV'],['mdk','MDK']], s.playEngine||'mdk');
   html+=switchCard('showWebNativeToggle','显示网页播放器切换按钮','不常用，默认隐藏；开了之后网页频道嗅探到直连流时，底部面板才会出现网页/内置播放器切换键');
   html+=switchCard('autoPlayNext','自动播放下一频道','当前节目结束后自动切台');
   html+=switchCard('resumeLastChannel','启动时恢复上次频道','关闭后启动停在「请选择频道」，不发任何网络请求');

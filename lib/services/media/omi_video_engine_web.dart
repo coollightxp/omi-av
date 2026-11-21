@@ -7,7 +7,6 @@ OmiVideoBackend createOmiVideoBackend({
   Map<String, String>? headers,
   String? formatHint,
   int bufferSeconds = 5,
-  bool useMdk = false,
 }) {
   return OmiVideoController.network(
     url,

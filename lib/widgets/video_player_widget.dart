@@ -208,7 +208,7 @@ class VideoPlayerWidget extends StatelessWidget {
               child: SizedBox(
                 width: hasSize ? w : 16,
                 height: hasSize ? h : 9,
-                // 门面 build()：io 走 media_kit 的 Video，web 走 VideoPlayer
+                // 门面 build()：io 走 MDK/fvp 的 VideoPlayer，web 走 VideoPlayer
                 child: vc.build(),
               ),
             ),
