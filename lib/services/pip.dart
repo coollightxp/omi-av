@@ -15,6 +15,7 @@ const MethodChannel _channel = MethodChannel('omi/pip');
 void Function(bool active)? _pipCb;
 void Function(String cmd)? _audioCb;
 void Function()? _backCb;
+void Function(int added)? _routeCb;
 bool _backReadySent = false;
 bool _handlerInstalled = false;
 
@@ -34,6 +35,12 @@ void _ensureHandler() {
         // 安卓系统返回键（遥控器/虚拟导航键）：原生直接上报，
         // 不走 popRoute → PopScope（部分 ROM 冷启动后不回调）
         _backCb?.call();
+        break;
+      case 'audioRoute':
+        // 音频设备增减（蓝牙音箱/耳机连上或断开）：1=新增 0=移除
+        final m = call.arguments;
+        final added = (m is Map && m['added'] == true) ? 1 : 0;
+        _routeCb?.call(added);
         break;
     }
   });
@@ -173,5 +180,15 @@ void listenPipState(void Function(bool active)? cb) {
 /// 注册通知栏/锁屏卡片命令回调（playpause / prev / next / stop / restore）
 void listenAudioCommands(void Function(String cmd)? cb) {
   _audioCb = cb;
+  _ensureHandler();
+}
+
+/// 注册音频设备变化回调（1=新增设备 0=移除）。
+///
+/// MDK 内核的音频输出不会跟随系统路由（蓝牙音箱连上后「在播没声」），
+/// 原生用 AudioManager.registerAudioDeviceCallback 监听设备增减，
+/// 由 Dart 侧重建立一次内核重新申请音频输出。其他平台无实现。
+void listenAudioRoute(void Function(int added)? cb) {
+  _routeCb = cb;
   _ensureHandler();
 }

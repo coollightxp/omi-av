@@ -240,6 +240,31 @@ jobs:
                   super.configureFlutterEngine(flutterEngine)
                   val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
                   this.ch = ch
+                  // 音频设备增减（蓝牙音箱/耳机连上或断开）上报 Dart：
+                  // MDK 的音频输出绑定在创建时的设备上，不会跟随系统路由，
+                  // 表现为「状态在播却没声音」。用 AudioDeviceCallback 而不是
+                  // 蓝牙广播：不需要任何权限（mpv 会自己重开 AO，MDK 不会）
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      try {
+                          val am = getSystemService(AUDIO_SERVICE)
+                              as android.media.AudioManager
+                          am.registerAudioDeviceCallback(
+                              object : android.media.AudioDeviceCallback() {
+                                  override fun onAudioDevicesAdded(
+                                      added: Array<out android.media.AudioDeviceInfo>?) {
+                                      try {
+                                          ch.invokeMethod("audioRoute", mapOf("added" to true))
+                                      } catch (e: Exception) {}
+                                  }
+                                  override fun onAudioDevicesRemoved(
+                                      removed: Array<out android.media.AudioDeviceInfo>?) {
+                                      try {
+                                          ch.invokeMethod("audioRoute", mapOf("added" to false))
+                                      } catch (e: Exception) {}
+                                  }
+                              }, null)
+                      } catch (e: Exception) {}
+                  }
                   // 通知栏/锁屏卡片（MediaService）经同一通道向 Dart 发按钮命令
                   MediaService.dart = ch
                   ch.setMethodCallHandler { call, result ->
@@ -1368,6 +1393,31 @@ jobs:
                   super.configureFlutterEngine(flutterEngine)
                   val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
                   this.ch = ch
+                  // 音频设备增减（蓝牙音箱/耳机连上或断开）上报 Dart：
+                  // MDK 的音频输出绑定在创建时的设备上，不会跟随系统路由，
+                  // 表现为「状态在播却没声音」。用 AudioDeviceCallback 而不是
+                  // 蓝牙广播：不需要任何权限（mpv 会自己重开 AO，MDK 不会）
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      try {
+                          val am = getSystemService(AUDIO_SERVICE)
+                              as android.media.AudioManager
+                          am.registerAudioDeviceCallback(
+                              object : android.media.AudioDeviceCallback() {
+                                  override fun onAudioDevicesAdded(
+                                      added: Array<out android.media.AudioDeviceInfo>?) {
+                                      try {
+                                          ch.invokeMethod("audioRoute", mapOf("added" to true))
+                                      } catch (e: Exception) {}
+                                  }
+                                  override fun onAudioDevicesRemoved(
+                                      removed: Array<out android.media.AudioDeviceInfo>?) {
+                                      try {
+                                          ch.invokeMethod("audioRoute", mapOf("added" to false))
+                                      } catch (e: Exception) {}
+                                  }
+                              }, null)
+                      } catch (e: Exception) {}
+                  }
                   // 通知栏/锁屏卡片（MediaService）经同一通道向 Dart 发按钮命令
                   MediaService.dart = ch
                   ch.setMethodCallHandler { call, result ->

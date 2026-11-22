@@ -469,6 +469,57 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  /// 音频路由变化防抖：连蓝牙时系统会连着报好几次设备增减
+  Timer? _audioRouteTimer;
+
+  /// 音频设备增减（蓝牙音箱/耳机连上或断开）。
+  ///
+  /// MDK 的音频输出绑定在「创建时」的设备上，系统把默认路由切到蓝牙后
+  /// 它既收不到通知、也不会重开输出——表现就是「状态在播、就是没声音」，
+  /// 只能重新选台（mpv 会自己重开 AO，所以老内核没这问题）。
+  /// 这里在设备变化后静默重建一次内核（复用起播路径，重新申请音频输出）。
+  /// 只在「电台 + 正在播放」时做：视频重建会把画面拉回直播头。
+  void _onAudioRouteChanged(int added) {
+    if (!_androidNative) return;
+    _audioRouteTimer?.cancel();
+    _audioRouteTimer = Timer(const Duration(milliseconds: 800), () {
+      final ch = _currentChannel;
+      if (ch == null || !ch.isRadio) return;
+      if (_webPageActive || _isCasting) return;
+      if (_state != PlayerState.playing) return;
+      _audioRebuildNeeded = false;
+      CastLog.write('audio_route added=$added rebuild ${ch.name}');
+      OsdBus.show('正在切换音频输出', icon: Icons.headphones);
+      unawaited(_autoReloadCurrent());
+    });
+  }
+
+  /// 自动重建内核（音频路由变化 / 蓝牙恢复 / 续播失败兜底共用）。
+  ///
+  /// 单飞 + 最小间隔：这几条自愈路径可能在同一时刻先后触发，以前各自
+  /// 重载，用户看到的就是「左一次右一次地重试」。这里 6 秒内只允许
+  /// 一次自动重建；失败后的重试交给原有的自动重试计数。
+  bool _autoReloadInFlight = false;
+  DateTime _lastAutoReloadAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  Future<void> _autoReloadCurrent({bool force = false}) async {
+    if (_autoReloadInFlight) return;
+    final now = DateTime.now();
+    if (!force &&
+        now.difference(_lastAutoReloadAt) < const Duration(seconds: 6)) {
+      return;
+    }
+    final ch = _currentChannel;
+    if (ch == null) return;
+    _lastAutoReloadAt = now;
+    _autoReloadInFlight = true;
+    try {
+      await playChannel(ch);
+    } finally {
+      _autoReloadInFlight = false;
+    }
+  }
+
   /// 播放状态可能从多处改变（内核回调/网页 JS/切台/投屏），统一在
   /// notifyListeners 出口处同步：播放中（非投屏/非电视端）时，
   /// 安卓按 Home 或切到别的应用会自动进入画中画小窗
@@ -631,6 +682,9 @@ class PlayerController extends ChangeNotifier {
     // 安卓：通知栏音频卡片的按钮（上一台/暂停/下一台/关闭）
     if (_androidNative) {
       listenAudioCommands(_onAudioCommand);
+      // 蓝牙音箱/耳机连上或断开：MDK 不会自己把音频输出切到新设备
+      // （mpv 会重开 AO，MDK 不会），表现为「状态在播却没声音」。
+      listenAudioRoute(_onAudioRouteChanged);
     }
     // 先启动 DLNA 投屏接收服务（不等系统值初始化，避免被阻塞）；
     // 用户可在设置中关闭
@@ -3879,7 +3933,7 @@ class PlayerController extends ChangeNotifier {
           _audioRebuildNeeded = false;
           _systemPaused = false;
           OsdBus.show('正在恢复声音', icon: Icons.volume_up);
-          await playChannel(ch);
+          await _autoReloadCurrent(force: true);
           return;
         }
         // 先原地续播：蓝牙连接 / 来电报 / 其它 App 抢音频焦点导致的系统
@@ -3903,7 +3957,7 @@ class PlayerController extends ChangeNotifier {
           if (!identical(vc, _videoController)) return;
           final v = vc.value;
           if (v.isPlaying || v.hasError) return;
-          await reloadCurrentChannel();
+          await _autoReloadCurrent();
         }));
         return;
       }
@@ -6485,7 +6539,7 @@ class PlayerController extends ChangeNotifier {
       if (_audioRebuildNeeded && ch != null && ch.isRadio) {
         _audioRebuildNeeded = false;
         OsdBus.show('正在恢复声音', icon: Icons.volume_up);
-        unawaited(playChannel(ch));
+        unawaited(_autoReloadCurrent());
         notifyListeners();
         return;
       }
@@ -6505,6 +6559,8 @@ class PlayerController extends ChangeNotifier {
   void dispose() {
     _lifecycleListener?.dispose();
     _lifecycleListener = null;
+    _audioRouteTimer?.cancel();
+    _audioRouteTimer = null;
     _tickTimer?.cancel();
     _epgDayTimer?.cancel();
     _bootMinTimer?.cancel();
