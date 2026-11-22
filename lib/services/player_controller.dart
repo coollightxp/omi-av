@@ -450,6 +450,21 @@ class PlayerController extends ChangeNotifier {
   /// 是否电视/盒子设备（TV 检测结果，供设备档位/画中画策略使用）
   bool get isTv => _isTv;
 
+  /// 同步屏幕常亮状态（Android 上就是给窗口加 FLAG_KEEP_SCREEN_ON）。
+  ///
+  /// 以前只在「真正起播」时才 enable、待机/等投屏时 disable：
+  /// 电视盒子上不选台放着不动，系统屏保会把画面慢慢变暗直至黑屏，
+  /// 得按一下遥控器才亮——而其它 TV App 待机界面都是常亮的。
+  /// 电视端（[isTv]）在前台一律常亮；手机/桌面仍按播放状态走，
+  /// 避免手机听电台时白耗电。
+  void _syncWakelock({bool playing = false}) {
+    if (playing || _isTv) {
+      unawaited(WakelockPlus.enable().catchError((_) {}));
+    } else {
+      unawaited(WakelockPlus.disable().catchError((_) {}));
+    }
+  }
+
   /// 播放状态可能从多处改变（内核回调/网页 JS/切台/投屏），统一在
   /// notifyListeners 出口处同步：播放中（非投屏/非电视端）时，
   /// 安卓按 Home 或切到别的应用会自动进入画中画小窗
@@ -498,6 +513,8 @@ class PlayerController extends ChangeNotifier {
     // Android TV / 电视盒子检测：决定是否启用切后台自动画中画
     _isTv = await isTvDevice();
     tvModeNotifier.value = _isTv;
+    // 电视端一进前台就常亮（待机/未选台也不该被系统屏保压暗）
+    _syncWakelock();
     // 直播流可用性探测：先读上次结果（列表过滤要用），再同步设置开关，
     // 并挂上「结果落库 → 重建列表」回调。探测本身延迟到启动稳定后跑
     await StreamProbe.ensureLoaded();
@@ -1602,7 +1619,7 @@ class PlayerController extends ChangeNotifier {
     if (willWait) {
       _pendingRestoreChannel = restore;
       await _disposeVideoController();
-      WakelockPlus.disable();
+      _syncWakelock();
       _state = PlayerState.idle;
       _enterCastWait(wait);
       return;
@@ -1611,7 +1628,7 @@ class PlayerController extends ChangeNotifier {
       await playChannel(restore);
     } else {
       await _disposeVideoController();
-      WakelockPlus.disable();
+      _syncWakelock();
       _state = PlayerState.idle;
       notifyListeners();
     }
@@ -3100,7 +3117,7 @@ class PlayerController extends ChangeNotifier {
       _systemPaused = false;
       await c.setLooping(false);
       await c.play();
-      await WakelockPlus.enable();
+      _syncWakelock(playing: true);
 
       _state = PlayerState.playing;
       _userPaused = false;
@@ -6415,6 +6432,8 @@ class PlayerController extends ChangeNotifier {
 
   void _onAppShown() {
     _appBackgrounded = false;
+    // 回前台重新同步常亮（电视端待机画面不能被系统压暗）
+    _syncWakelock();
     // 后台期间被系统抢焦点暂停（连蓝牙音箱等）：回前台直接续播，
     // 不重载——连接还活着，重载只会让用户多等一次缓冲
     if (_systemPaused) {
