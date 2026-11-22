@@ -79,10 +79,21 @@ class ReservationManager {
 
   /// 切换某个节目的预约状态（存在则删除，不存在则添加）
   Future<bool> toggleReservation(ProgramReservation r) async {
-    final matches = _reservations
+    // 优先按「频道 + 时间 + 节目名」匹配：同一频道相邻两档节目开始时间
+    // 有时只差几十秒（EPG 源时间戳不规整），只按时间匹配会把旁边的
+    // 节目一起取消掉。节目名对不上时再退回只按时间匹配（兼容旧数据）
+    var matches = _reservations
         .where((x) =>
-            x.channelId == r.channelId && _sameTime(x.startTime, r.startTime))
+            x.channelId == r.channelId &&
+            _sameTime(x.startTime, r.startTime) &&
+            x.programTitle.trim() == r.programTitle.trim())
         .toList();
+    if (matches.isEmpty) {
+      matches = _reservations
+          .where((x) =>
+              x.channelId == r.channelId && _sameTime(x.startTime, r.startTime))
+          .toList();
+    }
     if (matches.isNotEmpty) {
       // 删除**全部**匹配项：EPG 源重复下发时旧版本可能已写入多条
       // 同一档节目的预约，只删一条会导致图标一直亮着、怎么按都灭不掉
@@ -97,10 +108,16 @@ class ReservationManager {
     return true;
   }
 
-  /// 检查某节目是否已预约（时间用近似匹配，容忍 EPG 刷新精度变化）
-  bool isReserved(String channelId, DateTime startTime) {
+  /// 检查某节目是否已预约（时间用近似匹配，容忍 EPG 刷新精度变化）。
+  /// [programTitle] 非空时要求节目名一致——只按时间匹配会让相邻节目
+  /// 一起点亮（用户实测：预约一行，下面一行跟着亮）
+  bool isReserved(String channelId, DateTime startTime,
+      {String? programTitle}) {
+    final title = programTitle?.trim();
     return _reservations.any((r) =>
-        r.channelId == channelId && _sameTime(r.startTime, startTime));
+        r.channelId == channelId &&
+        _sameTime(r.startTime, startTime) &&
+        (title == null || title.isEmpty || r.programTitle.trim() == title));
   }
 
   /// 启动定时检查，每分钟检查一次是否有预约需要触发

@@ -5366,7 +5366,10 @@ class PlayerController extends ChangeNotifier {
   bool isProgramReserved(EpgProgram program) {
     final channel = _findChannelExact(program) ?? _currentChannel;
     final cid = channel?.id ?? program.channelId;
-    return reservationManager.isReserved(cid, program.startTime);
+    // 带节目名一起匹配：同一频道相邻节目开始时间接近时，只按时间
+    // 匹配会让预约一行、旁边一行跟着亮（用户实测）
+    return reservationManager
+        .isReserved(cid, program.startTime, programTitle: program.title);
   }
 
   // ==================== 录制与截图（fvp/MDK 原生，桌面端） ====================
