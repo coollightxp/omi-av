@@ -184,6 +184,17 @@ jobs:
                       // 抬起也吃掉：否则 ACTION_UP 会再触发一次默认返回
                       return true
                   }
+                  // 蓝牙遥控器（运营商盒子原配 HID 手柄型 RCU）常把「确定」
+                  // 上报成 KEYCODE_BUTTON_SELECT / BUTTON_START，而 2.4G
+                  // USB 遥控器发的是标准 DPAD_CENTER / ENTER。统一翻译成
+                  // DPAD_CENTER，Dart 侧只认一套确定键（用户实测：Windows
+                  // 的 2.4G 遥控器正常，盒子蓝牙遥控器按 OK 无反应）
+                  if (event.keyCode == android.view.KeyEvent.KEYCODE_BUTTON_SELECT ||
+                      event.keyCode == android.view.KeyEvent.KEYCODE_BUTTON_START) {
+                      val ok = android.view.KeyEvent(
+                          event.action, android.view.KeyEvent.KEYCODE_DPAD_CENTER)
+                      return super.dispatchKeyEvent(ok)
+                  }
                   return super.dispatchKeyEvent(event)
               }
 
@@ -1300,6 +1311,17 @@ jobs:
                       }
                       // 抬起也吃掉：否则 ACTION_UP 会再触发一次默认返回
                       return true
+                  }
+                  // 蓝牙遥控器（运营商盒子原配 HID 手柄型 RCU）常把「确定」
+                  // 上报成 KEYCODE_BUTTON_SELECT / BUTTON_START，而 2.4G
+                  // USB 遥控器发的是标准 DPAD_CENTER / ENTER。统一翻译成
+                  // DPAD_CENTER，Dart 侧只认一套确定键（用户实测：Windows
+                  // 的 2.4G 遥控器正常，盒子蓝牙遥控器按 OK 无反应）
+                  if (event.keyCode == android.view.KeyEvent.KEYCODE_BUTTON_SELECT ||
+                      event.keyCode == android.view.KeyEvent.KEYCODE_BUTTON_START) {
+                      val ok = android.view.KeyEvent(
+                          event.action, android.view.KeyEvent.KEYCODE_DPAD_CENTER)
+                      return super.dispatchKeyEvent(ok)
                   }
                   return super.dispatchKeyEvent(event)
               }

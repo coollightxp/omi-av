@@ -79,18 +79,22 @@ class ReservationManager {
 
   /// 切换某个节目的预约状态（存在则删除，不存在则添加）
   Future<bool> toggleReservation(ProgramReservation r) async {
-    final existing = _reservations.any((x) =>
-        x.channelId == r.channelId && _sameTime(x.startTime, r.startTime));
-    if (existing) {
-      await removeReservation(_reservations
-          .firstWhere((x) =>
-              x.channelId == r.channelId && _sameTime(x.startTime, r.startTime))
-          .id);
+    final matches = _reservations
+        .where((x) =>
+            x.channelId == r.channelId && _sameTime(x.startTime, r.startTime))
+        .toList();
+    if (matches.isNotEmpty) {
+      // 删除**全部**匹配项：EPG 源重复下发时旧版本可能已写入多条
+      // 同一档节目的预约，只删一条会导致图标一直亮着、怎么按都灭不掉
+      final ids = matches.map((e) => e.id).toSet();
+      _reservations.removeWhere((x) => ids.contains(x.id));
+      _triggeredIds.removeAll(ids);
+      await _save();
+      await _saveTriggered();
       return false;
-    } else {
-      await addReservation(r);
-      return true;
     }
+    await addReservation(r);
+    return true;
   }
 
   /// 检查某节目是否已预约（时间用近似匹配，容忍 EPG 刷新精度变化）

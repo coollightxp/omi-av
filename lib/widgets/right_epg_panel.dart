@@ -55,20 +55,36 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   /// XMLTV 源通常一次给出今明两天（解压后 7 MB、数万条），全列出来
   /// 滚动极长，打开面板也定位不到正在直播的节目。这里按自然日裁剪：
   /// 与今天有交集（含跨零点的节目）的条目才显示。
+  ///
+  /// 同时去重：部分 EPG 源会把同一档节目重复下发（起播时间相差几十秒、
+  /// 标题相同）。不去重的话，预约一条会同时点亮相邻两条（预约状态按
+  /// 「频道 + 开始时间 ±60 秒」匹配），取消时也要按两次才灭得掉。
   List<EpgProgram> _todayPrograms(PlayerController controller) {
     final all = controller.getCurrentEpg();
     if (all.isEmpty) return all;
     final now = DateTime.now();
     final dayStart = DateTime(now.year, now.month, now.day);
     final dayEnd = dayStart.add(const Duration(days: 1));
-    return all
-        .where((p) =>
-            p.endTime.isAfter(dayStart) && p.startTime.isBefore(dayEnd))
-        .toList();
+    final out = <EpgProgram>[];
+    for (final p in all) {
+      if (!(p.endTime.isAfter(dayStart) && p.startTime.isBefore(dayEnd))) {
+        continue;
+      }
+      final dup = out.any((q) =>
+          q.title == p.title &&
+          q.startTime.difference(p.startTime).inSeconds.abs() < 60);
+      if (!dup) out.add(p);
+    }
+    return out;
   }
 
   /// OK 按下保持标记：按住时系统自动重复的 down 事件只触发一次预约
   bool _okHeld = false;
+
+  /// 按下边沿时刻：蓝牙遥控器的抬起边沿可能丢失，[_okHeld] 会永远停在
+  /// true，之后所有 OK 都被吞掉（用户实测：预约之后怎么按都取消不掉）。
+  /// 超过 1.5 秒的再次按下视为新的一次按键，自愈放行
+  DateTime? _okHeldAt;
 
   /// 上次预约/取消预约的时间，长按期间的二次触发忽略，
   /// 避免网络/EPG 数据刷新时连续 toggle 产生混乱提示
@@ -97,6 +113,7 @@ class RightEpgPanelState extends State<RightEpgPanel> {
       _kbIndex = 0;
       _kbSelectionKey = null;
       _okHeld = false;
+      _okHeldAt = null;
     }
     // 面板打开：重置定位标记，确保本次打开一定滚到正在直播的节目。
     // 面板常驻树中（仅偏移隐藏），隐藏期间 EPG 也会构建，
@@ -136,8 +153,19 @@ class RightEpgPanelState extends State<RightEpgPanel> {
         // 单按 OK 直接预约/取消：按住时系统重复 down 事件由 _okHeld 去重，
         // 按住不重复触发（否则会连环 toggle 且 EPG 刷新后索引偏移，
         // 把"下面好几个节目"也预约上）
-        if (_okHeld) return;
+        //
+        // 抬起边沿可能永远不来（蓝牙遥控器/电视盒子实测）：只靠 _okHeld
+        // 会让第一次预约之后再按 OK 全被吞掉。超过 1.5 秒的再次按下
+        // 视为新的一次按键，自愈放行（与播放页 OK 逻辑同口径）
+        if (_okHeld) {
+          final age = _okHeldAt == null
+              ? 99999
+              : DateTime.now().difference(_okHeldAt!).inMilliseconds;
+          if (age < 1500) return;
+          _okHeld = false;
+        }
         _okHeld = true;
+        _okHeldAt = DateTime.now();
         if (_lastToggleAt != null &&
             DateTime.now().difference(_lastToggleAt!) <
                 const Duration(milliseconds: 800)) {
@@ -147,6 +175,7 @@ class RightEpgPanelState extends State<RightEpgPanel> {
         _toggleReservation(epg[_kbIndex.clamp(0, epg.length - 1)]);
       } else {
         _okHeld = false;
+        _okHeldAt = null;
       }
     }
   }

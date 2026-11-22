@@ -132,6 +132,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 重复事件丢掉 —— 用户看到的正是「切完线路第一下 OK 没反应」）
   DateTime? _okHeldAt;
 
+  /// 电视盒子：OK 按下即执行短按动作（不等抬起），此标记用于把随后
+  /// 迟到的抬起边沿吞掉，避免同一次按键执行两遍（开→关）
+  bool _okTapFired = false;
+
+  /// 上一次「按下即执行」的时刻：系统重复 KeyDown / 遥控器一次按键发
+  /// 两个键码时，短间隔内的第二次按下直接丢弃
+  DateTime? _okTapAt;
+
   // 跨通道去重（Windows）：按键有两条到达路径——Flutter 键盘事件，和
   // 网页前台时原生低级钩子经 omi/win_hotkeys 转发的动作。切到/切离网页
   // 线路的那一瞬间两条路可能同时通，同一次物理按键被执行两遍：第一下
@@ -668,6 +676,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _okDownInPanel = false;
     _okLongFired = false;
     _okLongTimer?.cancel();
+    // 电视端「按下即执行」的配对标记也要清：切台/切源后迟到的抬起
+    // 不能把下一次按下误当成同一次按键吞掉
+    _okTapFired = false;
+    _okTapAt = null;
     _arrowDown = false;
     _arrowLongFired = false;
     _arrowLongTimer?.cancel();
@@ -2876,6 +2888,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// OK 按下边沿（首次按下；系统自动重复由 _okHeld 去重）。
   /// 面板打开：转发面板；否则启动 500ms 长按计时。
   void _okDown() {
+    // 电视盒子（Android TV / 运营商 IPTV 盒子）：蓝牙遥控器的 OK 抬起
+    // 边沿经常丢失（实测 E900V22C / 睿宁科技 TV），短按会一直等不到
+    // 抬起，最后落到 500ms 长按逻辑去呼出底部控制面板——用户看到的就是
+    // 「按 OK 左侧节目列表不出来」。电视端 OK 的主语义本来就是呼出频道
+    // 列表，因此改成「按下即执行」，抬起迟到也只会被吞掉；手机/桌面仍
+    // 保留按下-抬起配对（长按 OK = 控制面板）。
+    final tvOk = context.read<PlayerController>().isTv;
     if (_okHeld) {
       // 按住状态自愈：正常长按会不断收到重复按下，间隔远小于 1.2 秒。
       // 超过这个时长还停在 true，只能是「抬起事件丢了」（切源/重建/
@@ -2884,15 +2903,25 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       final age = _okHeldAt == null
           ? 99999
           : DateTime.now().difference(_okHeldAt!).inMilliseconds;
-      if (age < 1200) {
+      // 电视端：抬起边沿本来就不可靠，_okHeld 会长期停在 true。
+      // 短于 500ms 的再次按下视为系统重复/一次按键双码；超过就一定是
+      // 用户新按的一次（500ms 内连点两下遥控器几乎不可能）
+      if (tvOk && age >= 500) {
+        WebDiag.log('ok_held_tv_repress age=${age}ms');
+        _okHeld = false;
+        _okLongFired = false;
+        _okDownInPanel = false;
+        _okLongTimer?.cancel();
+      } else if (age < 1200) {
         WebDiag.log('ok_eaten reason=held age=${age}ms');
         return;
+      } else {
+        WebDiag.log('ok_held_stale age=${age}ms');
+        _okHeld = false;
+        _okLongFired = false;
+        _okDownInPanel = false;
+        _okLongTimer?.cancel();
       }
-      WebDiag.log('ok_held_stale age=${age}ms');
-      _okHeld = false;
-      _okLongFired = false;
-      _okDownInPanel = false;
-      _okLongTimer?.cancel();
     }
     _okHeld = true;
     _okHeldAt = DateTime.now();
@@ -2921,11 +2950,36 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       WebDiag.log('ok_eaten reason=tune_pending');
       return;
     }
+    if (tvOk) {
+      // 电视端按下即执行短按；遥控器一次按键发两个键码时第二次丢弃
+      final now = DateTime.now();
+      final dup = _okTapAt != null &&
+          now.difference(_okTapAt!) < const Duration(milliseconds: 350);
+      _okTapAt = now;
+      _okTapFired = true;
+      if (!dup) _fireOkShortPress();
+      return;
+    }
     _okLongTimer = Timer(const Duration(milliseconds: 500), () {
       _okLongFired = true;
       // 长按 OK = 呼出/收起控制面板（内部有播放状态守卫）
       _toggleBottomPanel();
     });
+  }
+
+  /// OK 短按语义：点播暂停/播放；直播/网页频道 = 呼出或收起左侧列表。
+  /// 抬起边沿与「电视盒子按下即执行」两条路径共用，保证行为一致
+  void _fireOkShortPress() {
+    final c = context.read<PlayerController>();
+    // 点播短按 OK = 暂停/播放；直播/网页频道 = 呼出或收起节目列表
+    if (c.isSeekable && !c.webPageActive) {
+      WebDiag.log('ok_short action=playpause');
+      c.togglePlayPause();
+    } else {
+      WebDiag.log(
+          'ok_short action=drawer seekable=${c.isSeekable} web=${c.webPageActive}');
+      _toggleDrawer(left: true);
+    }
   }
 
   /// OK 抬起边沿：面板打开时转发；否则长按不触发、短按按播放状态处理
@@ -2939,6 +2993,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _okHeld = false;
     _okHeldAt = null;
     _okLongTimer?.cancel();
+    // 电视端「按下即执行」已经处理过这一次按键：迟到的抬起只吞掉
+    if (_okTapFired) {
+      _okTapFired = false;
+      _okDownInPanel = false;
+      _okLongFired = false;
+      return;
+    }
     // 按下时面板是打开的（选台/按钮操作可能在按下边沿已关闭面板），
     // 这次抬起仍属于面板内操作，绝不能落到短按逻辑里——否则频道列表
     // 选台后松手会触发「面板外短按」= 播放/暂停切换或重开列表（串台感）
@@ -2969,15 +3030,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     if (!_okLongFired) {
-      final c = context.read<PlayerController>();
-      // 点播短按 OK = 暂停/播放；直播/网页频道 = 呼出或收起节目列表
-      if (c.isSeekable && !c.webPageActive) {
-        WebDiag.log('ok_short action=playpause');
-        c.togglePlayPause();
-      } else {
-        WebDiag.log('ok_short action=drawer seekable=${c.isSeekable} web=${c.webPageActive}');
-        _toggleDrawer(left: true);
-      }
+      _fireOkShortPress();
     }
     _okLongFired = false;
   }
@@ -7953,7 +8006,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
               ],
             ),
           ),
-        // 未安装/版本过旧的 WebView2 运行时（部分 Win10 家庭版）
+        // 未安装/版本过旧的 WebView 运行时；安卓电视盒子常见的是
+        // 系统 WebView 被精简/停用，页面永远没有加载进度 → 黑屏无反应
         if (_runtimeMissing)
           Center(
             child: Container(
@@ -7970,13 +8024,16 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
                   const Icon(Icons.web_asset, color: Colors.amber, size: 40),
                   const SizedBox(height: 12),
                   Text(
-                    webEnvOfficialVersion != null
-                        ? '已检测到 WebView2 $webEnvOfficialVersion，但环境创建失败\n可尝试重装 WebView2 Runtime 或重启程序'
-                        : '未检测到 WebView2 运行环境\n网页频道需要 Microsoft Edge WebView2 Runtime',
+                    defaultTargetPlatform == TargetPlatform.android
+                        ? '此设备的系统 WebView 无法加载网页\n可用系统浏览器打开当前频道'
+                        : (webEnvOfficialVersion != null
+                            ? '已检测到 WebView2 $webEnvOfficialVersion，但环境创建失败\n可尝试重装 WebView2 Runtime 或重启程序'
+                            : '未检测到 WebView2 运行环境\n网页频道需要 Microsoft Edge WebView2 Runtime'),
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white, fontSize: 14),
                   ),
-                  if (webEnvLastError.isNotEmpty) ...[
+                  if (defaultTargetPlatform != TargetPlatform.android &&
+                      webEnvLastError.isNotEmpty) ...[
                     const SizedBox(height: 10),
                     SelectableText(
                       webEnvLastError,
@@ -7986,12 +8043,19 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
                     ),
                   ],
                   const SizedBox(height: 14),
-                  ElevatedButton.icon(
-                    icon: const Icon(Icons.download, size: 18),
-                    label: const Text('下载并安装 WebView2'),
-                    onPressed: () => launchExternal(
-                        'https://developer.microsoft.com/microsoft-edge/webview2/'),
-                  ),
+                  if (defaultTargetPlatform == TargetPlatform.android)
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.open_in_browser, size: 18),
+                      label: const Text('用系统浏览器打开'),
+                      onPressed: () => launchExternal(widget.url),
+                    )
+                  else
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.download, size: 18),
+                      label: const Text('下载并安装 WebView2'),
+                      onPressed: () => launchExternal(
+                          'https://developer.microsoft.com/microsoft-edge/webview2/'),
+                    ),
                 ],
               ),
             ),

@@ -3096,11 +3096,15 @@ class PlayerController extends ChangeNotifier {
       // 后续切台对它的释放不会与初始化并发
       _videoController = c;
       _videoListenerClosure = closure;
+      _lastVideoIsPlaying = false;
+      _systemPaused = false;
       await c.setLooping(false);
       await c.play();
       await WakelockPlus.enable();
 
       _state = PlayerState.playing;
+      _userPaused = false;
+      _systemPaused = false;
       // 电台：MDK/fvp 不暴露 ICY 曲目名，自己连一路元数据补齐
       // （通知栏/锁屏卡片、曲目历史、歌词锚点都读同一条 _lastMediaTitle）
       if (channel.isRadio && !_isCasting) {
@@ -3185,6 +3189,18 @@ class PlayerController extends ChangeNotifier {
     // 只处理当前 controller 的事件，旧实例的迟到事件一律忽略
     if (!identical(self, _videoController)) return;
     final v = self.value;
+    // 外部暂停识别：我们以为是播放中、用户也没按暂停，底层却停了
+    // （连蓝牙音箱/来电/其它 App 抢音频焦点）。标记后回前台自动续播。
+    final wasPlaying = _lastVideoIsPlaying;
+    _lastVideoIsPlaying = v.isPlaying;
+    if (wasPlaying &&
+        !v.isPlaying &&
+        !v.isCompleted &&
+        !v.hasError &&
+        _state == PlayerState.playing &&
+        !_userPaused) {
+      _systemPaused = true;
+    }
     // ICY 曲目变化：记进"本次已播"，供电台版节目单面板（方案 13.2）
     final track = v.mediaTitle.trim();
     if (track.isNotEmpty && track != _lastMediaTitle) {
@@ -3796,27 +3812,53 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     if (_videoController!.value.isPlaying) {
+      // 先置标记再 pause：pause 触发的回调里不能把这次当成"外部暂停"
+      _userPaused = true;
+      _systemPaused = false;
       await _videoController!.pause();
       _state = PlayerState.paused;
     } else {
-      // 电台直播流：从暂停/出错恢复一律整段重载，不走 unpause（待办 M）。
+      // 电台直播流：先尝试原地续播，2 秒没起来再整段重载（待办 M）。
       //
-      // 断流（网络抖动）之后到服务器的连接其实已经死了，`play()` 只是
-      // 把 mpv 的 pause 拍回去——它拿着一条不存在的连接干等，恢复无声；
-      // 切到别的台有声（全新 loadfile），切回原台再按播放还是无声（同
-      // 一条死连接）。用户实测「网络重载重新载入就有声」实锤了这条路。
-      //
-      // 直播流本来就没有「接着暂停前的位置听」的概念——暂停期间直播
-      // 已经走到前面去了，重载就是重新接上当前直播，语义完全一致。
+      // 为什么不能一律 unpause：断流（网络抖动）之后到服务器的连接其实
+      // 已经死了，`play()` 只是把 pause 拍回去，拿着一条不存在的连接
+      // 干等，恢复无声。但反过来一律重载也不对——连蓝牙、来电报这类
+      // 系统抢占音频焦点只是把播放器暂停了，连接是好的，重载只会让
+      // 用户白等一次缓冲（用户实测：暂停再点播放，界面显示"重新载入"）。
+      // 所以先 play() 快速续播，2 秒后仍没声音/进度才回落到重载。
       // 电视频道不动：暂停放视频是常见操作，恢复不能把画面拉回直播头。
       final ch = _currentChannel;
       if (ch != null && ch.isRadio) {
         _audioCardClosed = false;
-        await reloadCurrentChannel();
+        // 先原地续播：蓝牙连接 / 来电报 / 其它 App 抢音频焦点导致的系统
+        // 暂停，底层连接通常还活着，整段重载既慢又白等一次缓冲。
+        // 只有续播 2 秒后仍没起来（真断流）才回落到整段重载（待办 M）。
+        final vc = _videoController!;
+        final gen = _playGeneration;
+        _userPaused = false;
+        _systemPaused = false;
+        _state = PlayerState.playing;
+        notifyListeners();
+        try {
+          await vc.play();
+        } catch (_) {
+          await reloadCurrentChannel();
+          return;
+        }
+        unawaited(Future<void>(() async {
+          await Future<void>.delayed(const Duration(seconds: 2));
+          if (gen != _playGeneration) return;
+          if (!identical(vc, _videoController)) return;
+          final v = vc.value;
+          if (v.isPlaying || v.hasError) return;
+          await reloadCurrentChannel();
+        }));
         return;
       }
       await _videoController!.play();
       _state = PlayerState.playing;
+      _userPaused = false;
+      _systemPaused = false;
       // 用户重新开始播：允许卡片重新出现（此前按过 ❌ 收起来过）
       _audioCardClosed = false;
     }
@@ -6277,6 +6319,14 @@ class PlayerController extends ChangeNotifier {
       }
       // 先摘监听再释放：内核 release 自身幂等；超时仅意味着底层仍在
       // 释放，绝不重复调用
+      //
+      // 释放前先 pause：release 在个别机器上会卡住/超时，这里以前直接
+      // 放弃该实例，但它的音频仍在响——切到网页直播就变成「网页声 +
+      // 后台电台声」两路叠音（用户实测）。先 pause 把声音掐掉，后面
+      // release 超时也不影响听感。
+      try {
+        await c.pause().timeout(const Duration(seconds: 2));
+      } catch (_) {}
       try {
         await c.release().timeout(const Duration(seconds: 5));
       } on TimeoutException {
@@ -6333,6 +6383,14 @@ class PlayerController extends ChangeNotifier {
   /// App 是否在后台（后台电台的 UI/通知策略会用到）
   bool _appBackgrounded = false;
 
+  /// 用户自己按的暂停。用来区分「用户暂停」和「系统抢音频焦点导致
+  /// 底层暂停」（连蓝牙音箱、来电报、别的 App 出声），后者回前台自动续播。
+  bool _userPaused = false;
+  bool _systemPaused = false;
+
+  /// 上一次内核上报的播放态，用于在监听回调里识别"外部暂停"
+  bool _lastVideoIsPlaying = false;
+
   /// 现在是否处于后台。
   ///
   /// 不只看 AppLifecycleListener 标记：某些系统/通知栏交互下 onHide
@@ -6354,6 +6412,18 @@ class PlayerController extends ChangeNotifier {
 
   void _onAppShown() {
     _appBackgrounded = false;
+    // 后台期间被系统抢焦点暂停（连蓝牙音箱等）：回前台直接续播，
+    // 不重载——连接还活着，重载只会让用户多等一次缓冲
+    if (_systemPaused) {
+      _systemPaused = false;
+      final vc = _videoController;
+      if (vc != null && vc.value.isInitialized && !vc.value.isPlaying) {
+        _state = PlayerState.playing;
+        _userPaused = false;
+        notifyListeners();
+        unawaited(vc.play().catchError((_) {}));
+      }
+    }
     // 立刻刷一次：后台切台改的是 Dart 侧状态，回前台第一帧就该是新台
     // （不刷的话个别机型会先贴一帧旧界面再跳）
     notifyListeners();
