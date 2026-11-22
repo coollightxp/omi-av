@@ -140,6 +140,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 两个键码时，短间隔内的第二次按下直接丢弃
   DateTime? _okTapAt;
 
+  /// 电视端「未知键码当 OK」兜底正在按住中（用于把对应的抬起也配对掉）
+  bool _okUnknownKeyHeld = false;
+
   // 跨通道去重（Windows）：按键有两条到达路径——Flutter 键盘事件，和
   // 网页前台时原生低级钩子经 omi/win_hotkeys 转发的动作。切到/切离网页
   // 线路的那一瞬间两条路可能同时通，同一次物理按键被执行两遍：第一下
@@ -664,6 +667,30 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     return dup;
   }
 
+  /// 电视端「疑似确定键」判定（未知键码兜底）。
+  ///
+  /// 部分运营商盒子的遥控器把 OK 上报成非标准键码（实测红外遥控器
+  /// 在 E900V22C 上按 OK 完全没反应，上下/菜单键却正常），Flutter 侧
+  /// 认不出来。这里把「无可见字符、无修饰键、非音量/电源」的按下事件
+  /// 当作 OK；音量/电源必须留给系统，字母数字是外接键盘输入，不能误吞
+  bool _isTvOkLikeKey(KeyEvent event) {
+    final ch = event.character;
+    if (ch != null &&
+        ch.isNotEmpty &&
+        RegExp(r'^[\x20-\x7E]$').hasMatch(ch)) {
+      return false;
+    }
+    final hk = HardwareKeyboard.instance;
+    if (hk.isAltPressed || hk.isControlPressed || hk.isMetaPressed) {
+      return false;
+    }
+    final k = event.logicalKey;
+    return k != LogicalKeyboardKey.audioVolumeUp &&
+        k != LogicalKeyboardKey.audioVolumeDown &&
+        k != LogicalKeyboardKey.audioVolumeMute &&
+        k != LogicalKeyboardKey.power;
+  }
+
   /// 换源/换台前清空「按住-抬起」配对状态。
   ///
   /// 切源时播放器会重建，Windows 上原生视频控件/WebView2 会抢一次窗口
@@ -680,6 +707,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 不能把下一次按下误当成同一次按键吞掉
     _okTapFired = false;
     _okTapAt = null;
+    _okUnknownKeyHeld = false;
     _arrowDown = false;
     _arrowLongFired = false;
     _arrowLongTimer?.cancel();
@@ -2806,6 +2834,25 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (_isBackKey(k)) {
       if (isDown) _handleBackPressed();
       return true;
+    }
+
+    // 电视盒子兜底：运营商盒子（红外/蓝牙遥控器）的「确定」有的 ROM 会
+    // 上报成非标准键码，Dart 侧所有已知分支都匹配不上，表现就是「按 OK
+    // 完全没反应」。已知键都在上面 return 了；走到这里还认不出来的按下
+    // 事件，在电视端一律按 OK 处理，并记录真实键码便于后续精确收敛
+    if (context.read<PlayerController>().isTv) {
+      if (isDown && _isTvOkLikeKey(event)) {
+        WebDiag.log('tv_ok_fallback logical=${k.debugName} keyId=${k.keyId} '
+            'physical=${event.physicalKey.debugName}');
+        _okUnknownKeyHeld = true;
+        _okDown();
+        return true;
+      }
+      if (isUp && _okUnknownKeyHeld) {
+        _okUnknownKeyHeld = false;
+        _okUp();
+        return true;
+      }
     }
 
     // 其余按键只处理首次按下；长按重复事件是 KeyRepeatEvent，天然被排除
