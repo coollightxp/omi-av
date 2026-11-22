@@ -33,9 +33,11 @@ String? webEnvOfficialVersion;
 String? _resolvedUserDataFolder;
 
 const _browserArgs =
-    // InPrivate：用户数据/缓存写入临时位置，WebView2 退出后自动丢弃，
-    // 不累积磁盘缓存（长时间播放网页视频后读入变慢的根因）
-    '--inprivate '
+    // 保留磁盘缓存（上限 256MB）：
+    // 以前用 --inprivate 是为了防「长时间看网页视频后缓存无限膨胀、
+    // 读入变慢」，代价是每次打开网页频道都要重新下载播放器/清单/分片，
+    // 高峰期 CDN 一慢就起不来（安卓 WebView 有缓存，起播明显更快）。
+    // 现在改成有上限的持久缓存：重复起播命中缓存，又不会无限增长
     '--disk-cache-size=268435456 --autoplay-policy=no-user-gesture-required';
 
 // ==================== 用户数据目录 ====================
