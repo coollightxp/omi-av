@@ -293,6 +293,10 @@ class PlayerController extends ChangeNotifier {
   /// 电台 ICY 歌名读取器（MDK 内核不提供 StreamTitle）
   IcyMetadataReader? _icyReader;
 
+  /// ICY 标题延迟落库（比听到的声音提前几秒，见 [_queueIcyTitle]）
+  Timer? _icyTitleTimer;
+  static const _icyTitleDelay = Duration(seconds: 3);
+
   /// 读取器代际：换台时旧连接迟到的标题直接丢弃
   int _icyGen = 0;
   String _lastMediaTitle = '';
@@ -2041,6 +2045,8 @@ class PlayerController extends ChangeNotifier {
     }
     // 手动切台 = 放弃等待投屏
     _clearCastWait();
+    // 全新内核会重新申请音频输出，之前的「路由失联」标记由本次起播解决
+    _audioRebuildNeeded = false;
     // 内核录制绑定当前内核：换台/重播/重载都会重建内核，先把文件收尾，
     // 否则旧内核一释放录制文件就打不开。投屏流级录制与内核无关，不在这里停
     // （换投屏由 playCastUrl 处理）。
@@ -3217,6 +3223,9 @@ class PlayerController extends ChangeNotifier {
         _state == PlayerState.playing &&
         !_userPaused) {
       _systemPaused = true;
+      // 电台：这种暂停几乎都是音频焦点被抢（蓝牙连上/来电），底层的
+      // 音频输出不会跟着切到新路由——续播会"在播但没声音"，标记重载
+      if (_currentChannel?.isRadio ?? false) _audioRebuildNeeded = true;
     }
     // ICY 曲目变化：记进"本次已播"，供电台版节目单面板（方案 13.2）
     final track = v.mediaTitle.trim();
@@ -3407,7 +3416,7 @@ class PlayerController extends ChangeNotifier {
     final gen = ++_icyGen;
     final reader = IcyMetadataReader(onTitle: (title) {
       if (gen != _icyGen) return;
-      _onIcyTitle(title);
+      _queueIcyTitle(title);
     });
     _icyReader = reader;
     final u = Uri.tryParse(url);
@@ -3415,8 +3424,24 @@ class PlayerController extends ChangeNotifier {
     unawaited(reader.start(u, headers: headers.isEmpty ? null : headers));
   }
 
+  /// ICY 标题比声音早到：服务端在新歌开始前就把 StreamTitle 换掉了，
+  /// 而播放器还有几秒缓冲要放，直接落库就是「上一首还在唱、标题已经跳了」。
+  /// 延迟几秒再写，与耳朵听到的声音对齐；期间再来新标题直接顶掉旧的。
+  void _queueIcyTitle(String raw) {
+    final track = raw.trim();
+    if (track.isEmpty) return;
+    _icyTitleTimer?.cancel();
+    final gen = _icyGen;
+    _icyTitleTimer = Timer(_icyTitleDelay, () {
+      if (gen != _icyGen) return;
+      _onIcyTitle(track);
+    });
+  }
+
   void _stopIcyReader() {
     _icyGen++;
+    _icyTitleTimer?.cancel();
+    _icyTitleTimer = null;
     final r = _icyReader;
     _icyReader = null;
     if (r != null) unawaited(r.stop());
@@ -3847,6 +3872,16 @@ class PlayerController extends ChangeNotifier {
       final ch = _currentChannel;
       if (ch != null && ch.isRadio) {
         _audioCardClosed = false;
+        // 系统抢焦点（蓝牙音箱连上/来电）导致的暂停：音频输出已和新路由
+        // 脱钩，原地 play() 会"显示在播却没声音"（用户实测，只能重新选台
+        // 才恢复）。这种情况直接重建内核，OSD 用「恢复声音」而不是「重载」
+        if (_audioRebuildNeeded) {
+          _audioRebuildNeeded = false;
+          _systemPaused = false;
+          OsdBus.show('正在恢复声音', icon: Icons.volume_up);
+          await playChannel(ch);
+          return;
+        }
         // 先原地续播：蓝牙连接 / 来电报 / 其它 App 抢音频焦点导致的系统
         // 暂停，底层连接通常还活着，整段重载既慢又白等一次缓冲。
         // 只有续播 2 秒后仍没起来（真断流）才回落到整段重载（待办 M）。
@@ -6408,6 +6443,12 @@ class PlayerController extends ChangeNotifier {
   bool _userPaused = false;
   bool _systemPaused = false;
 
+  /// 系统抢焦点（连蓝牙音箱/来电/别的 App 出声）把内核暂停后，音频输出
+  /// 已经和「新路由」脱钩了：原地 `play()` 会「状态在播、就是没声音」，
+  /// 只有重建内核（=用户说的重新选台）才恢复。标记到下一次恢复时用
+  /// 重载代替原地续播（待办：电台专属，视频重载会丢进度）。
+  bool _audioRebuildNeeded = false;
+
   /// 上一次内核上报的播放态，用于在监听回调里识别"外部暂停"
   bool _lastVideoIsPlaying = false;
 
@@ -6438,6 +6479,16 @@ class PlayerController extends ChangeNotifier {
     // 不重载——连接还活着，重载只会让用户多等一次缓冲
     if (_systemPaused) {
       _systemPaused = false;
+      // 音频焦点被抢（蓝牙音箱连上）后的暂停：原地续播会没有声音，
+      // 必须重建内核（与用户按「播放」走同一条修复路径）
+      final ch = _currentChannel;
+      if (_audioRebuildNeeded && ch != null && ch.isRadio) {
+        _audioRebuildNeeded = false;
+        OsdBus.show('正在恢复声音', icon: Icons.volume_up);
+        unawaited(playChannel(ch));
+        notifyListeners();
+        return;
+      }
       final vc = _videoController;
       if (vc != null && vc.value.isInitialized && !vc.value.isPlaying) {
         _state = PlayerState.playing;
