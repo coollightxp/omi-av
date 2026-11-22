@@ -7134,10 +7134,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
         const Duration(seconds: 15), () => _finishWithWeb(via: 'decision15'));
     // 运行时缺失判定（乐观策略）：注册表/版本查询在不同系统上都不可靠
     // （实测已装 WebView2 的家庭版也会误报）。只要 WebView 能报告任何
-    // 加载进度，就证明运行时正常；25 秒内毫无进展才提示安装。
-    // 放宽到 25 秒：慢站点 + 弱网下 15 秒易误判"未安装"，导致程序
-    // 状态不一致、退出时 WebView 未正确释放进而崩溃。
-    _runtimeTimer = Timer(const Duration(seconds: 25), () {
+    // 加载进度，就证明运行时正常；10 秒内毫无进展才提示不可用。
+    // 电视盒子（运营商定制 ROM 常见 WebView 被精简/停用）在这里能很快
+    // 拿到结论，不用盯着"正在打开网页频道"干等；进度一旦回来会立即
+    // 撤销该提示（见 onProgressChanged），慢站不会误判后一直挡画面
+    _runtimeTimer = Timer(const Duration(seconds: 10), () {
       if (mounted && !_sawProgress && _error == null) {
         WebDiag.log('runtime_missing');
         setState(() => _runtimeMissing = true);
@@ -8002,6 +8003,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
               WebDiag.log('progress_first', 'v=$progress');
             }
             if (progress > 0) _sawProgress = true;
+            // 10 秒判定"运行时不可用"只是弱网/慢站的保守提示：进度一旦
+            // 回来就撤销，避免卡片(或"用系统浏览器打开")盖住能用的页面
+            if (progress > 0 && _runtimeMissing && mounted) {
+              setState(() => _runtimeMissing = false);
+            }
             // 分桶记录加载进度（25/50/75/100），慢站定位卡在哪个阶段
             final bucket = progress ~/ 25;
             if (bucket > _progBucket) {
