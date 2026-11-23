@@ -260,16 +260,17 @@ class _RadioStage extends StatelessWidget {
           colors: [Color(0xFF1A1209), Color(0xFF000000)],
         ),
       ),
-      // 小窗/分屏时整体等比缩小，桌面大窗/全屏也要继续放大；
-      // 旧版桌面一律封顶 560，导致全屏与普通窗口里的电台一样大。
-      // 大屏最多放到设计稿两倍，同时保留两侧边距，不顶着窗口边撑满。
+      // 小窗、普通窗口、全屏统一按当前可用宽高缩放；桌面不再设固定
+      // 上限，1080p / 2K / 4K 以及不同的 Windows 显示缩放都保持同一
+      // 屏幕占比。高度不足时由 FittedBox 再按高度整体缩小，不裁不溢。
       child: Center(
         child: LayoutBuilder(
           builder: (context, cons) {
             final avail = cons.maxWidth;
-            final maxTarget = controller.isDesktop ? 1120.0 : 560.0;
             final target = avail.isFinite
-                ? math.min(maxTarget, math.max(200.0, avail * 0.72))
+                ? (controller.isDesktop
+                    ? math.max(200.0, avail * 0.72)
+                    : math.min(560.0, math.max(200.0, avail * 0.72)))
                 : 560.0;
             final s = target / 560.0;
             return FittedBox(
@@ -437,8 +438,8 @@ class _RadioStage extends StatelessWidget {
   /// 歌词分栏版式（用户定稿）：
   /// 左侧 = 原中央信息卡内容，整体靠左、距左边留出边距；
   /// 右侧 = 歌词块，不满屏（上下留空）、距右边也有距离。
-  /// 整版按设计稿 1180×600 等比缩放：桌面全屏最多放大 1.8 倍，
-  /// 窄屏（安卓手机）自动同步缩小，不裁不溢。
+  /// 整版按设计稿 1180×600 等比缩放：桌面按窗口实际可用宽高适配，
+  /// 小窗/普通窗口/全屏以及不同分辨率都保持比例；窄屏自动同步缩小。
   Widget _lyricsSplit(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(
@@ -463,8 +464,12 @@ class _RadioStage extends StatelessWidget {
           child: Center(
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                maxWidth: 1180 * (controller.isDesktop ? 1.8 : 1.25),
-                maxHeight: 560 * (controller.isDesktop ? 1.8 : 1.25),
+                maxWidth: controller.isDesktop
+                    ? double.infinity
+                    : 1180 * 1.25,
+                maxHeight: controller.isDesktop
+                    ? double.infinity
+                    : 560 * 1.25,
               ),
               child: FittedBox(
                 fit: BoxFit.contain,
