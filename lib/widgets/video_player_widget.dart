@@ -260,17 +260,15 @@ class _RadioStage extends StatelessWidget {
           colors: [Color(0xFF1A1209), Color(0xFF000000)],
         ),
       ),
-      // 小窗、普通窗口、全屏统一按当前可用宽高缩放；桌面不再设固定
-      // 上限，1080p / 2K / 4K 以及不同的 Windows 显示缩放都保持同一
-      // 屏幕占比。高度不足时由 FittedBox 再按高度整体缩小，不裁不溢。
+      // 安卓、Linux、Windows 的小窗、普通窗口、全屏统一按当前可用
+      // 宽高缩放，不设固定大屏上限；1080p / 2K / 4K 和系统显示缩放
+      // 都保持同一屏幕占比。高度不足时按高度整体缩小，不裁不溢。
       child: Center(
         child: LayoutBuilder(
           builder: (context, cons) {
             final avail = cons.maxWidth;
             final target = avail.isFinite
-                ? (controller.isDesktop
-                    ? math.max(200.0, avail * 0.72)
-                    : math.min(560.0, math.max(200.0, avail * 0.72)))
+                ? math.max(200.0, avail * 0.72)
                 : 560.0;
             final s = target / 560.0;
             return FittedBox(
@@ -438,8 +436,8 @@ class _RadioStage extends StatelessWidget {
   /// 歌词分栏版式（用户定稿）：
   /// 左侧 = 原中央信息卡内容，整体靠左、距左边留出边距；
   /// 右侧 = 歌词块，不满屏（上下留空）、距右边也有距离。
-  /// 整版按设计稿 1180×600 等比缩放：桌面按窗口实际可用宽高适配，
-  /// 小窗/普通窗口/全屏以及不同分辨率都保持比例；窄屏自动同步缩小。
+  /// 整版按设计稿 1180×600 等比缩放：安卓与桌面都按实际可用宽高
+  /// 适配，小窗/普通窗口/全屏以及不同分辨率保持比例；窄屏自动缩小。
   Widget _lyricsSplit(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(
@@ -463,14 +461,8 @@ class _RadioStage extends StatelessWidget {
               : const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
           child: Center(
             child: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: controller.isDesktop
-                    ? double.infinity
-                    : 1180 * 1.25,
-                maxHeight: controller.isDesktop
-                    ? double.infinity
-                    : 560 * 1.25,
-              ),
+              // 所有平台均不设固定大屏上限，由 FittedBox 按可用宽高适配
+              constraints: const BoxConstraints(),
               child: FittedBox(
                 fit: BoxFit.contain,
                 child: SizedBox(
