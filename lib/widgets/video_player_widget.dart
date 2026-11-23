@@ -260,15 +260,16 @@ class _RadioStage extends StatelessWidget {
           colors: [Color(0xFF1A1209), Color(0xFF000000)],
         ),
       ),
-      // 小窗/分屏时整体等比缩放，不裁不溢；
-      // 版面按可用宽度往中间收：大窗维持设计宽 560，小窗只占约 72%
-      // 并留出边距，避免图标+波形顶着窗口边撑满（用户反馈"太大了"）
+      // 小窗/分屏时整体等比缩小，桌面大窗/全屏也要继续放大；
+      // 旧版桌面一律封顶 560，导致全屏与普通窗口里的电台一样大。
+      // 大屏最多放到设计稿两倍，同时保留两侧边距，不顶着窗口边撑满。
       child: Center(
         child: LayoutBuilder(
           builder: (context, cons) {
             final avail = cons.maxWidth;
+            final maxTarget = controller.isDesktop ? 1120.0 : 560.0;
             final target = avail.isFinite
-                ? math.min(560.0, math.max(200.0, avail * 0.72))
+                ? math.min(maxTarget, math.max(200.0, avail * 0.72))
                 : 560.0;
             final s = target / 560.0;
             return FittedBox(
@@ -436,7 +437,7 @@ class _RadioStage extends StatelessWidget {
   /// 歌词分栏版式（用户定稿）：
   /// 左侧 = 原中央信息卡内容，整体靠左、距左边留出边距；
   /// 右侧 = 歌词块，不满屏（上下留空）、距右边也有距离。
-  /// 整版按设计稿 1180×600 等比缩放：大屏最多放大 1.25 倍不无限撑满，
+  /// 整版按设计稿 1180×600 等比缩放：桌面全屏最多放大 1.8 倍，
   /// 窄屏（安卓手机）自动同步缩小，不裁不溢。
   Widget _lyricsSplit(BuildContext context) {
     return Container(
@@ -461,9 +462,9 @@ class _RadioStage extends StatelessWidget {
               : const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(
-                maxWidth: 1180 * 1.25,
-                maxHeight: 560 * 1.25,
+              constraints: BoxConstraints(
+                maxWidth: 1180 * (controller.isDesktop ? 1.8 : 1.25),
+                maxHeight: 560 * (controller.isDesktop ? 1.8 : 1.25),
               ),
               child: FittedBox(
                 fit: BoxFit.contain,

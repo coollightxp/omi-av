@@ -1919,47 +1919,29 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 初始化系统音量和亮度。
-  /// 播放器音量优先级：**App 内上次调过的音量**（记住用户调整，侧滑/
-  /// 面板/遥控调的都算）> 系统当前音量 > 默认音量。以前只读系统音量，
-  /// 用户调大的增益没有落点，重启就回旧值（安卓电台实测反馈）。
+  /// 初始化程序内音量和亮度：每次启动都从 100% 开始。
+  /// 电视/盒子没有触屏手势，若沿用上次调低的值，用户进入后很难恢复；
+  /// 这里只设 App 内增益与应用亮度，不把系统音量强行拉到最大。
   Future<void> _initSystemValues() async {
+    _brightness = 1.0;
+    _volume = 1.0;
     try {
-      _brightness = await ScreenBrightness.instance.application;
-    } catch (_) {
-      _brightness = _settings.defaultBrightness;
-    }
+      await ScreenBrightness.instance.setApplicationScreenBrightness(1.0);
+    } catch (_) {}
     try {
       final vol = await VolumeController.instance.getVolume();
       if (vol <= 0.01) {
         // 系统音量停在 0：多半是上次静音/摸鱼异常退出没还原。
-        // 不写回去用户会以为"播放器坏了"，这里一次性修好并提示。
-        // 系统音量是总闸（安卓上实际响度 = 系统音量 × 播放器增益），
-        // 为 0 时增益调多大都没声，必须还原
-        final target = (_lastVolume ?? _settings.defaultVolume)
-            .clamp(0.05, 1.0);
+        // 系统音量是总闸，为 0 时 App 内增益调多大都没声，必须恢复。
+        final target = (_lastVolume ?? 1.0).clamp(0.05, 1.0);
         try {
           await VolumeController.instance.setVolume(target);
         } catch (_) {}
         OsdBus.show('检测到系统音量被静音，已恢复', icon: Icons.volume_up);
       }
     } catch (_) {}
-    final last = _lastVolume;
-    if (last != null) {
-      _volume = last.clamp(0.0, 1.0);
-    } else {
-      // 第一次用（还没调过）：跟随系统当前音量，读不到退默认值
-      try {
-        final vol = await VolumeController.instance.getVolume();
-        _volume = vol > 0.01 ? vol : _settings.defaultVolume;
-      } catch (_) {
-        _volume = _settings.defaultVolume;
-      }
-    }
-    // 兜底：正常时序下播放器创建晚于这里（_init 已 await），但万一
-    // 控制器先起（换台恢复等），这里把恢复出的音量补推给内核，
-    // 否则播放器一直用建实参时的默认 0.8（实测安卓「调完下次进来
-    // 又回原音量」的根因之一）
+    // 正常时序下播放器创建晚于这里；若控制器已经先建起，立即补上
+    // 100% 的程序内增益，避免沿用内核创建时的默认值。
     if (_videoController != null && !_webPageActive) {
       try {
         await _videoController?.setVolume(_volume);
