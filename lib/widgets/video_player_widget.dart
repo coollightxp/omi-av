@@ -261,15 +261,17 @@ class _RadioStage extends StatelessWidget {
         ),
       ),
       // 安卓、Linux、Windows 的小窗、普通窗口、全屏统一按当前可用
-      // 宽高缩放，不设固定大屏上限；1080p / 2K / 4K 和系统显示缩放
-      // 都保持同一屏幕占比。高度不足时按高度整体缩小，不裁不溢。
+      // 宽高缩放，不设固定大屏上限；1.5K / 1080p / 2K / 4K / 8K 和
+      // 系统显示缩放都保持同一屏幕占比。无歌词时只保留中间舞台感，
+      // 宽度收至可用区域的 48%，不再跟着大屏无限撑满；高度不足时
+      // 仍由 FittedBox 整体缩小，不裁不溢。
       child: Center(
         child: LayoutBuilder(
           builder: (context, cons) {
             final avail = cons.maxWidth;
             final target = avail.isFinite
-                ? math.max(200.0, avail * 0.72)
-                : 560.0;
+                ? math.max(200.0, avail * 0.48)
+                : 420.0;
             final s = target / 560.0;
             return FittedBox(
               fit: BoxFit.scaleDown,
@@ -460,9 +462,13 @@ class _RadioStage extends StatelessWidget {
               ? EdgeInsets.zero
               : const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
           child: Center(
-            child: ConstrainedBox(
-              // 所有平台均不设固定大屏上限，由 FittedBox 按可用宽高适配
-              constraints: const BoxConstraints(),
+            // 必须给 FittedBox 一个占满可用区域的明确尺寸：Center 给
+            // 子节点的是松散约束，原来的 ConstrainedBox 会让它一直
+            // 保持 1180×560 的设计尺寸——小窗能缩小，大屏/全屏却
+            // 不放大，封面、台名和歌词就越显得小。SizedBox.expand
+            // 把当前分辨率下的完整舞台交给 FittedBox，contain 同时
+            // 负责放大和缩小，宽高任意一种不足都会等比收进去。
+            child: SizedBox.expand(
               child: FittedBox(
                 fit: BoxFit.contain,
                 child: SizedBox(
