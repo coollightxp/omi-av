@@ -60,6 +60,10 @@ dependencies:
   # 多编码解码（部分国内直播源 TXT 为 GBK/ANSI 编码，纯 Dart 全平台兼容）
   fl_charset: ^1.0.2
 
+  # Big5（繁体中文，HK/TW 老 Icecast 电台必用）+ 其他缺失编码
+  # fl_charset 没有 Big5，enough_convert 有
+  enough_convert: ^1.7.1
+
   # 二维码（设置页展示局域网管理地址，手机扫码编辑直播源/EPG）
   qr_flutter: ^4.1.0
 

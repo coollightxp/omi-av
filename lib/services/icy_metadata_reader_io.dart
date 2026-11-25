@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:enough_convert/enough_convert.dart';
 import 'package:fl_charset/fl_charset.dart';
 
 /// ICY（Icecast/SHOUTcast）元数据读取器：自己开一条 HTTP 连接，按
@@ -169,60 +170,129 @@ class IcyMetadataReader {
     onTitle(title);
   }
 
-  /// ICY 规范要求 UTF-8，但港台/东南亚电台实际编码很不稳定：
-  /// - AsiaFM 亚洲粤语台一会儿发 GBK 歌名 + UTF-8 括号后缀（混合），
-  ///   一会儿发全 UTF-8 但把 3 字节序列的第三字节截成问号或空格
-  ///   （发送端 bug，不是我们能修的）。
-  /// - 别的电台可能全 GBK、全 UTF-8，ISO-8859-1 也见过。
+  // ==== 原始字节的 UTF-8 合法性分析 ====
+  //
+  // UTF-8 编码规则：
+  //   单字节：00-7F（ASCII）
+  //   2 字节头：C0-DF，后跟 1 个 80-BF
+  //   3 字节头：E0-EF，后跟 2 个 80-BF
+  //   4 字节头：F0-F4，后跟 3 个 80-BF
+  //
+  // GBK 首字节是 81-FE（包括 C0-DF！），如果 UTF-8 strict 解码遇到
+  // 连续两个 C0 以上的字节（比如 D5 C5 = GBK "张"），会跳过第一个
+  // 产 FFFD，第二个被当成另一个 UTF-8 头——这意味着这段字节不是 UTF-8。
+  //
+  // 关键洞察：**如果原始字节里超过 40% 无法被 UTF-8 strict 接受，
+  // 那这段原始编码就不是 UTF-8**。
+
+  /// 返回 (成功 UTF-8 字节数, 总字节数)
+  static (int, int) _analyzeUtf8Validity(List<int> bytes) {
+    var validBytes = 0;
+    var i = 0;
+    while (i < bytes.length) {
+      final b = bytes[i];
+      // ASCII：00-7F 一定合法
+      if (b <= 0x7F) {
+        validBytes += 1;
+        i += 1;
+        continue;
+      }
+      // 2 字节头：C0-DF
+      if (b >= 0xC0 && b <= 0xDF && i + 1 < bytes.length) {
+        final b2 = bytes[i + 1];
+        if ((b2 & 0xC0) == 0x80) {
+          validBytes += 2;
+          i += 2;
+          continue;
+        }
+      }
+      // 3 字节头：E0-EF
+      if (b >= 0xE0 && b <= 0xEF && i + 2 < bytes.length) {
+        final b2 = bytes[i + 1];
+        final b3 = bytes[i + 2];
+        if ((b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80) {
+          validBytes += 3;
+          i += 3;
+          continue;
+        }
+      }
+      // 4 字节头：F0-F4
+      if (b >= 0xF0 && b <= 0xF4 && i + 3 < bytes.length) {
+        final b2 = bytes[i + 1];
+        final b3 = bytes[i + 2];
+        final b4 = bytes[i + 3];
+        if ((b2 & 0xC0) == 0x80 &&
+            (b3 & 0xC0) == 0x80 &&
+            (b4 & 0xC0) == 0x80) {
+          validBytes += 4;
+          i += 4;
+          continue;
+        }
+      }
+      // 非法 UTF-8 字节，跳过
+      i += 1;
+    }
+    return (validBytes, bytes.length);
+  }
+
+  /// ICY 规范要求 UTF-8，但实际编码很不稳定：
+  /// - AsiaFM 亚洲粤语台：GBK 歌名 + UTF-8 括号后缀（**混合编码**，发送端 bug）
+  /// - 香港老 Icecast：Big5（繁体中文）
+  /// - 其他内地电台：GBK（简体中文）
+  /// - 少数新电台：UTF-8
   ///
-  /// 评分策略不行——GBK 把 UTF-8 字节两两拼成合法 GBK 汉字，Unicode 码点
-  /// 也在 CJK 范围，CFFD 占比低（因为只有 UTF-8 strict 才产 FFFD），
-  /// 选 GBK 会把"何嘉涓"变成"浣曞槈涓"（字全错了但看起来"也是中文"）。
+  /// 策略：
+  /// 1. UTF-8 strict 无 FFFD → 直接返回（最干净）
+  /// 2. 分析原始字节的 UTF-8 合法性（ASCII + 合法 UTF-8 序列占比）
+  ///    - ≥ 50% 合法 → 先试 UTF-8 allowMalformed
+  ///      * 如果 FFFD 很少（< 总字符 25%）→ 返回 UTF-8（大部分对）
+  ///      * FFFD 太多 → 退回试 Big5 / GBK（说明"看起来合法"是因为 ASCII
+  ///        多，真正的中文部分全解不出来）
+  ///    - < 50% 合法 → 依次试 Big5、GBK
+  /// 3. 最终兜底 Latin-1
   ///
-  /// 改用 **U+FFFD 占比**判断：
-  /// 1. UTF-8 strict 无 U+FFFD → 直接返回（最干净）
-  /// 2. UTF-8 allowMalformed：统计 U+FFFD 占总字符比例
-  ///    - ≤ 25% → 选 UTF-8（发送端本来想发 UTF-8，截断是 bug，大部分字对）
-  ///    - > 25% → 说明大部分字节不是 UTF-8 → 试 GBK
-  /// 3. GBK 解成功且不乱 → 选 GBK
-  /// 4. 最终兜底 Latin-1
+  /// 为什么不看 FFFD 占比直接选？因为 GBK 解码器硬解任何字节都不会产 FFFD，
+  /// 但会把 UTF-8 字节两两拼成合法但错误的 GBK 汉字（"亚洲粤语台"→"浜氭床绮よ"）。
+  /// 必须结合原始字节分析 + FFFD 占比双重判断。
   static String _decodeText(List<int> bytes) {
     if (bytes.isEmpty) return '';
 
-    // 1. UTF-8 strict：如果成功且不含 U+FFFD，最干净的情况
+    // 1. UTF-8 strict：最干净的情况
     try {
       final u8 = utf8.decode(bytes);
       if (!u8.contains('\uFFFD')) return u8;
     } catch (_) {}
 
-    // 2. UTF-8 allowMalformed：统计 U+FFFD 占比
-    final String u8m;
-    try {
-      u8m = utf8.decode(bytes, allowMalformed: true);
-    } catch (_) {
-      u8m = latin1.decode(bytes, allowInvalid: true); // 先随便给个
-    }
+    // 2. 原始字节 UTF-8 合法性分析
+    final (valid, total) = _analyzeUtf8Validity(bytes);
+    final utf8Ratio = total > 0 ? valid / total : 0;
 
-    final totalChars = u8m.runes.length;
-    if (totalChars > 0) {
+    // 2a. 合法性 ≥ 50% → 先试 UTF-8 allowMalformed
+    if (utf8Ratio >= 0.5) {
+      final u8m = utf8.decode(bytes, allowMalformed: true);
+      // 统计 FFFD 占比
+      final totalRunes = u8m.runes.length;
       final fffdCount = u8m.runes.where((c) => c == 0xFFFD).length;
-      final fffdRatio = fffdCount / totalChars;
-      // U+FFFD ≤ 25%：发送端主要是 UTF-8，只有少量截断 → 选 UTF-8
-      if (fffdRatio <= 0.25) return u8m;
+      final fffdRatio = totalRunes > 0 ? fffdCount / totalRunes : 0;
+      // FFFD < 25%：大部分字对了 → 接受 UTF-8 结果
+      // （AsiaFM 混合编码场景：FFFD 主要在 GBK 歌名部分，UTF-8 括号后缀是对的）
+      if (fffdRatio < 0.25) return u8m;
+      // FFFD 太多 → 退回试 Big5 / GBK
     }
 
-    // 3. U+FFFD 太多 → 试 GBK
+    // 3. 试 Big5（香港/台湾繁体粤语台首选）
     try {
-      final g = gbk.decode(bytes);
-      // GBK 里的 U+FFFD 通常意味着 fl_charset 遇到非法字节
-      if (!g.contains('\uFFFD')) return g;
-      // GBK 也有 U+FFFD → 比较哪个少
-      final gFf = g.runes.where((c) => c == 0xFFFD).length;
-      final u8Ff = u8m.runes.where((c) => c == 0xFFFD).length;
-      if (gFf < u8Ff) return g;
+      final big5 = const Big5Codec().decode(bytes);
+      if (!big5.contains('\uFFFD')) return big5;
     } catch (_) {}
 
-    // 4. 最终兜底：Latin-1 一字节一字符，永不丢内容
+    // 4. 试 GBK（内地简体中文最常见）
+    try {
+      final g = gbk.decode(bytes);
+      if (!g.contains('\uFFFD')) return g;
+    } catch (_) {}
+
+    // 5. 最终兜底：Latin-1 一字节一字符，永不丢内容
     return latin1.decode(bytes, allowInvalid: true);
   }
 }
