@@ -185,9 +185,13 @@ class IcyMetadataReader {
       }
     }
 
-    String? tryFlarset(String code) {
+    String? tryFlarset(String codeName) {
       try {
-        return Charset(code).decode(Uint8List.fromList(bytes));
+        // fl_charset 的 Charset 是静态辅助类，getByName 返回一个
+        // Encoding（与 utf8/latin1 同型），直接 decode 即可
+        final enc = Charset.getByName(codeName);
+        if (enc == null) return null;
+        return enc.decode(bytes);
       } catch (_) {
         return null;
       }

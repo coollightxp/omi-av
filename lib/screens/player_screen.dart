@@ -940,7 +940,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                     subtitle: controller.castWaitRemain > 0
                                         ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
                                         : '发送端连播可直接接上',
-                                    hint: '长按 OK 返回直播 · 等待结束后自动返回',
+                                    // 两种等待态交互完全统一：
+                                    // 长按 OK / 鼠标移到底 → 呼出底栏，选「断开投屏」按钮
+                                    // 单击返回 → 弹退出卡片
+                                    hint: '长按 OK 或移到屏幕底部打开面板，可断开投屏',
                                   )
                                 : controller.castEndedWaiting
                                     ? const StandbyShell(
@@ -3803,21 +3806,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final c = context.read<PlayerController>();
     // 锁定时屏蔽所有面板呼出
     if (c.locked) return;
-    // 纯投屏等待（发送端已停、本地没有会话）：底栏上没有可操作项，
-    // 长按 OK 直接当作「返回直播」。这是等待画面唯一的主动退出口，
-    // 不能改成单击——单击返回要留给退出卡片（用户常用它调小窗/设置）
-    if (c.castWaiting) {
-      unawaited(c.cancelCastWaitAndRestore());
-      return;
-    }
+    // 投屏等待 / 投屏播完等待下一条：长按 OK 统一先呼出底栏，
+    // 由用户在面板上点「断开投屏」按钮执行恢复。两种等待态交互完全一致——
+    // 长按 OK / 鼠标移到底 → 呼出底栏 → 选断开；单击返回 → 弹退出卡片。
+    // 之前 castWaiting 里直接调 cancelCastWaitAndRestore() 跳过底栏，
+    // 与 castEndedWaiting 行为不一致（用户记不住两种场景的区别）。
+    //
     // 网页模式下没有原生播放状态（_state 通常仍是 loading），
     // 不能用 state==playing 拦截，否则左右点击永远呼不出面板；
     // 暂停/出错中也允许呼出（出错时要能点面板上的「重载频道」自救，
     // 遥控器长按 OK 在暂停时同样要看进度/恢复播放）。
-    // 投屏中/投屏播完等待时本地没有播放会话，state 可能已回落，
+    // 投屏中/投屏等待时本地没有播放会话，state 可能已回落，
     // 但底栏是唯一能「断开投屏」的入口，必须放行
     if (!c.webPageActive &&
         !c.isCasting &&
+        !c.castWaiting &&
         c.state != PlayerState.playing &&
         c.state != PlayerState.paused &&
         c.state != PlayerState.error) {
