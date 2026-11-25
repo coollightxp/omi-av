@@ -2717,13 +2717,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true;
     }
 
-    // 静音快捷键：卡片/弹层打开时也要生效。
-    // 以前 M 只在「无弹层」分支里处理，定时关闭、退出卡片、在线电台
-    // 一出来就按不动（用户实测）；这里提前处理，只避开文本输入焦点
+    // 静音快捷键：只认 M 键，不认系统 audioVolumeMute。
+    // v2.3.37 已把系统静音键放行给操作系统（钩子不吞、不转发），
+    // 但 Flutter 侧仍监听 audioVolumeMute 导致系统按静音键时
+    // App 内部静音状态也跟着切换（双份触发）。用户 2026-11-26 要求：
+    // App 内部静音与系统静音完全独立，互不影响。因此这里删掉
+    // audioVolumeMute，只保留 M 键 / 面板按钮 / 退出卡片三处入口。
+    // 卡片/弹层打开时也要生效；只避开文本输入焦点
     // （在搜索框里打 m 不能把声音关掉）。
-    if (isDown &&
-        (k == LogicalKeyboardKey.keyM ||
-            k == LogicalKeyboardKey.audioVolumeMute)) {
+    if (isDown && k == LogicalKeyboardKey.keyM) {
       final f = FocusManager.instance.primaryFocus;
       final editing =
           f?.context?.findAncestorWidgetOfExactType<EditableText>() != null;
