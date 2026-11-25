@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:enough_convert/enough_convert.dart';
+import 'package:enough_convert/enough_convert.dart' show Big5Codec;
 import 'package:fl_charset/fl_charset.dart';
 
 /// ICY（Icecast/SHOUTcast）元数据读取器：自己开一条 HTTP 连接，按
