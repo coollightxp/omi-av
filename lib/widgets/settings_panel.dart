@@ -3051,7 +3051,7 @@ class _SystemSettingsTab extends StatelessWidget {
               subtitle: Text(
                   '播完/发送端停止后先进「正在等待投屏」：'
                   '等待期间连播（下一集）可直接接上；'
-                  '「一直等」则停在等待画面，直到新投屏或双击返回',
+                  '「一直等」则停在等待画面，直到新投屏或长按 OK 返回',
                   style: TextStyle(
                       color: s.dlnaEnabled ? Colors.white54 : Colors.white24,
                       fontSize: 12)),

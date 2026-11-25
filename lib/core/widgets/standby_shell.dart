@@ -20,7 +20,7 @@ class StandbyShell extends StatelessWidget {
   final String title;
   final String? subtitle;
 
-  /// 底部常驻操作提示（如「双击返回键 返回直播」）
+  /// 底部常驻操作提示（如「长按 OK 返回直播」）
   final String? hint;
 
   /// 顶部小徽标（如「投屏」）

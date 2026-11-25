@@ -1919,29 +1919,29 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 初始化程序内音量和亮度：每次启动都从 100% 开始。
-  /// 电视/盒子没有触屏手势，若沿用上次调低的值，用户进入后很难恢复；
-  /// 这里只设 App 内增益与应用亮度，不把系统音量强行拉到最大。
+  /// 初始化程序内音量和亮度。
+  ///
+  /// 亮度每次启动固定 100%：电视/盒子没有触屏手势，调暗了很难恢复。
+  /// 音量沿用上次 App 内调过的值（首次启动为 100%）：用户按自己的习惯
+  /// 调好一次后，重启、换台都保持同一个音量，不必每次重新拨。
+  /// 这里只读写 App 内增益，**不写系统音量**——系统音量是用户其它程序
+  /// 共用的总闸，不该被本程序代改。
   Future<void> _initSystemValues() async {
     _brightness = 1.0;
-    _volume = 1.0;
+    _volume = (_lastVolume ?? 1.0).clamp(0.0, 1.0);
     try {
       await ScreenBrightness.instance.setApplicationScreenBrightness(1.0);
     } catch (_) {}
+    // 只读系统音量做提示，不做写入：系统被静音时 App 内增益调多大都
+    // 没声，提示一句就够，改不改系统音量由用户自己决定
     try {
       final vol = await VolumeController.instance.getVolume();
-      if (vol <= 0.01) {
-        // 系统音量停在 0：多半是上次静音/摸鱼异常退出没还原。
-        // 系统音量是总闸，为 0 时 App 内增益调多大都没声，必须恢复。
-        final target = (_lastVolume ?? 1.0).clamp(0.05, 1.0);
-        try {
-          await VolumeController.instance.setVolume(target);
-        } catch (_) {}
-        OsdBus.show('检测到系统音量被静音，已恢复', icon: Icons.volume_up);
+      if (vol <= 0.01 && _volume > 0.01) {
+        OsdBus.show('系统音量为 0，可能没有声音', icon: Icons.volume_off);
       }
     } catch (_) {}
     // 正常时序下播放器创建晚于这里；若控制器已经先建起，立即补上
-    // 100% 的程序内增益，避免沿用内核创建时的默认值。
+    // 记住的程序内增益，避免沿用内核创建时的默认值。
     if (_videoController != null && !_webPageActive) {
       try {
         await _videoController?.setVolume(_volume);

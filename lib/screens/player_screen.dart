@@ -199,9 +199,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   int _exitDialogFocusIndex = 0; // 0=返回（其余项按 _exitOptions 顺序）
   bool _exitDialogOpen = false;
 
-  // 投屏中「再按一次退出」的武装时间：第一次按返回/右键只提示不动作
-  DateTime? _castExitArmAt;
-
   /// 对话框内部 StatefulBuilder 的刷新句柄：遥控器 ←/→ 改焦点后
   /// 通过它只重建对话框（外层 setState 不会触发 showDialog 内容重建）
   StateSetter? _exitDialogRefresh;
@@ -967,6 +964,68 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                         ),
                       ],
 
+                      // 待机壳：投屏等待 / 投屏播完等待下一条 / 待选台
+                      // （方案 3.7、第九节）。播完等待必须盖住视频层：
+                      // 内核播到 EOF 通常停在最后一帧，配合「等待下一条」
+                      // 的 OSD 像是卡死（用户实测：定格画面不好看）
+                      //
+                      // 层级：排在 hover 边缘**之后**、底栏**之前**。
+                      // 它是全屏不透明层，画在底栏上会把「断开投屏」盖死
+                      // （2026-11 实测：投屏等待时只能干等超时）
+                      if (!mini &&
+                          (controller.castWaiting ||
+                              controller.castEndedWaiting ||
+                              controller.awaitingChannelPick))
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: controller.awaitingChannelPick
+                                ? _openStandbyChannelList
+                                : null,
+                            child: controller.castWaiting
+                                ? StandbyShell(
+                                    icon: Icons.cast,
+                                    topBadge: '投屏',
+                                    title: '正在等待投屏',
+                                    subtitle: controller.castWaitRemain > 0
+                                        ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
+                                        : '发送端连播可直接接上',
+                                    hint: '长按 OK 返回直播 · 等待结束后自动返回',
+                                  )
+                                : controller.castEndedWaiting
+                                    ? const StandbyShell(
+                                        icon: Icons.cast,
+                                        topBadge: '投屏',
+                                        title: '已播完，等待下一条投屏',
+                                        subtitle: '发送端发起新投屏将直接接上',
+                                        hint: '长按 OK 或移到屏幕底部打开面板，可断开投屏',
+                                      )
+                                    : const StandbyShell(
+                                        icon: Icons.live_tv,
+                                        title: '请选择频道',
+                                        subtitle: '按 OK 或方向键打开频道列表',
+                                      ),
+                          ),
+                        ),
+
+                      // 待机壳盖住了底边那条 20px 热区：投屏状态下补一条
+                      // 只在底部生效的 hover 触发，鼠标划到底边仍能呼出底栏
+                      // （左右边缘不补：投屏时本来就禁止换台，补了只会刷 OSD）
+                      if (controller.isDesktop &&
+                          !mini &&
+                          (controller.castWaiting ||
+                              controller.castEndedWaiting))
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          height: 20,
+                          child: MouseRegion(
+                            onEnter: (_) => _showBottomPanel(),
+                            onExit: (_) => _scheduleBottomHide(),
+                          ),
+                        ),
+
                       // 底部信息/控制面板（hover 回调由面板内部 MouseRegion 处理，
                       // 不能在外面用 MouseRegion 包裹：根是 AnimatedPositioned 的
                       // 组件被其它 RenderObjectWidget 包裹会破坏 Stack parentData，
@@ -1002,45 +1061,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           },
                         ),
 
-                      // 待机壳：投屏等待 / 投屏播完等待下一条 / 待选台
-                      // （方案 3.7、第九节）。播完等待必须盖住视频层：
-                      // 内核播到 EOF 通常停在最后一帧，配合「等待下一条」
-                      // 的 OSD 像是卡死（用户实测：定格画面不好看）
-                      if (!mini &&
-                          (controller.castWaiting ||
-                              controller.castEndedWaiting ||
-                              controller.awaitingChannelPick))
-                        Positioned.fill(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: controller.awaitingChannelPick
-                                ? _openStandbyChannelList
-                                : null,
-                            child: controller.castWaiting
-                                ? StandbyShell(
-                                    icon: Icons.cast,
-                                    topBadge: '投屏',
-                                    title: '正在等待投屏',
-                                    subtitle: controller.castWaitRemain > 0
-                                        ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
-                                        : '发送端连播可直接接上',
-                                    hint: '双击返回键  返回直播',
-                                  )
-                                : controller.castEndedWaiting
-                                    ? const StandbyShell(
-                                        icon: Icons.cast,
-                                        topBadge: '投屏',
-                                        title: '已播完，等待下一条投屏',
-                                        subtitle: '发送端发起新投屏将直接接上',
-                                        hint: '双击返回键  返回直播',
-                                      )
-                                    : const StandbyShell(
-                                        icon: Icons.live_tv,
-                                        title: '请选择频道',
-                                        subtitle: '按 OK 或方向键打开频道列表',
-                                      ),
-                          ),
-                        ),
+                      // 待机壳已上移到「hover 边缘」之前：它必须是全屏不透明
+                      // 层，如果画在底栏和边缘热区之上，投屏等待时底栏就被
+                      // 盖住，「断开投屏」点不到（2026-11 实测）
 
                       // 左侧频道抽屉（小窗里不渲染，下同）
                       if (!mini)
@@ -1347,26 +1370,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       await c.setSleepAt(null);
       return;
     }
-    if (c.castWaiting) {
-      // 等待投屏画面：两次返回（≤2 秒）直接回直播，单击只提示
-      _logBackEaten('cast_waiting');
-      final now = DateTime.now();
-      if (_castExitArmAt != null &&
-          now.difference(_castExitArmAt!) < const Duration(seconds: 2)) {
-        _castExitArmAt = null;
-        await c.cancelCastWaitAndRestore();
-      } else {
-        _castExitArmAt = now;
-        OsdBus.show('再按一次返回直播', icon: Icons.live_tv);
-      }
-      return;
-    }
-    // 投屏中按返回/右键：不再「双击才断开」（v2.3.67）。
-    // 这里**故意不做任何拦截**，让层级继续往下走：
-    //   · 面板开着 → 收面板（下一层就是它）
-    //   · 面板没开 → 落到退出卡片，用户可进设置/定时/退出/关机
-    // 断投屏改走底栏最右那颗「断开投屏」（发送端自己停也一样会恢复），
-    // 按返回永远不会断投屏，也就不会误触。
+    // 投屏等待/投屏播完按返回：**故意什么都不做**，让层级继续往下走，
+    // 落到退出卡片。单击返回必须只开卡片（用户常在这里进设置/调小窗），
+    // 不能顺手断投屏或直接回直播——「双击返回直播」与单击开卡片抢同一个
+    // 键，永远做不对，已整体移除。
+    // 回直播统一走底栏「断开投屏」：等待画面已把底栏放到待机层之上，
+    // 长按 OK 或鼠标移到屏幕底部即可呼出。
 
     if (_leftDrawerOpen) {
       _logBackEaten('drawer');
@@ -3444,13 +3453,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 鼠标路径（左右边缘热区/顶部按钮走这里）也必须同样锁——
     // 不然「遥控器呼不出、鼠标却能呼出」，同一规则两条路不一致；
     // 且投屏中点台会造成本地/接收端状态分裂（换了台画面没变）。
-    // 想换台：双击返回断开投屏（自动恢复原直播）再操作。
+    // 想换台：打开底栏「断开投屏」（自动恢复原直播）再操作。
     if (c.isCasting) {
       OsdBus.show('正在投屏，请先断开', icon: Icons.cast_connected);
       return;
     }
     if (c.castWaiting) {
-      OsdBus.show('投屏等待中，双击返回可退出', icon: Icons.cast);
+      OsdBus.show('投屏等待中，长按 OK 可返回', icon: Icons.cast);
       return;
     }
     setState(() {
@@ -3478,9 +3487,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     // 投屏等待同理：此刻没有本地播放会话，切台/换源改了也不会出画面，
-    // 还会和发送端握手抢状态。规则与已投屏保持一致（双击返回可退出）
+    // 还会和发送端握手抢状态。规则与已投屏保持一致（长按 OK 返回）
     if (c.castWaiting) {
-      OsdBus.show('投屏等待中，双击返回可退出', icon: Icons.cast);
+      OsdBus.show('投屏等待中，长按 OK 可返回', icon: Icons.cast);
       return;
     }
     WebDiag.log('drawer_toggle left=$left was_open=${left ? _leftDrawerOpen : _rightEpgOpen}');
@@ -3807,11 +3816,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final c = context.read<PlayerController>();
     // 锁定时屏蔽所有面板呼出
     if (c.locked) return;
+    // 纯投屏等待（发送端已停、本地没有会话）：底栏上没有可操作项，
+    // 长按 OK 直接当作「返回直播」。这是等待画面唯一的主动退出口，
+    // 不能改成单击——单击返回要留给退出卡片（用户常用它调小窗/设置）
+    if (c.castWaiting) {
+      unawaited(c.cancelCastWaitAndRestore());
+      return;
+    }
     // 网页模式下没有原生播放状态（_state 通常仍是 loading），
     // 不能用 state==playing 拦截，否则左右点击永远呼不出面板；
     // 暂停/出错中也允许呼出（出错时要能点面板上的「重载频道」自救，
-    // 遥控器长按 OK 在暂停时同样要看进度/恢复播放）
+    // 遥控器长按 OK 在暂停时同样要看进度/恢复播放）。
+    // 投屏中/投屏播完等待时本地没有播放会话，state 可能已回落，
+    // 但底栏是唯一能「断开投屏」的入口，必须放行
     if (!c.webPageActive &&
+        !c.isCasting &&
         c.state != PlayerState.playing &&
         c.state != PlayerState.paused &&
         c.state != PlayerState.error) {
@@ -3829,9 +3848,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   void _toggleSettings() {
     // 投屏等待中没有本地会话：设置里的播放/画面项全是空转，且面板会盖住
-    // 等待提示与倒计时。与左右面板同一规则，双击返回退出等待后再进设置
+    // 等待提示与倒计时。等待是临时的，结束后会自动返回直播
     if (!_settingsOpen && context.read<PlayerController>().castWaiting) {
-      OsdBus.show('投屏等待中，双击返回可退出', icon: Icons.cast);
+      OsdBus.show('投屏等待中，结束后会自动返回', icon: Icons.cast);
       return;
     }
     setState(() {
@@ -4270,6 +4289,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 已投屏（isCasting）必须照常呼出——那上面有「断开投屏/静音/旋转」，
     // 鼠标用户全靠它，挡掉等于没有退出口
     if (c.castWaiting) return;
+    // 待选台同理：没有会话，底栏是空的（待机壳现在在底栏之下，
+    // 鼠标划到底边会穿到热区，不拦就弹出一个空面板）
+    if (c.awaitingChannelPick) return;
     setState(() {
       // hover 带出来的面板不算用户主动呼出，不抢遥控器按键
       if (!_bottomPanelVisible) _bottomPanelFromUser = false;
