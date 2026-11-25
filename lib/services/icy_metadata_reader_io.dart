@@ -169,53 +169,37 @@ class IcyMetadataReader {
     onTitle(title);
   }
 
-  /// ICY 规范要求 UTF-8；但港台/东南亚不少电台仍发 GBK 或 GB18030，
-  /// 以前只尝试 UTF-8，解不成就丢字节变问号（AsiaFM 亚洲粤语台实测）。
-  /// 回退链：UTF-8 → GB18030 → GBK → GB2312 → Latin-1，选第一个
-  /// 不含 U+FFFD 的结果。Latin-1 能保证永不失败（字节一字节一字符），
-  /// 所以最后兜底用它把所有字节硬解出来，显示可读、不抛异常。
+  /// ICY 规范要求 UTF-8；但港台/东南亚不少电台仍发 GBK（AsiaFM 亚洲粤语台实测）。
+  /// 以前只尝试 UTF-8，解不成就丢字节变问号；后来加了 fl_charset 但用错了
+  /// API——Charset 类没有 getByName 静态方法、也没有 GB18030 编码，GBK 回退
+  /// 实际被跳过直接落 Latin-1，所以 GBK 字节被一字节一字符硬解，显示成
+  /// 「錙鐀璃継」这种形态。
+  ///
+  /// 正确回退链：UTF-8 → GBK → GB2312 → Latin-1。
+  /// fl_charset 直接 export `gbk` / `gb2312` Encoding 对象，不需要 Charset 类。
+  /// Latin-1 永不失败（字节一字节一字符），作为最终兜底至少不丢字。
   static String _decodeText(List<int> bytes) {
     if (bytes.isEmpty) return '';
 
-    String? tryUtf8() {
-      try {
-        return utf8.decode(bytes);
-      } catch (_) {
-        return null;
-      }
-    }
+    // 1. UTF-8（ICY 规范要求，最常见）
+    try {
+      final u8 = utf8.decode(bytes);
+      if (!u8.contains('\uFFFD')) return u8;
+    } catch (_) {}
 
-    String? tryFlarset(String codeName) {
-      try {
-        // fl_charset 的 Charset 是静态辅助类，getByName 返回一个
-        // Encoding（与 utf8/latin1 同型），直接 decode 即可
-        final enc = Charset.getByName(codeName);
-        if (enc == null) return null;
-        return enc.decode(bytes);
-      } catch (_) {
-        return null;
-      }
-    }
+    // 2. GBK（覆盖 GB2312 + 大部分中日韩汉字，fl_charset 直接 export）
+    try {
+      final g = gbk.decode(bytes);
+      if (!g.contains('\uFFFD')) return g;
+    } catch (_) {}
 
-    String? best;
-    // UTF-8 最常见，排第一
-    final u8 = tryUtf8();
-    if (u8 != null && !u8.contains('\uFFFD')) best = u8;
+    // 3. GB2312（简体中文子集，兜底部分繁体 GBK 解不出的）
+    try {
+      final g = gb2312.decode(bytes);
+      if (!g.contains('\uFFFD')) return g;
+    } catch (_) {}
 
-    // GB18030 覆盖 GBK + 所有中日韩统一汉字（含港台繁体），其次
-    if (best == null) {
-      final gb = tryFlarset('GB18030') ?? tryFlarset('GBK');
-      if (gb != null && !gb.contains('\uFFFD')) best = gb;
-    }
-    if (best == null) {
-      final gb = tryFlarset('GB2312');
-      if (gb != null && !gb.contains('\uFFFD')) best = gb;
-    }
-
-    if (best != null) return best;
-
-    // 最终兜底：Latin-1 一字节一字符，永不丢内容。
-    // 这时候可能还是乱码（比如实际是 ISO-8859-15 之类），但至少不丢字
+    // 4. 最终兜底：Latin-1 一字节一字符，永不丢内容
     return latin1.decode(bytes, allowInvalid: true);
   }
 }

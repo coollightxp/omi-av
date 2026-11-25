@@ -4275,12 +4275,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   void _showBottomPanel() {
     final c = context.read<PlayerController>();
     if (c.locked) return;
-    // 只有「投屏等待」不出底栏：此时本地还没有任何会话，暂停/进度都是空的。
-    // 已投屏（isCasting）必须照常呼出——那上面有「断开投屏/静音/旋转」，
-    // 鼠标用户全靠它，挡掉等于没有退出口
-    if (c.castWaiting) return;
-    // 待选台同理：没有会话，底栏是空的（待机壳现在在底栏之下，
-    // 鼠标划到底边会穿到热区，不拦就弹出一个空面板）
+    // castWaiting / castEndedWaiting：**放行**。
+    // 这是等待态下「断开投屏」的唯一入口——之前硬拦 castWaiting 导致
+    // 鼠标挪到底也不出底栏，只能靠长按 OK（2026-11 实测）。
+    // 栈顺序已经改对（待机壳在 hover 热区之下），不会被待机层挡住。
+    // 待选台除外：没有会话，底栏完全是空的
     if (c.awaitingChannelPick) return;
     setState(() {
       // hover 带出来的面板不算用户主动呼出，不抢遥控器按键
