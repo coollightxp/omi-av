@@ -175,8 +175,9 @@ class IcyMetadataReader {
   /// 实际被跳过直接落 Latin-1，所以 GBK 字节被一字节一字符硬解，显示成
   /// 「錙鐀璃継」这种形态。
   ///
-  /// 正确回退链：UTF-8 → GBK → GB2312 → Latin-1。
-  /// fl_charset 直接 export `gbk` / `gb2312` Encoding 对象，不需要 Charset 类。
+  /// 正确回退链：UTF-8 → GBK → Latin-1。
+  /// fl_charset 直接 export `gbk` Encoding 对象，不需要 Charset 类。
+  /// GBK 已覆盖 GB2312 的全部字符，不需要单独加 GB2312 层。
   /// Latin-1 永不失败（字节一字节一字符），作为最终兜底至少不丢字。
   static String _decodeText(List<int> bytes) {
     if (bytes.isEmpty) return '';
@@ -193,13 +194,7 @@ class IcyMetadataReader {
       if (!g.contains('\uFFFD')) return g;
     } catch (_) {}
 
-    // 3. GB2312（简体中文子集，兜底部分繁体 GBK 解不出的）
-    try {
-      final g = gb2312.decode(bytes);
-      if (!g.contains('\uFFFD')) return g;
-    } catch (_) {}
-
-    // 4. 最终兜底：Latin-1 一字节一字符，永不丢内容
+    // 3. 最终兜底：Latin-1 一字节一字符，永不丢内容
     return latin1.decode(bytes, allowInvalid: true);
   }
 }
