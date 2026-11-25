@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:fl_charset/fl_charset.dart';
+
 /// ICY（Icecast/SHOUTcast）元数据读取器：自己开一条 HTTP 连接，按
 /// `icy-metaint` 周期读出 `StreamTitle`，用于电台「正在播放」与通知卡片。
 ///
@@ -167,14 +169,49 @@ class IcyMetadataReader {
     onTitle(title);
   }
 
-  /// ICY 规范要求 UTF-8；个别台仍是 GBK，这里只保证 UTF-8 尽力解，
-  /// 解不出时退化为丢弃非法字节（显示可读，不抛异常）。
+  /// ICY 规范要求 UTF-8；但港台/东南亚不少电台仍发 GBK 或 GB18030，
+  /// 以前只尝试 UTF-8，解不成就丢字节变问号（AsiaFM 亚洲粤语台实测）。
+  /// 回退链：UTF-8 → GB18030 → GBK → GB2312 → Latin-1，选第一个
+  /// 不含 U+FFFD 的结果。Latin-1 能保证永不失败（字节一字节一字符），
+  /// 所以最后兜底用它把所有字节硬解出来，显示可读、不抛异常。
   static String _decodeText(List<int> bytes) {
-    try {
-      return utf8.decode(bytes);
-    } catch (_) {
-      return utf8.decode(bytes, allowMalformed: true)
-          .replaceAll('\uFFFD', '');
+    if (bytes.isEmpty) return '';
+
+    String? tryUtf8() {
+      try {
+        return utf8.decode(bytes);
+      } catch (_) {
+        return null;
+      }
     }
+
+    String? tryFlarset(String code) {
+      try {
+        return Charset(code).decode(Uint8List.fromList(bytes));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    String? best;
+    // UTF-8 最常见，排第一
+    final u8 = tryUtf8();
+    if (u8 != null && !u8.contains('\uFFFD')) best = u8;
+
+    // GB18030 覆盖 GBK + 所有中日韩统一汉字（含港台繁体），其次
+    if (best == null) {
+      final gb = tryFlarset('GB18030') ?? tryFlarset('GBK');
+      if (gb != null && !gb.contains('\uFFFD')) best = gb;
+    }
+    if (best == null) {
+      final gb = tryFlarset('GB2312');
+      if (gb != null && !gb.contains('\uFFFD')) best = gb;
+    }
+
+    if (best != null) return best;
+
+    // 最终兜底：Latin-1 一字节一字符，永不丢内容。
+    // 这时候可能还是乱码（比如实际是 ISO-8859-15 之类），但至少不丢字
+    return latin1.decode(bytes, allowInvalid: true);
   }
 }

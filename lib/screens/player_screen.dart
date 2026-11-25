@@ -912,7 +912,55 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       // 控制面板/EPG（见 _buildGestureLayer），不再使用贴边
                       // 窄热区；桌面端保留 hover 边缘自动弹出
 
+                      // 待机壳：投屏等待 / 投屏播完等待下一条 / 待选台
+                      // （方案 3.7、第九节）。播完等待必须盖住视频层：
+                      // 内核播到 EOF 通常停在最后一帧，配合「等待下一条」
+                      // 的 OSD 像是卡死（用户实测：定格画面不好看）
+                      //
+                      // 层级：排在 hover 边缘**之前**、底栏**之前**。
+                      // 必须让 hover 热区（左/右/底边）盖在待机壳之上，
+                      // 否则全屏不透明层会把鼠标 hover 事件全吞掉——
+                      // 投屏等待时鼠标移到底边呼不出底栏，只能干等超时
+                      // （2026-11 实测：鼠标挪下去没反应）
+                      if (!mini &&
+                          (controller.castWaiting ||
+                              controller.castEndedWaiting ||
+                              controller.awaitingChannelPick))
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: controller.awaitingChannelPick
+                                ? _openStandbyChannelList
+                                : null,
+                            child: controller.castWaiting
+                                ? StandbyShell(
+                                    icon: Icons.cast,
+                                    topBadge: '投屏',
+                                    title: '正在等待投屏',
+                                    subtitle: controller.castWaitRemain > 0
+                                        ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
+                                        : '发送端连播可直接接上',
+                                    hint: '长按 OK 返回直播 · 等待结束后自动返回',
+                                  )
+                                : controller.castEndedWaiting
+                                    ? const StandbyShell(
+                                        icon: Icons.cast,
+                                        topBadge: '投屏',
+                                        title: '已播完，等待下一条投屏',
+                                        subtitle: '发送端发起新投屏将直接接上',
+                                        hint: '长按 OK 或移到屏幕底部打开面板，可断开投屏',
+                                      )
+                                    : const StandbyShell(
+                                        icon: Icons.live_tv,
+                                        title: '请选择频道',
+                                        subtitle: '按 OK 或方向键打开频道列表',
+                                      ),
+                          ),
+                        ),
+
                       // 桌面端 hover 边缘自动弹出（小窗里不响应，避免面板盖画面）
+                      // 画在待机壳**之后**（栈顶），这样待机壳不透明层不会
+                      // 吃掉底部 hover 事件——投屏等待时鼠标挪到底边能呼出面板
                       if (controller.isDesktop && !mini) ...[
                         // 左边缘：不在 onExit 里启动隐藏计时——面板滑入会覆盖
                         // 这个 20px 触发区，触发区合成 onExit 与面板 onEnter 的
@@ -951,7 +999,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                             },
                           ),
                         ),
-                        // 底部边缘
+                        // 底部边缘（投屏等待/已投屏时也生效：这层是栈顶，
+                        // 待机壳的全屏不透明不会把它盖住）
                         Positioned(
                           left: 0,
                           right: 0,
@@ -963,68 +1012,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           ),
                         ),
                       ],
-
-                      // 待机壳：投屏等待 / 投屏播完等待下一条 / 待选台
-                      // （方案 3.7、第九节）。播完等待必须盖住视频层：
-                      // 内核播到 EOF 通常停在最后一帧，配合「等待下一条」
-                      // 的 OSD 像是卡死（用户实测：定格画面不好看）
-                      //
-                      // 层级：排在 hover 边缘**之后**、底栏**之前**。
-                      // 它是全屏不透明层，画在底栏上会把「断开投屏」盖死
-                      // （2026-11 实测：投屏等待时只能干等超时）
-                      if (!mini &&
-                          (controller.castWaiting ||
-                              controller.castEndedWaiting ||
-                              controller.awaitingChannelPick))
-                        Positioned.fill(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: controller.awaitingChannelPick
-                                ? _openStandbyChannelList
-                                : null,
-                            child: controller.castWaiting
-                                ? StandbyShell(
-                                    icon: Icons.cast,
-                                    topBadge: '投屏',
-                                    title: '正在等待投屏',
-                                    subtitle: controller.castWaitRemain > 0
-                                        ? '${_fmtWaitLeft(controller.castWaitRemain)} 后返回直播\n发送端连播可直接接上'
-                                        : '发送端连播可直接接上',
-                                    hint: '长按 OK 返回直播 · 等待结束后自动返回',
-                                  )
-                                : controller.castEndedWaiting
-                                    ? const StandbyShell(
-                                        icon: Icons.cast,
-                                        topBadge: '投屏',
-                                        title: '已播完，等待下一条投屏',
-                                        subtitle: '发送端发起新投屏将直接接上',
-                                        hint: '长按 OK 或移到屏幕底部打开面板，可断开投屏',
-                                      )
-                                    : const StandbyShell(
-                                        icon: Icons.live_tv,
-                                        title: '请选择频道',
-                                        subtitle: '按 OK 或方向键打开频道列表',
-                                      ),
-                          ),
-                        ),
-
-                      // 待机壳盖住了底边那条 20px 热区：投屏状态下补一条
-                      // 只在底部生效的 hover 触发，鼠标划到底边仍能呼出底栏
-                      // （左右边缘不补：投屏时本来就禁止换台，补了只会刷 OSD）
-                      if (controller.isDesktop &&
-                          !mini &&
-                          (controller.castWaiting ||
-                              controller.castEndedWaiting))
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          height: 20,
-                          child: MouseRegion(
-                            onEnter: (_) => _showBottomPanel(),
-                            onExit: (_) => _scheduleBottomHide(),
-                          ),
-                        ),
 
                       // 底部信息/控制面板（hover 回调由面板内部 MouseRegion 处理，
                       // 不能在外面用 MouseRegion 包裹：根是 AnimatedPositioned 的

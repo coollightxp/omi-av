@@ -125,6 +125,8 @@ class PlayerController extends ChangeNotifier {
   /// App 内上次调过的音量（启动恢复用，见 [_kLastVolume]）
   double? _lastVolume;
   double _brightness = 0.8;
+  /// App 内上次调过的亮度（启动恢复用，见 [_kLastBrightness]）
+  double? _lastBrightness;
   List<ChannelCategory> _categories = [];
 
   // 新增服务
@@ -1921,16 +1923,16 @@ class PlayerController extends ChangeNotifier {
 
   /// 初始化程序内音量和亮度。
   ///
-  /// 亮度每次启动固定 100%：电视/盒子没有触屏手势，调暗了很难恢复。
-  /// 音量沿用上次 App 内调过的值（首次启动为 100%）：用户按自己的习惯
-  /// 调好一次后，重启、换台都保持同一个音量，不必每次重新拨。
-  /// 这里只读写 App 内增益，**不写系统音量**——系统音量是用户其它程序
+  /// 亮度/音量都沿用上次 App 内调过的值（首次启动为 100%）：用户按自己的
+  /// 习惯调好一次后，重启、换台都保持同一个档位，不必每次重新拨。
+  /// 只读写 App 内亮度和增益，**不写系统音量**——系统音量是用户其它程序
   /// 共用的总闸，不该被本程序代改。
   Future<void> _initSystemValues() async {
-    _brightness = 1.0;
+    _brightness = (_lastBrightness ?? 1.0).clamp(0.0, 1.0);
     _volume = (_lastVolume ?? 1.0).clamp(0.0, 1.0);
     try {
-      await ScreenBrightness.instance.setApplicationScreenBrightness(1.0);
+      await ScreenBrightness.instance
+          .setApplicationScreenBrightness(_brightness);
     } catch (_) {}
     // 只读系统音量做提示，不做写入：系统被静音时 App 内增益调多大都
     // 没声，提示一句就够，改不改系统音量由用户自己决定
@@ -4033,6 +4035,8 @@ class PlayerController extends ChangeNotifier {
     }
     // 网页频道：WebView2 原生 HWND 不受系统亮度影响，用 CSS filter 调光
     if (_webPageActive) _applyWebBrightness();
+    // 记住用户调的亮度（与音量一致）
+    _scheduleSaveSettings();
     notifyListeners();
   }
 
@@ -4390,6 +4394,8 @@ class PlayerController extends ChangeNotifier {
   /// 以前启动只读系统音量，用户侧滑调大的增益没有落点，重启就回旧值
   /// （安卓电台实测反馈：调大→退出→重进又变小）。
   static const _kLastVolume = 'settings_last_volume';
+  /// App 内最近一次调过的亮度（与音量一致）。
+  static const _kLastBrightness = 'settings_last_brightness';
   static const _kDefaultBrightness = 'settings_default_brightness';
   static const _kSourceTimeout = 'settings_source_timeout_seconds';
   static const _kBufferSeconds = 'settings_buffer_seconds';
@@ -4482,8 +4488,9 @@ class PlayerController extends ChangeNotifier {
       }
       // 定时关闭跨启动续上（过期则直接清掉）
       _restoreSleepTimer();
-      // App 内上次音量（启动恢复用）
+      // App 内上次音量/亮度（启动恢复用）
       _lastVolume = p.getDouble(_kLastVolume);
+      _lastBrightness = p.getDouble(_kLastBrightness);
     } catch (_) {}
   }
 
@@ -4577,6 +4584,8 @@ class PlayerController extends ChangeNotifier {
       // 播放器音量：只在非静音值时记（静音是临时态，不该被当成"上次音量"）
       if (_volume > 0.01) await putDouble(_kLastVolume, _volume);
       await putDouble(_kDefaultBrightness, _settings.defaultBrightness);
+      // 亮度与音量同一档，每次调过就记下来
+      await putDouble(_kLastBrightness, _brightness);
       await putInt(_kSourceTimeout, _settings.sourceTimeoutSeconds);
       await putInt(_kBufferSeconds, _settings.bufferSeconds);
       await putDouble(_kUiScale, _settings.uiScale);
