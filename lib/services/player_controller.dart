@@ -996,7 +996,12 @@ class PlayerController extends ChangeNotifier {
               notifyListeners();
             }
           },
-          onStop: () => stopCastAndRestore(),
+          // 发送端（手机/B站）主动点了停止/断开：明确意图是结束投屏，
+          // 直接恢复直播，不进入「等待连播」态。等待只留给「本地自然播完」
+          // （ended）那条路径——那是在等下一集，不是对方要走。
+          // 800ms 防抖仍保留：连播是 Stop→(几十ms)→SetURI，gen 会变，
+          // 这次停止会被作废，新投屏正常接管。
+          onStop: () => stopCastAndRestore(peerStop: true),
           onSeek: (p) => seekTo(p),
           onSetVolume: (v) => setVolume(v),
           onSetMute: (m) => setMuted(m),
@@ -1615,7 +1620,12 @@ class PlayerController extends ChangeNotifier {
   /// 发送端换片信令通常是 Stop→(几十毫秒)→SetAVTransportURI→Play，
   /// 立即恢复会让"恢复直播"与"新投屏"两路 initialize 并发，迟到的直播流
   /// 初始化会覆盖点播（进度条消失、假重试、有声无画的根因）。
-  Future<void> stopCastAndRestore({bool userInitiated = false}) async {
+  /// [peerStop] 为 true 表示停止来自投屏发送端主动发的 Stop 指令
+  /// （手机/B站点了停止/断开）：对方明确要结束，直接恢复直播，不进等待态。
+  /// 与 [userInitiated] 的区别：不立刻 kickCastClients（对方已停），但保留
+  /// 800ms 防抖（连播 Stop→SetURI 保护）；等待态 willWait 为 false。
+  Future<void> stopCastAndRestore(
+      {bool userInitiated = false, bool peerStop = false}) async {
     if (!_isCasting) return;
     // 手动断开：立刻把断开信号发出去，不等 800ms 防抖。
     // 防抖窗口是留给「发送端 Stop→几十毫秒→SetURI→Play」连播的，
@@ -1636,7 +1646,8 @@ class PlayerController extends ChangeNotifier {
         CastLog.write('cast stop superseded gen=$gen now=$_castGen');
         return;
       }
-      _doStopCastAndRestore(userInitiated: userInitiated);
+      _doStopCastAndRestore(
+          userInitiated: userInitiated, peerStop: peerStop);
     });
   }
 
@@ -1644,12 +1655,23 @@ class PlayerController extends ChangeNotifier {
   ///
   /// [userInitiated] 为用户主动断开（返回键两次 / 点断开按钮）：
   /// 手动断开是明确意图，直接回直播，不再进入等待画面。
-  Future<void> _doStopCastAndRestore({bool userInitiated = false}) async {
+  ///
+  /// [peerStop] 为发送端主动发的 Stop 指令（手机/B站点了停止）：
+  /// 也是明确要结束，直接回直播，不进入等待态。等待只留给「本地自然
+  /// 播完 ended」那条路径——那是在等下一集连播。
+  Future<void> _doStopCastAndRestore(
+      {bool userInitiated = false, bool peerStop = false}) async {
     if (!_isCasting) return;
     // 投屏结束先把流级录制收尾（最后分片/文件尾落盘）
-    await _stopRecordingIfAny(userInitiated ? '手动断开投屏' : '投屏结束');
+    await _stopRecordingIfAny(userInitiated
+        ? '手动断开投屏'
+        : peerStop
+            ? '投屏端主动断开'
+            : '投屏结束');
     final wait = _settings.castEndWaitSeconds;
-    final willWait = !userInitiated && (wait < 0 || wait > 0);
+    // 只有「本地播完 ended 超时」才可能等待：userInitiated 和 peerStop
+    // 都是明确的结束意图，一律不等待。
+    final willWait = !userInitiated && !peerStop && (wait < 0 || wait > 0);
     // 关键：只有**真断开**才把 _isCasting 置 false。
     // 等待连播期间 socket 还连着（手机端显示投屏中），_isCasting 必须保持
     // true，这样底栏「断开投屏」按钮才会继续亮——用户说的"只要连接着钮就亮"
@@ -1679,7 +1701,8 @@ class PlayerController extends ChangeNotifier {
     // 占位频道、`??=` 记不回来，等待超时就"没有可恢复的台"→ 请选择频道。
     final restore = _preCastChannel;
     CastLog.write('cast stop gen=$_castGen restore='
-        '${restore?.name ?? "(none)"} user=$userInitiated wait=$willWait');
+        '${restore?.name ?? "(none)"} user=$userInitiated '
+        'peer=$peerStop wait=$willWait');
     if (willWait) {
       _pendingRestoreChannel = restore;
       await _disposeVideoController();
