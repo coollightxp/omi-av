@@ -169,32 +169,138 @@ class IcyMetadataReader {
     onTitle(title);
   }
 
-  /// ICY 规范要求 UTF-8；但港台/东南亚不少电台仍发 GBK（AsiaFM 亚洲粤语台实测）。
-  /// 以前只尝试 UTF-8，解不成就丢字节变问号；后来加了 fl_charset 但用错了
-  /// API——Charset 类没有 getByName 静态方法、也没有 GB18030 编码，GBK 回退
-  /// 实际被跳过直接落 Latin-1，所以 GBK 字节被一字节一字符硬解，显示成
-  /// 「錙鐀璃継」这种形态。
+  /// ICY 规范要求 UTF-8；但港台/东南亚不少电台仍发 GBK，甚至同一
+  /// StreamTitle 里**混合两种编码**（AsiaFM 亚洲粤语台实测：歌名是
+  /// GBK 的「张国荣」，括号后缀是 UTF-8 的「亚洲粤语台」）。整体用
+  /// 任何一种都必然有一半乱码。
   ///
-  /// 正确回退链：UTF-8 → GBK → Latin-1。
-  /// fl_charset 直接 export `gbk` Encoding 对象，不需要 Charset 类。
-  /// GBK 已覆盖 GB2312 的全部字符，不需要单独加 GB2312 层。
-  /// Latin-1 永不失败（字节一字节一字符），作为最终兜底至少不丢字。
+  /// 解法：**分段解码**。
+  /// 从左到右尝试 UTF-8 strict 解码，能解多少算多少；遇到非法序列
+  /// （非 UTF-8 起始字节）就停下来，把这一小段切出来交给 GBK 解，
+  /// 然后继续 UTF-8。交替进行直到整个字节数组处理完。Latin-1 作为
+  /// 最终兜底（永不丢字节，至少能显示可读）。
   static String _decodeText(List<int> bytes) {
     if (bytes.isEmpty) return '';
 
-    // 1. UTF-8（ICY 规范要求，最常见）
+    // 1. 先试整体 UTF-8 strict：如果成功且不含 U+FFFD，这是最干净的情况
     try {
       final u8 = utf8.decode(bytes);
       if (!u8.contains('\uFFFD')) return u8;
     } catch (_) {}
 
-    // 2. GBK（覆盖 GB2312 + 大部分中日韩汉字，fl_charset 直接 export）
+    // 2. 分段解码：交替 UTF-8 strict 和 GBK
     try {
-      final g = gbk.decode(bytes);
-      if (!g.contains('\uFFFD')) return g;
+      final buf = StringBuffer();
+      int i = 0;
+      while (i < bytes.length) {
+        // 先尝试 UTF-8 strict：从当前位置往后找最长的、UTF-8 合法的前缀
+        final utf8End = _findUtf8PrefixEnd(bytes, i);
+        if (utf8End > i) {
+          buf.write(utf8.decode(bytes.sublist(i, utf8End)));
+          i = utf8End;
+        }
+        if (i >= bytes.length) break;
+
+        // 剩下的开头是 GBK 字节（非 UTF-8 起始），用 GBK 解
+        // 贪心：尝试 1-4 字节的 GBK 前缀，解到能解的位置
+        final gbkEnd = _findGbkPrefixEnd(bytes, i);
+        if (gbkEnd > i) {
+          buf.write(gbk.decode(bytes.sublist(i, gbkEnd)));
+          i = gbkEnd;
+        } else {
+          // 两者都解不了，用 Latin-1 硬解 1 字节跳过
+          buf.writeCharCode(bytes[i]);
+          i++;
+        }
+      }
+      final mixed = buf.toString();
+      if (mixed.isNotEmpty) return mixed;
     } catch (_) {}
 
-    // 3. 最终兜底：Latin-1 一字节一字符，永不丢内容
+    // 3. 最终兜底：整体 GBK
+    try {
+      final g = gbk.decode(bytes);
+      if (g.isNotEmpty) return g;
+    } catch (_) {}
+
+    // 4. 最后兜底：Latin-1 一字节一字符，永不丢内容
     return latin1.decode(bytes, allowInvalid: true);
+  }
+
+  /// 从 [start] 开始，往后找最长的 UTF-8 strict 合法前缀。
+  /// 返回这个前缀的**结束位置**（ exclusive）。
+  ///
+  /// UTF-8 合法起始字节：0xxxxxxx (ASCII) 或 110xxxxx / 1110xxxx / 11110xxx。
+  /// 多字节序列后续字节必须是 10xxxxxx。
+  static int _findUtf8PrefixEnd(List<int> bytes, int start) {
+    int i = start;
+    while (i < bytes.length) {
+      final b = bytes[i];
+      if (b < 0x80) {
+        // ASCII 单字节
+        i++;
+      } else if ((b & 0xE0) == 0xC0) {
+        // 2 字节序列：C0-DF + 1 个 continuation
+        if (i + 1 < bytes.length && (bytes[i + 1] & 0xC0) == 0x80) {
+          i += 2;
+        } else {
+          break;
+        }
+      } else if ((b & 0xF0) == 0xE0) {
+        // 3 字节序列：E0-EF + 2 个 continuation
+        if (i + 2 < bytes.length &&
+            (bytes[i + 1] & 0xC0) == 0x80 &&
+            (bytes[i + 2] & 0xC0) == 0x80) {
+          i += 3;
+        } else {
+          break;
+        }
+      } else if ((b & 0xF8) == 0xF0 && b <= 0xF4) {
+        // 4 字节序列：F0-F4 + 3 个 continuation
+        if (i + 3 < bytes.length &&
+            (bytes[i + 1] & 0xC0) == 0x80 &&
+            (bytes[i + 2] & 0xC0) == 0x80 &&
+            (bytes[i + 3] & 0xC0) == 0x80) {
+          i += 4;
+        } else {
+          break;
+        }
+      } else {
+        // 非 UTF-8 起始（比如 GBK 的 0x81-0xFE 首字节，或续字节 0x80-0xBF
+        // 在不该出现的位置）——说明这里应该切到 GBK
+        break;
+      }
+    }
+    return i;
+  }
+
+  /// 从 [start] 开始，往后找一个 GBK 合法的字符前缀结束位置。
+  /// GBK 规则：首字节 0x81-0xFE；如果首字节在 0x40-0x7E 或 0x80-0xFE 之间，
+  /// 就是 2 字节；否则是单字节 ASCII。
+  ///
+  /// 这里的目标只是**解出第一个 GBK 字符**，让外层循环继续判断后面的
+  /// 字节是不是又回到了 UTF-8。
+  static int _findGbkPrefixEnd(List<int> bytes, int start) {
+    if (start >= bytes.length) return start;
+    final b = bytes[start];
+    if (b >= 0x81 && b <= 0xFE) {
+      // 首字节：可能是 0x40-0x7E 或 0x80-0xFE（0x7F 是非法的半角）
+      if (start + 1 < bytes.length) {
+        final b2 = bytes[start + 1];
+        if ((b2 >= 0x40 && b2 <= 0x7E) || (b2 >= 0x80 && b2 <= 0xFE)) {
+          return start + 2;
+        }
+      }
+      // GBK 半角字符（A1-A9 开头 + A1-FE）——也是 2 字节
+      if (start + 1 < bytes.length &&
+          b >= 0xA1 && b <= 0xA9 &&
+          bytes[start + 1] >= 0xA1 && bytes[start + 1] <= 0xFE) {
+        return start + 2;
+      }
+      // 兜底：先把首字节吃掉，让循环继续
+      return start + 1;
+    }
+    // 非 GBK 首字节（ASCII 或 continuation byte），先吞 1 字节
+    return start + 1;
   }
 }
