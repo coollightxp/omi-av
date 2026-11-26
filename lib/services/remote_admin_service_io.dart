@@ -649,8 +649,8 @@ function renderRadio(){
   // 歌词时间微调：与电脑设置里同一项。按「看到的现象」说方向，别讲快慢
   if(state.settings&&state.settings.lyricsEnabled){
     html+=rangeCard('lyricsOffsetSec','歌词时间微调',
-      '屏幕上还停在前一句、声音已经唱过去了 → 往左（往前赶）；屏幕上已经唱过去了、声音还没到 → 往右（等一等）。1 秒/步，最多 ±120 秒。调整后按台记住，换台回来不用重调',
-      -120,120,1,Math.round((state.settings.lyricsOffsetMs||0)/1000),0,' 秒');
+      '往右拖 = 歌词提前（前进），往左拖 = 歌词延后（回退），方向与电脑上 ←/→ 键一致。数值 = 提前的秒数，负数表示延后。1 秒/步，最多 ±120 秒；调整后按台记住，换台回来不用重调',
+      -120,120,1,-Math.round((state.settings.lyricsOffsetMs||0)/1000),0,' 秒');
     // 歌词简繁转换：与电脑设置里同一项。很多词源只放繁体，转简体好认；
     // 喜欢繁体的也能把简体歌词转成繁体
     html+=choiceCard('lyricsVariant','歌词简繁转换',
@@ -916,7 +916,7 @@ function onRange(key,v,dec,suf){
   if(!state.settings)state.settings={};
   var num=parseFloat(v);
   if(key==='autoHideDelaySec')state.settings.autoHideDelay=Math.round(num*1000);
-  else if(key==='lyricsOffsetSec')state.settings.lyricsOffsetMs=Math.round(num*1000);
+  else if(key==='lyricsOffsetSec')state.settings.lyricsOffsetMs=-Math.round(num*1000);
   else state.settings[key]=num;
   var lab=el('rg-'+key+'-v');
   if(lab)lab.textContent=num.toFixed(dec)+suf;

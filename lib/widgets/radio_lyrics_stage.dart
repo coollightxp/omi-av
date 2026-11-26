@@ -224,7 +224,7 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               [
                 _variantChipText(lyrics.variant),
                 if (lyrics.offsetMs != 0 && axisOk)
-                  '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}'
+                  '歌词${_fmtOffsetSec(lyrics.offsetMs)}'
                       '${lyrics.hasChannelOffset ? '（本台已记住）' : ''}',
               ].join('   ·   ');
           body = Column(
@@ -382,7 +382,7 @@ String _variantChipText(int v) {
 
 String _fmtOffsetSec(int ms) {
   final sec = (ms.abs() / 1000).toStringAsFixed(ms % 1000 == 0 ? 0 : 1);
-  return '${ms > 0 ? '+' : '-'}$sec 秒';
+  return '${ms > 0 ? '延后' : '提前'} $sec 秒';
 }
 
 class _Hint extends StatelessWidget {

@@ -290,7 +290,7 @@ class PlayerController extends ChangeNotifier {
   /// 与内核无关：MDK 不提供 StreamTitle，由 [IcyMetadataReader] 写入。
   /// UI（播放页大字幕、底部面板）统一读这里，不要再读
   /// `videoController.value.mediaTitle`（MDK 恒为空）。
-  String get nowPlayingTrack => _lastMediaTitle;
+  String get nowPlayingTrack => _displayTrack;
 
   /// 电台 ICY 歌名读取器（MDK 内核不提供 StreamTitle）
   IcyMetadataReader? _icyReader;
@@ -302,6 +302,11 @@ class PlayerController extends ChangeNotifier {
   /// 读取器代际：换台时旧连接迟到的标题直接丢弃
   int _icyGen = 0;
   String _lastMediaTitle = '';
+
+  /// 界面上显示的曲目（由 RadioLyrics 正式上台时同步过来，见
+  /// [_onRadioLyricsChanged]）。电台提前推曲名时，屏上先留上一首，
+  /// 到点再换，歌名和歌词同步出现。
+  String _displayTrack = '';
 
   /// 很多电台的 ICY 元数据就是流文件名（index.m3u8 / 64k.mp3），
   /// 拿它当"曲目"显示非常难看。带协议头或以媒体扩展名结尾的一律视为
@@ -569,6 +574,8 @@ class PlayerController extends ChangeNotifier {
         updateSettings(_settings.copyWith(lyricsOffsetMs: ms));
       }
     };
+    // 歌名/歌词/通知用同一时刻切换：新歌正式上台时同步界面标题
+    RadioLyrics.instance.addListener(_onRadioLyricsChanged);
     // 歌词开关：状态机自己持有 enabled（UI 直接监听，不重建播放树）
     RadioLyrics.instance.setEnabled(_settings.lyricsEnabled);
     RadioLyrics.instance.setOffset(_settings.lyricsOffsetMs);
@@ -2150,6 +2157,7 @@ class PlayerController extends ChangeNotifier {
     if (_currentChannel?.id != channel.id) {
       _radioTracks.clear();
       _lastMediaTitle = '';
+      _displayTrack = '';
       // 歌词数据随台清空（显示意图保留，见 RadioLyrics）
       RadioLyrics.instance.onChannelChanged(channel.id);
     }
@@ -3309,6 +3317,8 @@ class PlayerController extends ChangeNotifier {
     final track = v.mediaTitle.trim();
     if (track.isNotEmpty && track != _lastMediaTitle) {
       _lastMediaTitle = track;
+      // 非电台（视频）立即上台；电台按偏移延后（见 _scheduleDisplayTrack）
+      _scheduleDisplayTrack(track);
       // URL 文件名（index.m3u8 / 64k.mp3）不进曲目栈
       if ((_currentChannel?.isRadio ?? false) && !isJunkTrack(track)) {
         _radioTracks.remove(track);
@@ -3539,9 +3549,38 @@ class PlayerController extends ChangeNotifier {
         track,
         _videoController?.value.position ?? Duration.zero,
       );
+      _scheduleDisplayTrack(track);
       notifyListeners();
     }
     _syncAudioNotification();
+  }
+
+  /// 曲目上台：非电台（视频）立即显示；电台交给 RadioLyrics 决定
+  /// （它按「本台歌词偏移」把新歌压后台预读、到点才上台），上台时
+  /// [_onRadioLyricsChanged] 会把标题同步过来
+  void _scheduleDisplayTrack(String track) {
+    final isRadio = _currentChannel?.isRadio ?? false;
+    if (!isRadio) {
+      _displayTrack = track;
+      return;
+    }
+    if (isJunkTrack(track)) {
+      _displayTrack = '';
+      return;
+    }
+    // 进台第一首没有「上一首」可留，直接显示；之后的等 RadioLyrics 上台
+    if (_displayTrack.isEmpty) _displayTrack = track;
+  }
+
+  /// RadioLyrics 状态变化：新歌正式上台（延迟到点）时同步标题。
+  /// 歌名、歌词、通知卡片三者用同一个时刻切换
+  void _onRadioLyricsChanged() {
+    if (!(_currentChannel?.isRadio ?? false)) return;
+    final t = RadioLyrics.instance.currentTrack;
+    if (t.isEmpty || t == _displayTrack) return;
+    _displayTrack = t;
+    _syncAudioNotification();
+    notifyListeners();
   }
 
   /// 通知栏/锁屏卡片：只在电台域出现（电视正常播放有画面，不需要）。
@@ -3562,7 +3601,7 @@ class PlayerController extends ChangeNotifier {
     // Android 13+ 没授 POST_NOTIFICATIONS 时，卡片与锁屏控件都不会出现
     // （前台服务照跑，但系统把通知吞了）——首次进电台先申请
     unawaited(_ensureNotifPermission());
-    final icy = _lastMediaTitle;
+    final icy = _displayTrack;
     final program = (icy.isNotEmpty && !isJunkTrack(icy))
         ? icy
         : (currentProgram?.title ?? '');
@@ -6589,6 +6628,7 @@ class PlayerController extends ChangeNotifier {
   }
 
   void dispose() {
+    RadioLyrics.instance.removeListener(_onRadioLyricsChanged);
     _lifecycleListener?.dispose();
     _lifecycleListener = null;
     _audioRouteTimer?.cancel();

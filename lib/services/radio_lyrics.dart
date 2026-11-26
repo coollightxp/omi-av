@@ -188,6 +188,14 @@ class RadioLyrics extends ChangeNotifier {
     _anchorPos = Duration.zero;
     _midJoined = false;
     _titleSeen = 0;
+    // 预读的下一首也作废（新台重新来）
+    _pendingTimer?.cancel();
+    _pendingTimer = null;
+    _pendingTrack = '';
+    _pendingPos = Duration.zero;
+    _pendingDoc = null;
+    _pendingAt = null;
+    _pendingGen++;
     notifyListeners();
     // 本台若有记住的偏移，把设置面板的数字同步过来（否则面板还显示
     // 上一个台调的秒数，用户再微调就调歪了）
@@ -206,10 +214,97 @@ class RadioLyrics extends ChangeNotifier {
 
   /// 曲名变化（由 PlayerController 在 media-title 有效变化时调用）。
   ///
-  /// [pos] 是「现在这条流播到第几秒」，只在非首曲时作为锚点。
+  /// [pos] 是「现在这条流播到第几秒」。
+  ///
+  /// 电台会把下一首的曲名**提前**推出来（提前量就是本台的时间偏移）。
+  /// 所以新曲名到达时不立刻上台：先在后台把歌名/歌词查好备着，屏上
+  /// 继续显示上一首；等偏移时间到（这首歌真正开始）再整体切换。
+  /// 这样歌名和歌词都不会提前冒出来。
   void onTrack(String rawTitle, Duration pos) {
     final t = rawTitle.trim();
-    if (t.isEmpty || t == _raw) return;
+    if (t.isEmpty || t == _raw || t == _pendingTrack) return;
+    final delay = offsetMs.clamp(0, 120000);
+    // 进台第一首（台上还没有歌可留）或本台没设偏移：直接上台
+    if (_raw.isEmpty || delay == 0) {
+      _pendingTimer?.cancel();
+      _pendingTimer = null;
+      _pendingTrack = '';
+      _pendingAt = null;
+      _adopt(t, pos);
+      return;
+    }
+    // 预读：歌词先拉回来备着，显示仍停在上一首
+    _pendingTrack = t;
+    _pendingPos = pos;
+    _pendingDoc = null;
+    _pendingAt = DateTime.now();
+    _pendingGen++;
+    _pendingTimer?.cancel();
+    unawaited(_prefetchPending(t));
+    _schedulePendingSwitch();
+    notifyListeners();
+  }
+
+  // ---------- 预读待上台的下一首 ----------
+
+  String _pendingTrack = '';
+  Duration _pendingPos = Duration.zero;
+  LyricsDoc? _pendingDoc;
+  DateTime? _pendingAt;
+  Timer? _pendingTimer;
+  int _pendingGen = 0;
+
+  void _schedulePendingSwitch() {
+    _pendingTimer?.cancel();
+    final at = _pendingAt;
+    if (at == null || _pendingTrack.isEmpty) return;
+    final delay = offsetMs.clamp(0, 120000);
+    final remain = delay - DateTime.now().difference(at).inMilliseconds;
+    if (remain <= 0) {
+      _adoptPending();
+      return;
+    }
+    _pendingTimer = Timer(Duration(milliseconds: remain), _adoptPending);
+  }
+
+  void _adoptPending() {
+    final t = _pendingTrack;
+    if (t.isEmpty) return;
+    final pos = _pendingPos;
+    final doc = _pendingDoc;
+    _pendingTimer?.cancel();
+    _pendingTimer = null;
+    _pendingTrack = '';
+    _pendingPos = Duration.zero;
+    _pendingDoc = null;
+    _pendingAt = null;
+    _adopt(t, pos, doc: doc);
+  }
+
+  Future<void> _prefetchPending(String t) async {
+    final gen = ++_pendingGen;
+    LyricsDoc? doc;
+    if (_cache.containsKey(t)) {
+      doc = _cache[t];
+    } else {
+      try {
+        doc = await fetchLyrics(t).timeout(const Duration(seconds: 20));
+      } catch (e) {
+        debugPrint('[Lyrics] 预读失败: $e');
+        doc = null;
+      }
+      if (gen != _pendingGen) return;
+      if (_cache.length >= _cacheLimit) _cache.clear();
+      // 「歌名未证实」不缓存（与 _ensureFetch 同规则）
+      if (doc == null || !doc.unverifiedName) _cache[t] = doc;
+    }
+    if (gen != _pendingGen || _pendingTrack != t) return;
+    _pendingDoc = doc;
+    notifyListeners();
+  }
+
+  /// 把曲名正式上台（切标题 + 立锚点 + 换歌词）
+  void _adopt(String t, Duration pos, {LyricsDoc? doc}) {
     _raw = t;
     _titleSeen++;
     if (_titleSeen == 1) {
@@ -222,10 +317,15 @@ class RadioLyrics extends ChangeNotifier {
       _hasAnchor = true;
       _anchorPos = pos;
     }
+    _rawDoc = doc;
     _doc = null;
-    _rawDoc = null;
     _notFound = false;
-    if (_enabled && _visible) unawaited(_ensureFetch());
+    _querying = false;
+    if (doc != null) {
+      _applyVariant();
+    } else if (_enabled && _visible) {
+      unawaited(_ensureFetch());
+    }
     notifyListeners();
   }
 
@@ -247,7 +347,11 @@ class RadioLyrics extends ChangeNotifier {
       _channelOffsets[ch] = ms;
       unawaited(_saveChannelOffsets());
     }
-    if (changed) notifyListeners();
+    if (changed) {
+      // 待上台的下一首按新偏移重算切换时刻（否则调完要等旧倒计时）
+      if (_pendingTrack.isNotEmpty) _schedulePendingSwitch();
+      notifyListeners();
+    }
   }
 
   // ============ 按台记忆的偏移量 ============

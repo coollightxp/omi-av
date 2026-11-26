@@ -123,11 +123,12 @@ class SettingsPanel extends StatefulWidget {
   State<SettingsPanel> createState() => _SettingsPanelState();
 }
 
-/// 歌词偏移显示：0 → 「0 秒」，正负带符号保留一位小数
+/// 歌词偏移显示：0 → 「0 秒」，正 = 延后、负 = 提前（与 ←/→ 方向一致）
 String _fmtLyricsOffset(int ms) {
   if (ms == 0) return '0 秒';
-  final sec = (ms.abs() / 1000).toStringAsFixed(1);
-  return '${ms > 0 ? '+' : '-'}$sec 秒';
+  final sec = (ms.abs() / 1000).toStringAsFixed(0);
+  if (ms == 0) return '0 秒';
+  return '${ms > 0 ? '延后' : '提前'} $sec 秒';
 }
 
 /// 微调实时回显：按**当前偏移**算出的那一句歌词。
@@ -2874,11 +2875,11 @@ class _SystemSettingsTab extends StatelessWidget {
                   children: [
                     const Text(
                       // 按「看到的现象」说，不按「快/慢」说：
-                      // 用户实际是听着声音看屏幕判断的，讲快慢容易绕反
-                      '屏幕上还停在前一句、声音已经唱过去了 → 点 − 往前赶；'
-                      '屏幕上已经唱过去了、声音还没到 → 点 + 等一等\n'
+                      // 方向与遥控器一致：左 = 回退（歌词延后），右 = 前进
+                      '屏幕上已经唱过去了、声音还没到 → 按 ← 让歌词延后；'
+                      '屏幕上还停在前一句、声音已经唱过去了 → 按 → 让歌词提前\n'
                       '1 秒/步，最多 ±120 秒 · 按台记住，改完立刻生效\n'
-                      '电台播放时也能长按遥控器 ← / → 快速微调',
+                      '电台播放时，点按遥控器 ← / → 就是这两个方向（按住连发）',
                       style: TextStyle(color: Colors.white54, fontSize: 12),
                     ),
                     const SizedBox(height: 4),
@@ -2891,30 +2892,30 @@ class _SystemSettingsTab extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
-                      tooltip: '歌词往前赶 1 秒',
-                      onPressed: s.lyricsOffsetMs > -120000
-                          ? () =>
-                              controller.setLyricsOffset(s.lyricsOffsetMs - 1000)
-                          : null,
-                      icon: const Icon(Icons.remove_circle_outline),
-                      color: Colors.white70,
-                    ),
-                    SizedBox(
-                      width: 62,
-                      child: Text(
-                        _fmtLyricsOffset(s.lyricsOffsetMs),
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                            color: Colors.white, fontSize: 14),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '歌词往后等 1 秒',
+                      tooltip: '歌词延后 1 秒（回退）',
                       onPressed: s.lyricsOffsetMs < 120000
                           ? () =>
                               controller.setLyricsOffset(s.lyricsOffsetMs + 1000)
                           : null,
-                      icon: const Icon(Icons.add_circle_outline),
+                      icon: const Icon(Icons.arrow_back),
+                      color: Colors.white70,
+                    ),
+                    SizedBox(
+                      width: 88,
+                      child: Text(
+                        _fmtLyricsOffset(s.lyricsOffsetMs),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 13),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '歌词提前 1 秒（前进）',
+                      onPressed: s.lyricsOffsetMs > -120000
+                          ? () =>
+                              controller.setLyricsOffset(s.lyricsOffsetMs - 1000)
+                          : null,
+                      icon: const Icon(Icons.arrow_forward),
                       color: Colors.white70,
                     ),
                   ],
