@@ -163,8 +163,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   Timer? _arrowLongTimer;
   bool _arrowDown = false;
   bool _arrowLongFired = false;
-  /// 长按 ←/→ 连续微调歌词偏移的连发定时器（电台歌词在屏时才用）
+  /// 长按 ←/→ 连续微调歌词偏移的连发定时器（电台里才有）
   Timer? _lyricNudgeTimer;
+  /// 歌词偏移的待提交值：连按只改这个计数 + OSD，停顿够才真正落库
+  /// （与 ↑/↓ 切台的「预览 + 停留提交」同一套语义，避免每按一下都让
+  /// 歌词整段重算/重绘）
+  int? _lyricOffsetPreview;
+  Timer? _lyricOffsetCommitTimer;
+  /// 预览所属的台：预览期间换了台就作废，别把偏移记到新台上
+  String? _lyricPreviewChannel;
 
   // 菜单键：短按=EPG 节目单，长按=设置面板
   Timer? _menuLongTimer;
@@ -372,6 +379,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     final becamePlaying =
         c.state == PlayerState.playing && _prevState != PlayerState.playing;
     _prevState = c.state;
+
+    // 歌词偏移预览期间从别的入口换了台：未提交的偏移作废
+    if (_lyricOffsetPreview != null &&
+        c.currentChannel?.id != _lyricPreviewChannel) {
+      _lyricOffsetCommitTimer?.cancel();
+      _lyricOffsetCommitTimer = null;
+      _lyricOffsetPreview = null;
+      _lyricPreviewChannel = null;
+    }
 
     // 播放会话重建（起播/换源/换台/重载）：这一刻原生控件或 WebView2 会
     // 抢窗口焦点，按键序列常被截断——按下收到了、抬起丢了，[_okHeld]
@@ -626,6 +642,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _okLongTimer?.cancel();
     _arrowLongTimer?.cancel();
     _lyricNudgeTimer?.cancel();
+    _lyricOffsetCommitTimer?.cancel();
     _menuLongTimer?.cancel();
     _seekOsdHideTimer?.cancel();
     _msgOsdTimer?.cancel();
@@ -3173,15 +3190,42 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 与设置面板改的是同一份数据（按台记住），面板里的数字会同步
   void _nudgeLyricOffset(int deltaMs) {
     final c = context.read<PlayerController>();
-    final cur = c.lyricsOffsetMs;
-    final next = cur + deltaMs;
-    if (next == cur) return;
-    c.setLyricsOffset(next);
-    final sec = (next.abs() / 1000).toStringAsFixed(0);
-    final what = next == 0
-        ? '歌词偏移 0 秒'
-        : '歌词${next > 0 ? '延后' : '提前'} $sec 秒';
-    _showOsd('$what（本台已记住）', icon: Icons.subtitles_outlined);
+    final base = _lyricOffsetPreview ?? c.lyricsOffsetMs;
+    final next = (base + deltaMs).clamp(-120000, 120000);
+    if (next == base && _lyricOffsetPreview == null) return;
+    _lyricOffsetPreview = next;
+    _lyricPreviewChannel = c.currentChannel?.id;
+    // 与 ↑/↓ 切台同一套：连按只改计数和 OSD，停顿够才真正生效。
+    // 每按一下都立刻改会影响歌词整段重算/重绘，手感发涩
+    _lyricOffsetCommitTimer?.cancel();
+    final dwell = c.settings.tuneDwellMs.clamp(1200, 5000);
+    _lyricOffsetCommitTimer =
+        Timer(Duration(milliseconds: dwell), _commitLyricOffset);
+    _showOsd('${_fmtLyricOffset(next)}（停顿后生效）',
+        icon: Icons.subtitles_outlined);
+  }
+
+  /// 停顿够（或要换台）→ 把预览的偏移真正落库
+  void _commitLyricOffset({bool quiet = false}) {
+    _lyricOffsetCommitTimer?.cancel();
+    _lyricOffsetCommitTimer = null;
+    final v = _lyricOffsetPreview;
+    _lyricOffsetPreview = null;
+    _lyricPreviewChannel = null;
+    if (v == null || !mounted) return;
+    final c = context.read<PlayerController>();
+    if (c.lyricsOffsetMs == v) return;
+    c.setLyricsOffset(v);
+    if (!quiet) {
+      _showOsd('${_fmtLyricOffset(v)}（已生效）',
+          icon: Icons.subtitles_outlined);
+    }
+  }
+
+  String _fmtLyricOffset(int ms) {
+    if (ms == 0) return '歌词偏移 0 秒';
+    final sec = (ms.abs() / 1000).toStringAsFixed(0);
+    return '歌词${ms > 0 ? '延后' : '提前'} $sec 秒';
   }
 
   /// ↑/↓ 按下边沿：侧边面板打开时面板内移动；底部控制面板打开时忽略
@@ -4027,6 +4071,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 2. 停留期间不许对目标流地址发任何 HTTP 请求——会踢掉正在播的连接；
   /// 3. 计时从最后一次按键开始，且下限 1.2 秒，避免设置被写成 0 时秒切。
   void _requestTune(PlayerController controller, int delta) {
+    // 换台前把还没提交的歌词偏移落库（否则会记到新台上）
+    _commitLyricOffset(quiet: true);
     final base = _osdPreview ?? controller.currentChannel;
     if (base == null) return;
     final target = controller.adjacentChannelFrom(base, delta);
