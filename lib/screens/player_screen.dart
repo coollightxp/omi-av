@@ -3161,13 +3161,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _arrowLongFired = false;
   }
 
-  /// 电台歌词是否正在屏上显示（左右键接管成歌词偏移微调）。
-  /// 非电台、歌词关掉/隐藏、这个台还没曲名时都不接管，保持原来的
-  /// 「短按切源」行为
+  /// 左右键是否归歌词偏移用：只要当前是电台台、且歌词功能开着就接管。
+  /// 电台没有「源」可切（切台是 ↑/↓），左右键本来就是空的；歌词块
+  /// 隐藏时也照样能调，靠 OSD 回显。歌词功能整个关掉才退回原行为
   bool _lyricsAdjustable(PlayerController c) {
     if (!(c.currentChannel?.isRadio ?? false)) return false;
-    final ly = RadioLyrics.instance;
-    return ly.enabled && ly.visible && ly.hasTrack;
+    return RadioLyrics.instance.enabled;
   }
 
   /// 微调歌词偏移：左 = 回退（歌词延后），右 = 前进（歌词提前）。
