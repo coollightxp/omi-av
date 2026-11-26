@@ -1396,7 +1396,7 @@ class PlayerController extends ChangeNotifier {
       final lyricsEnabled = rb('lyricsEnabled') ?? cur.lyricsEnabled;
       int lyricsOffset = cur.lyricsOffsetMs;
       final loRaw = ri('lyricsOffsetMs');
-      if (loRaw != null) lyricsOffset = loRaw.clamp(-10000, 10000);
+      if (loRaw != null) lyricsOffset = loRaw.clamp(-120000, 120000);
       int lyricsVariant = cur.lyricsVariant;
       final lvRaw = ri('lyricsVariant');
       if (lvRaw != null) lyricsVariant = lvRaw.clamp(0, 2);
@@ -4875,11 +4875,12 @@ class PlayerController extends ChangeNotifier {
     updateSettings(_settings.copyWith(lyricsEnabled: v));
   }
 
-  /// 歌词时间微调（毫秒，正 = 歌词延后）：±10s，UI 按 0.5s 步进
+  /// 歌词时间微调（毫秒，正 = 歌词延后）：±120s（部分电台推曲名偏早
+  /// 半分钟以上，旧的 ±10s 顶不住），UI 按 1s 步进
   int get lyricsOffsetMs => _settings.lyricsOffsetMs;
 
   void setLyricsOffset(int ms) {
-    final v = ms.clamp(-10000, 10000);
+    final v = ms.clamp(-120000, 120000);
     if (_settings.lyricsOffsetMs == v) return;
     updateSettings(_settings.copyWith(lyricsOffsetMs: v));
   }

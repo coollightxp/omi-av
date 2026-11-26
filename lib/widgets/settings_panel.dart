@@ -2877,7 +2877,8 @@ class _SystemSettingsTab extends StatelessWidget {
                       // 用户实际是听着声音看屏幕判断的，讲快慢容易绕反
                       '屏幕上还停在前一句、声音已经唱过去了 → 点 − 往前赶；'
                       '屏幕上已经唱过去了、声音还没到 → 点 + 等一等\n'
-                      '1 秒/步，最多 ±10 秒 · 改完立刻生效，不用等下一首',
+                      '1 秒/步，最多 ±120 秒 · 按台记住，改完立刻生效\n'
+                      '电台播放时也能长按遥控器 ← / → 快速微调',
                       style: TextStyle(color: Colors.white54, fontSize: 12),
                     ),
                     const SizedBox(height: 4),
@@ -2891,7 +2892,7 @@ class _SystemSettingsTab extends StatelessWidget {
                   children: [
                     IconButton(
                       tooltip: '歌词往前赶 1 秒',
-                      onPressed: s.lyricsOffsetMs > -10000
+                      onPressed: s.lyricsOffsetMs > -120000
                           ? () =>
                               controller.setLyricsOffset(s.lyricsOffsetMs - 1000)
                           : null,
@@ -2909,7 +2910,7 @@ class _SystemSettingsTab extends StatelessWidget {
                     ),
                     IconButton(
                       tooltip: '歌词往后等 1 秒',
-                      onPressed: s.lyricsOffsetMs < 10000
+                      onPressed: s.lyricsOffsetMs < 120000
                           ? () =>
                               controller.setLyricsOffset(s.lyricsOffsetMs + 1000)
                           : null,

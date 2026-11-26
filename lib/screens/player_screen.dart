@@ -163,6 +163,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   Timer? _arrowLongTimer;
   bool _arrowDown = false;
   bool _arrowLongFired = false;
+  /// 长按 ←/→ 连续微调歌词偏移的连发定时器（电台歌词在屏时才用）
+  Timer? _lyricNudgeTimer;
 
   // 菜单键：短按=EPG 节目单，长按=设置面板
   Timer? _menuLongTimer;
@@ -623,6 +625,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _tuneDebounce?.cancel();
     _okLongTimer?.cancel();
     _arrowLongTimer?.cancel();
+    _lyricNudgeTimer?.cancel();
     _menuLongTimer?.cancel();
     _seekOsdHideTimer?.cancel();
     _msgOsdTimer?.cancel();
@@ -3110,6 +3113,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 不可 seek（直播/网页）：抬起前快速操作即切源（防抖避免按多次切多台）
     _arrowLongTimer = Timer(const Duration(milliseconds: 400), () {
       _arrowLongFired = true;
+      // 电台歌词在屏上时，长按 ←/→ 改成微调歌词偏移（按住连发）：
+      // 短按仍是切源，两者不冲突。偏移偏大时按住几秒就能扳回来
+      if (_lyricsAdjustable(c)) {
+        _nudgeLyricOffset(isLeft ? -1000 : 1000);
+        _lyricNudgeTimer?.cancel();
+        _lyricNudgeTimer = Timer.periodic(
+          const Duration(milliseconds: 220),
+          (_) => _nudgeLyricOffset(isLeft ? -1000 : 1000),
+        );
+      }
     });
   }
 
@@ -3118,6 +3131,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (!_arrowDown) return;
     _arrowDown = false;
     _arrowLongTimer?.cancel();
+    _lyricNudgeTimer?.cancel();
+    _lyricNudgeTimer = null;
     if (_navPanelOpen) {
       _panelKey(isLeft ? 'left' : 'right', false);
       _arrowLongFired = false;
@@ -3138,6 +3153,28 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       _onArrow(isLeft ? 'prevSource' : 'nextSource');
     }
     _arrowLongFired = false;
+  }
+
+  /// 电台歌词是否正在屏上显示（长按 ←/→ 才接管成歌词偏移微调）。
+  /// 非电台、歌词关掉/隐藏、这个台还没曲名时都不接管，保持原来的
+  /// 「长按无动作」行为
+  bool _lyricsAdjustable(PlayerController c) {
+    if (!(c.currentChannel?.isRadio ?? false)) return false;
+    final ly = RadioLyrics.instance;
+    return ly.enabled && ly.visible && ly.hasTrack;
+  }
+
+  /// 微调歌词偏移：左 = 往前赶（负），右 = 往后等（正）。
+  /// 与设置面板改的是同一份数据（按台记住），面板里的数字会同步
+  void _nudgeLyricOffset(int deltaMs) {
+    final c = context.read<PlayerController>();
+    final cur = c.lyricsOffsetMs;
+    final next = cur + deltaMs;
+    if (next == cur) return;
+    c.setLyricsOffset(next);
+    final sec = (next / 1000).toStringAsFixed(0);
+    _showOsd('歌词偏移 ${next > 0 ? '+' : ''}$sec 秒（本台已记住）',
+        icon: Icons.subtitles_outlined);
   }
 
   /// ↑/↓ 按下边沿：侧边面板打开时面板内移动；底部控制面板打开时忽略
