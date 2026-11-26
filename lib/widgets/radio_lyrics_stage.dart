@@ -12,9 +12,11 @@ import '../services/radio_lyrics.dart';
 /// 面板尺寸由 [video_player_widget] 的分栏布局（`_lyricsSplit`）给定，
 /// 窄屏随整版等比缩小。
 ///
-/// **纯显示**（用户 2026-11-18 定稿）：不响应拖动、不给微调按钮——
+/// **纯显示**（用户 2026-11-18 定稿）：不响应拖动、不放微调按钮——
 /// 播放页左侧上滑调亮度、右侧上滑调音量，歌词块正占着右半边，任何
-/// 拖动都会跟音量手势打架。时间对不准走设置里的「歌词时间微调」。
+/// 拖动都会跟音量手势打架。时间对不准走设置里的「歌词时间微调」，
+/// 或电台里点按遥控器 ←/→；面板只在状态条右端留一个「复位」
+/// （偏移归零，调乱了救回来用）。
 ///
 /// 对齐：用 [RadioLyrics.indexAt] 把「播放位置 − 曲名变化时刻 + 微调偏移」
 /// 映射到 LRC 时间轴。进台第一首没有锚点（不知道唱到哪儿），此时只展示
@@ -232,21 +234,30 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               // 距框左边 20px（Container 已有 14，这里补 6）；
               // 与歌词隔 10px——不贴字，也不白占一行
               Padding(
-                padding: const EdgeInsets.only(left: 6, bottom: 10),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 420),
-                    // 切换时两张叠放：高度不跳、起点不动，只有淡入淡出
-                    layoutBuilder: (current, previous) => Stack(
-                      alignment: Alignment.centerLeft,
-                      children: [...previous, if (current != null) current],
+                padding: const EdgeInsets.only(left: 6, right: 6, bottom: 10),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 420),
+                        // 切换时两张叠放：高度不跳、起点不动，只有淡入淡出
+                        layoutBuilder: (current, previous) => Stack(
+                          alignment: Alignment.centerLeft,
+                          children: [...previous, if (current != null) current],
+                        ),
+                        child: _StatusChip(
+                          key: ValueKey(statusText),
+                          text: statusText,
+                        ),
+                      ),
                     ),
-                    child: _StatusChip(
-                      key: ValueKey(statusText),
-                      text: statusText,
-                    ),
-                  ),
+                    // 调乱了想一键回到「不提前、不延后」：偏移归零。
+                    // 与设置面板/遥控器微调同一份数据，按台记住
+                    if (lyrics.offsetMs != 0)
+                      _ResetOffsetChip(
+                        onTap: () => widget.controller.setLyricsOffset(0),
+                      ),
+                  ],
                 ),
               ),
               Expanded(
@@ -364,6 +375,49 @@ class _StatusChip extends StatelessWidget {
           color: Colors.white.withValues(alpha: 0.58),
           fontSize: 11.5,
           height: 1.2,
+        ),
+      ),
+    );
+  }
+}
+
+/// 歌词偏移复位（状态条右端，与左端状态标签同边距）。
+/// 只在偏移不为 0 时出现，点一下回到「不提前、不延后」
+class _ResetOffsetChip extends StatelessWidget {
+  const _ResetOffsetChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.restart_alt,
+                  size: 13, color: Colors.white.withValues(alpha: 0.80)),
+              const SizedBox(width: 3),
+              Text(
+                '复位',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.80),
+                  fontSize: 11.5,
+                  height: 1.2,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
