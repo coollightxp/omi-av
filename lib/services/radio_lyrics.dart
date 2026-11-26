@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'chinese_variant.dart';
 
@@ -153,6 +154,7 @@ class RadioLyrics extends ChangeNotifier {
     if (_enabled == v) return;
     _enabled = v;
     _visible = v; // 开 = 默认显示；关 = 功能不存在
+    if (v) unawaited(_ensureChannelOffsetsLoaded());
     if (v && _raw.isNotEmpty) unawaited(_ensureFetch());
     notifyListeners();
   }
@@ -174,6 +176,8 @@ class RadioLyrics extends ChangeNotifier {
       return;
     }
     _channelId = channelId;
+    // 自动偏移按台存，换台后先确保已从磁盘读回（否则新台的偏移是 0）
+    unawaited(_ensureChannelOffsetsLoaded());
     _gen++;
     _doc = null;
     _rawDoc = null;
@@ -185,6 +189,9 @@ class RadioLyrics extends ChangeNotifier {
     _midJoined = false;
     _titleSeen = 0;
     notifyListeners();
+    // 本台若有记住的偏移，把设置面板的数字同步过来（否则面板还显示
+    // 上一个台调的秒数，用户再微调就调歪了）
+    _reportOffset();
   }
 
   /// 手动重查当前曲目（v2.3.62）：电台歌不听用户的——错词不等
@@ -223,15 +230,108 @@ class RadioLyrics extends ChangeNotifier {
   }
 
   /// 歌词时间微调（毫秒，正 = 歌词整体延后、负 = 提前）。
-  /// 设置在「电台歌词显示」下面调，用来补偿电台推曲名偏早/偏晚、
-  /// 长前奏等情况；不放拖拽校准（会跟音量手势打架）。
-  int _offsetMs = 0;
-  int get offsetMs => _offsetMs;
+  /// 设置在「电台歌词显示」下面调；调过之后按台记住（见下方
+  /// [setOffset]），换台回来不用重调，未校准过的台沿用最近一次的值
+  int get offsetMs => _channelOffsets[_channelId] ?? _baseOffsetMs;
 
   void setOffset(int ms) {
-    if (_offsetMs == ms) return;
-    _offsetMs = ms;
-    notifyListeners();
+    final ch = _channelId;
+    final hasCh = ch != null && ch.isNotEmpty;
+    final changed =
+        _baseOffsetMs != ms || (hasCh && _channelOffsets[ch] != ms);
+    _baseOffsetMs = ms;
+    // 控制器刚把这个值写进设置，记下来——否则切台时会把「已经是这个
+    // 值」误判成变化，或者该同步时漏同步
+    _reportedOffset = ms;
+    if (hasCh) {
+      _channelOffsets[ch] = ms;
+      unawaited(_saveChannelOffsets());
+    }
+    if (changed) notifyListeners();
+  }
+
+  // ============ 按台记忆的偏移量 ============
+  //
+  // 电台编码器推 StreamTitle 的时机各台不一样（有的提前几秒，有的
+  // 提前半分钟），同台基本稳定。因此偏移量必须**按台**记：调好一台
+  // 之后换台回来还在，不用重调。
+  //
+  // 为什么不做「全自动」：曲名推送偏早时，上一首的曲名和下一首的曲名
+  // 是**同样偏早**的，两者相减得到的时间差仍然等于这首歌的真实长度，
+  // 偏早量被抵消掉——纯元数据里没有任何可观测的量能反推出它。要真
+  // 自动只能靠音频波形检测歌曲间隙，当前播放链路拿不到音频电平，故
+  // 采用「调一次、按台记住」的方案。
+
+  /// 未按台校准过的台沿用的默认值（来自设置里的全局微调）
+  int _baseOffsetMs = 0;
+
+  /// 每个台各自的偏移量（毫秒，正 = 歌词延后）
+  final Map<String, int> _channelOffsets = <String, int>{};
+
+  static const String _channelOffsetPrefsKey = 'radio_lyrics_channel_offsets_v1';
+
+  /// 加载协程（只跑一次，后来者复用同一个 Future——
+  /// 用 bool 标记会有「异步读盘还没回来就写入新值」的竞态）
+  Future<void>? _channelOffsetsLoader;
+
+  /// 当前台是否已单独校准过（歌词状态条显示「本台」用）
+  bool get hasChannelOffset {
+    final ch = _channelId;
+    return ch != null && ch.isNotEmpty && _channelOffsets.containsKey(ch);
+  }
+
+  /// 生效偏移变化回调（控制器用它把设置面板的数字同步成本台的值）
+  void Function(int ms)? onOffsetChanged;
+
+  int? _reportedOffset;
+
+  void _reportOffset() {
+    final eff = offsetMs;
+    if (_reportedOffset == eff) return;
+    _reportedOffset = eff;
+    onOffsetChanged?.call(eff);
+  }
+
+  Future<void> _ensureChannelOffsetsLoaded() {
+    final running = _channelOffsetsLoader;
+    if (running != null) return running;
+    final f = _loadChannelOffsets();
+    _channelOffsetsLoader = f;
+    return f;
+  }
+
+  Future<void> _loadChannelOffsets() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final raw = p.getString(_channelOffsetPrefsKey);
+      if (raw == null || raw.isEmpty) return;
+      final m = jsonDecode(raw);
+      if (m is! Map) return;
+      var changed = false;
+      m.forEach((k, v) {
+        // 读盘期间可能已经调过某台（putIfAbsent 保护新值不被旧盘覆盖）
+        if (k is String && v is num && !_channelOffsets.containsKey(k)) {
+          _channelOffsets[k] = v.toInt();
+          changed = true;
+        }
+      });
+      if (changed) {
+        notifyListeners();
+        // 读盘回来发现当前台有记住的偏移：同步给设置面板
+        _reportOffset();
+      }
+    } catch (e) {
+      debugPrint('[Lyrics] 按台偏移读取失败: $e');
+    }
+  }
+
+  Future<void> _saveChannelOffsets() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(_channelOffsetPrefsKey, jsonEncode(_channelOffsets));
+    } catch (e) {
+      debugPrint('[Lyrics] 按台偏移保存失败: $e');
+    }
   }
 
   /// 歌词简繁转换（0 = 原文，1 = 转简体，2 = 转繁体）。
@@ -299,7 +399,7 @@ class RadioLyrics extends ChangeNotifier {
     final d = _doc;
     if (d == null || !d.synced || d.lines.isEmpty) return false;
     if (!_hasAnchor) return false;
-    var elapsed = pos - _anchorPos - Duration(milliseconds: _offsetMs);
+    var elapsed = pos - _anchorPos - Duration(milliseconds: offsetMs);
     if (elapsed.isNegative) elapsed = Duration.zero;
     return elapsed <= d.lines.last.time + const Duration(seconds: 15);
   }
@@ -308,7 +408,7 @@ class RadioLyrics extends ChangeNotifier {
   int indexAt(Duration pos) {
     final d = _doc;
     if (d == null || !d.synced || !_hasAnchor) return -1;
-    var elapsed = pos - _anchorPos - Duration(milliseconds: _offsetMs);
+    var elapsed = pos - _anchorPos - Duration(milliseconds: offsetMs);
     // 直播流的位置偶尔会倒回一点（重连），夹到 0 起步，别把整页跳走
     if (elapsed.isNegative) elapsed = Duration.zero;
     final lines = d.lines;

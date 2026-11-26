@@ -561,6 +561,14 @@ class PlayerController extends ChangeNotifier {
     final bootClock = Stopwatch()..start();
     _boot('正在读取设置…');
     await _loadSettings();
+    // 歌词时间偏移按台记忆：切台后把本台生效的偏移同步回设置，
+    // 保证面板上显示/调节的秒数就是当前台实际用的那个。必须在下面
+    // 的 setEnabled/setOffset 之前挂好——读盘的异步回调可能先到
+    RadioLyrics.instance.onOffsetChanged = (ms) {
+      if (_settings.lyricsOffsetMs != ms) {
+        updateSettings(_settings.copyWith(lyricsOffsetMs: ms));
+      }
+    };
     // 歌词开关：状态机自己持有 enabled（UI 直接监听，不重建播放树）
     RadioLyrics.instance.setEnabled(_settings.lyricsEnabled);
     RadioLyrics.instance.setOffset(_settings.lyricsOffsetMs);

@@ -224,7 +224,8 @@ class _RadioLyricsStageState extends State<RadioLyricsStage> {
               [
                 _variantChipText(lyrics.variant),
                 if (lyrics.offsetMs != 0 && axisOk)
-                  '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}',
+                  '时间偏移 ${_fmtOffsetSec(lyrics.offsetMs)}'
+                      '${lyrics.hasChannelOffset ? '（本台已记住）' : ''}',
               ].join('   ·   ');
           body = Column(
             children: [
