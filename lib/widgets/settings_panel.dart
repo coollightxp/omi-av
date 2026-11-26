@@ -2880,7 +2880,7 @@ class _SystemSettingsTab extends StatelessWidget {
                       '屏幕上还停在前一句、声音已经唱过去了 → 按 → 让歌词提前\n'
                       '1 秒/步，最多 ±120 秒 · 按台记住\n'
                       '电台播放时，点按遥控器 ← / → 就是这两个方向：连按只改提示，'
-                      '停手后（换台停留时间）统一生效，不会一下一下地卡画面',
+                      '松手约 1 秒后统一生效，不会一下一下地卡画面',
                       style: TextStyle(color: Colors.white54, fontSize: 12),
                     ),
                     const SizedBox(height: 4),

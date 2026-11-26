@@ -3195,12 +3195,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (next == base && _lyricOffsetPreview == null) return;
     _lyricOffsetPreview = next;
     _lyricPreviewChannel = c.currentChannel?.id;
-    // 与 ↑/↓ 切台同一套：连按只改计数和 OSD，停顿够才真正生效。
-    // 每按一下都立刻改会影响歌词整段重算/重绘，手感发涩
+    // 与 ↑/↓ 切台同一套：连按只改计数和 OSD，停手才真正生效。
+    // 时长用 1 秒（不用换台的 2.5 秒——连按调偏移的节奏本来就在 1 秒内）
     _lyricOffsetCommitTimer?.cancel();
-    final dwell = c.settings.tuneDwellMs.clamp(1200, 5000);
     _lyricOffsetCommitTimer =
-        Timer(Duration(milliseconds: dwell), _commitLyricOffset);
+        Timer(const Duration(milliseconds: 1000), _commitLyricOffset);
     _showOsd('${_fmtLyricOffset(next)}（停顿后生效）',
         icon: Icons.subtitles_outlined);
   }
