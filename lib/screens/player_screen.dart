@@ -3737,12 +3737,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         // 小窗（420×236，无标题栏）：整块画面都可以按着拖；普通窗口只让
-        // 中间 50% 拖，两侧留给上下滑调亮度/音量，避免一次拖动两种效果。
+        // 中间 1/3 拖（含网页直播），两侧留给上下滑调亮度/音量
         final miniDrag = controller.isDesktop && controller.miniWindow;
         return Listener(
           // 原始指针事件（不进手势竞技场）：屏幕坐标取 Win32 GetCursorPos，
           // 见 window_drag_io.dart 注释。translucent：只在自己或子节点被
-          // 命中时回调，网页模式下中间区域仍完整穿透给网页
+          // 命中时回调，位移不足阈值时不启动拖动，网页的点击照常穿透
           behavior: HitTestBehavior.translucent,
           onPointerDown: (d) {
             if (d.buttons != kPrimaryButton) return;
@@ -3751,10 +3751,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             // 边界必须与三个 Expanded 完全对齐，否则压在左/右区边界上
             // 会「一边拖窗一边调亮度/音量」
             final inMiddle = x > width / 3 && x < width * 2 / 3;
+            // 网页直播（webMode）同样允许中间 1/3 拖动窗口：以前这里多了
+            // `!webMode`，网页频道全画面都拖不动（用户实测「网页直播按住
+            // 中间拖不了」）。两侧 1/3 仍交给亮度/音量手势，网页的点击与
+            // 滑动在位移 <6px 时不触发拖动，照常穿透给网页
             beginWindowDrag(
                 enabled: controller.isDesktop &&
                     !controller.isFullscreen &&
-                    !webMode &&
                     (miniDrag || inMiddle),
                 local: d.localPosition);
           },
@@ -3807,8 +3810,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                 ),
               ),
               // 中间：点击切换面板，双击播放暂停（桌面端双击全屏，按住拖动窗口）。
-              // 网页模式：桌面端完全穿透（点击/滑动全交给网页，面板由边缘
-              // hover 与底部点击区触发，双击全屏由 _WebDoubleTapFullScreen 接管）；
+              // 网页模式：桌面端画面与滑动完全穿透给网页（面板由边缘
+              // hover 与底部点击区触发，双击全屏由 _WebDoubleTapFullScreen
+              // 接管），只有「按住中间 1/3 拖动」由外层 Listener 接管；
               // 移动端保留点击呼出信息面板
               Expanded(
                 child: webMode

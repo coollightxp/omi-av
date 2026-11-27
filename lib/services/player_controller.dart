@@ -4189,6 +4189,8 @@ class PlayerController extends ChangeNotifier {
       if (!_isFullscreen) {
         // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
         await Future<void>.delayed(const Duration(milliseconds: 60));
+        // 兜底：还原矩形若被记成小窗尺寸，强制回到固定窗口大小
+        await _ensureWindowedSize();
         await _restoreHiddenChrome();
       }
       notifyListeners();
@@ -4226,6 +4228,8 @@ class PlayerController extends ChangeNotifier {
       await _applyAlwaysOnTop();
       // 退出全屏后恢复隐藏式标题栏（与启动默认一致）
       await Future<void>.delayed(const Duration(milliseconds: 60));
+      // 兜底：还原矩形若被记成小窗尺寸，强制回到固定窗口大小
+      await _ensureWindowedSize();
       await _restoreHiddenChrome();
       notifyListeners();
       return true;
@@ -4275,6 +4279,29 @@ class PlayerController extends ChangeNotifier {
       (s.width - _miniSize.width).abs() < 16 &&
       (s.height - _miniSize.height).abs() < 16;
 
+  /// 窗口化时的标准尺寸（固定大小，不支持拖边缩放）
+  static const _windowedSize = Size(1280, 720);
+
+  /// 退出全屏后的尺寸兜底。
+  ///
+  /// Windows 是全屏退出时按「进入全屏那一刻记录的窗口矩形」还原。如果那次
+  /// 进全屏是从小窗（420×236）直接切过去的，还原出来就是小窗大小，桌面
+  /// 左右都露出来（用户实测「全屏↔窗体↔小窗切几次后，窗体模式变成小窗
+  /// 大小」）。这里统一校验：不像正常窗口就强制改回固定窗口尺寸并居中。
+  Future<void> _ensureWindowedSize() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) return;
+    try {
+      final s = await windowManager.getSize();
+      // 宽度明显小于正常窗口，或正好是小窗尺寸：都算被污染
+      if (s.width < 900 || _isMiniLikeSize(s)) {
+        await windowManager.setResizable(true);
+        await windowManager.setSize(_windowedSize);
+        await windowManager.center();
+        await windowManager.setResizable(false);
+      }
+    } catch (_) {}
+  }
+
   Future<void> toggleMiniWindow() async {
     if (!isDesktop || _miniToggling) return;
     _miniToggling = true;
@@ -4307,9 +4334,24 @@ class PlayerController extends ChangeNotifier {
         await windowManager.setResizable(false);
       } else {
         if (_wasFullscreenBeforeMini) {
-          // 原来就是全屏：直接回全屏（无需再 setSize）
+          // 原来就是全屏：直接回全屏。
+          //
+          // 但**必须先恢复窗口尺寸再进全屏**：Windows 记的是「进全屏前的
+          // 窗口矩形」，此刻窗口还是 420×236，直接 setFullScreen(true)
+          // 会让它把还原矩形记成小窗尺寸——下次退全屏就变成小窗大小
+          // （用户复现链：全屏→小窗→按 F 回全屏→再退全屏，窗口只剩
+          // 420×236，桌面两侧全露出来）
           _wasFullscreenBeforeMini = false;
           _wasMaximizedBeforeMini = false;
+          var target = _sizeBeforeMini;
+          if (_isMiniLikeSize(target) || target.width < 900) {
+            target = _windowedSize;
+          }
+          await windowManager.setResizable(true);
+          await windowManager.setSize(target);
+          await windowManager.setResizable(false);
+          // 让 WM_SIZE 处理完再切全屏，避免两条窗口消息互相覆盖
+          await Future<void>.delayed(const Duration(milliseconds: 60));
           _isFullscreen = true;
           await windowManager.setAlwaysOnTop(false);
           await _prepareFullscreenEnter();
