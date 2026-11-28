@@ -137,14 +137,6 @@ class PlayerSettings {
   /// 打开后满速拉取，整片更快下完，但会和播放器抢带宽
   final bool castRecordFullSpeed;
 
-  /// 安卓高分屏（2K/4K）渲染分辨率封顶（默认开）。
-  ///
-  /// 开着：物理屏宽 ≥ 1920 的安卓设备把 devicePixelRatio 封到 2.0，
-  /// 降低 GPU / 显存压力换流畅（网页直播尤其明显）；
-  /// 关着：保持屏幕原生分辨率，4K 源画质不打折，适合高配机器。
-  /// 仅安卓生效，桌面 / Web 忽略该开关。
-  final bool renderScaleCap;
-
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -180,7 +172,6 @@ class PlayerSettings {
     this.reservationRecord = false,
     this.recordSaveDir = '',
     this.castRecordFullSpeed = false,
-    this.renderScaleCap = true,
   });
 
   PlayerSettings copyWith({
@@ -218,7 +209,6 @@ class PlayerSettings {
     bool? reservationRecord,
     String? recordSaveDir,
     bool? castRecordFullSpeed,
-    bool? renderScaleCap,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -258,7 +248,6 @@ class PlayerSettings {
       recordSaveDir: recordSaveDir ?? this.recordSaveDir,
       castRecordFullSpeed:
           castRecordFullSpeed ?? this.castRecordFullSpeed,
-      renderScaleCap: renderScaleCap ?? this.renderScaleCap,
     );
   }
 }

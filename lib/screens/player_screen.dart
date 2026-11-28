@@ -868,14 +868,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                   ),
                       ),
 
-                      // App 内亮度遮罩：Windows gamma ramp 在台式机/外接屏上
-                      // 普遍无效，Android「应用内亮度」API 在部分 ROM（联想
-                      // 小新等）实际写成了系统亮度、带动整个平板亮度。这两类
-                      // 统一改为在视频层上压黑色遮罩调暗，只影响本 App 画面。
-                      // 仅内置播放；网页频道走 CSS filter。IgnorePointer 不拦手势。
+                      // Windows 桌面亮度遮罩：原生 gamma ramp 在台式机/外接
+                      // 显示器上普遍无效（调了没反应），改为在视频层上压一层
+                      // 黑色遮罩调暗画面。Android/iOS 走窗口亮度（可超过系统
+                      // 自动亮度、退出自动恢复），不需要遮罩。网页频道走 CSS
+                      // filter。IgnorePointer 不拦手势。
                       if (!kIsWeb &&
-                          (defaultTargetPlatform == TargetPlatform.windows ||
-                              defaultTargetPlatform == TargetPlatform.android) &&
+                          defaultTargetPlatform == TargetPlatform.windows &&
                           !controller.webPageActive &&
                           controller.brightness < 1.0)
                         Positioned.fill(
@@ -3790,12 +3789,26 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                           _dragStartY = details.globalPosition.dy;
                           _dragStartX = details.globalPosition.dx;
                           _lastBrightness = controller.brightness;
-                          setState(() => _showBrightnessIndicator = true);
                         },
                   onVerticalDragUpdate: miniDrag
                       ? null
                       : (details) {
                           if (_isHorizontalDrag || _dragStartY == null) return;
+                          // 横向位移为主（横滑/斜滑）就不算调亮度：否则从
+                          // 屏幕边缘横滑呼出系统返回（退出卡片）时，手一斜
+                          // 就顺手把亮度改了
+                          final totalDx =
+                              (details.globalPosition.dx - (_dragStartX ?? 0))
+                                  .abs();
+                          final totalDy =
+                              (details.globalPosition.dy - _dragStartY!).abs();
+                          if (totalDx > totalDy * 1.2) {
+                            _isHorizontalDrag = true;
+                            return;
+                          }
+                          if (!_showBrightnessIndicator) {
+                            setState(() => _showBrightnessIndicator = true);
+                          }
                           final dy = _dragStartY! - details.globalPosition.dy;
                           controller.setBrightness(
                               _lastBrightness + dy * _dragSensitivity);
@@ -3856,13 +3869,27 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       : (details) {
                           _isHorizontalDrag = false;
                           _dragStartY = details.globalPosition.dy;
+                          _dragStartX = details.globalPosition.dx;
                           _lastVolume = controller.volume;
-                          setState(() => _showVolumeIndicator = true);
                         },
                   onVerticalDragUpdate: miniDrag
                       ? null
                       : (details) {
                           if (_isHorizontalDrag || _dragStartY == null) return;
+                          // 同左侧：横向为主不调音量，避免横滑呼出退出卡片
+                          // 时误改音量
+                          final totalDx =
+                              (details.globalPosition.dx - (_dragStartX ?? 0))
+                                  .abs();
+                          final totalDy =
+                              (details.globalPosition.dy - _dragStartY!).abs();
+                          if (totalDx > totalDy * 1.2) {
+                            _isHorizontalDrag = true;
+                            return;
+                          }
+                          if (!_showVolumeIndicator) {
+                            setState(() => _showVolumeIndicator = true);
+                          }
                           final dy = _dragStartY! - details.globalPosition.dy;
                           controller
                               .setVolume(_lastVolume + dy * _dragSensitivity);

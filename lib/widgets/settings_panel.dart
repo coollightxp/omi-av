@@ -2554,18 +2554,6 @@ class _PlayerSettingsTab extends StatelessWidget {
                 : (v) => controller.updateSettings(s.copyWith(uiScale: v)),
           ),
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.memory, color: Colors.white70),
-          title: const Text('高分屏渲染封顶',
-              style: TextStyle(color: Colors.white, fontSize: 15)),
-          subtitle: const Text(
-              '2K/4K 安卓设备降低渲染分辨率换流畅；关掉保持原生清晰，4K 源画质不打折（仅安卓生效）',
-              style: TextStyle(color: Colors.white54, fontSize: 12)),
-          value: s.renderScaleCap,
-          onChanged: (v) =>
-              controller.updateSettings(s.copyWith(renderScaleCap: v)),
-          activeColor: Colors.blueAccent,
-        ),
       ],
     );
   }

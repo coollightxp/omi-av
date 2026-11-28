@@ -125,14 +125,11 @@ class _OmiMaterialApp extends StatelessWidget {
                 : (defaultTargetPlatform == TargetPlatform.android
                     ? (isTv ? DeviceProfile.tv : DeviceProfile.mobile)
                     : DeviceProfile.desktop);
-            return _RenderScaleCap(
-              enabled: settings.renderScaleCap,
-              child: MediaQuery(
-                data: mq.copyWith(textScaler: TextScaler.linear(scale)),
-                child: DeviceProfileScope(
-                  data: DeviceProfileScopeData(profile: profile, userScale: 1.0),
-                  child: child!,
-                ),
+            return MediaQuery(
+              data: mq.copyWith(textScaler: TextScaler.linear(scale)),
+              child: DeviceProfileScope(
+                data: DeviceProfileScopeData(profile: profile, userScale: 1.0),
+                child: child!,
               ),
             );
           },
@@ -143,47 +140,3 @@ class _OmiMaterialApp extends StatelessWidget {
   }
 }
 
-/// 安卓高分屏（2K 平板等）渲染分辨率封顶。
-///
-/// 2K 屏在 4GB 内存的平板上，全分辨率渲染视频 + WebView + 整套 UI 会让
-/// GPU/显存吃紧，表现为网页直播明显偏卡。这里把 devicePixelRatio 封顶到
-/// 2.0：让 Flutter（含 WebView 纹理、视频纹理）以较低物理分辨率渲染，再由
-/// FittedBox 放大填满屏幕——UI 仍占满整个画面，代价是细节略微变软，换
-/// 来更流畅的播放。仅在物理宽度 >= 1920 的安卓大屏生效，1080p 手机不动。
-///
-/// 受 [PlayerSettings.renderScaleCap] 开关控制：关掉则保持屏幕原生分辨率，
-/// 4K 源画质不打折，留给高配机器 / 追求画质的用户。
-class _RenderScaleCap extends StatelessWidget {
-  const _RenderScaleCap({required this.child, required this.enabled});
-  final Widget child;
-  final bool enabled;
-
-  @override
-  Widget build(BuildContext context) {
-    final mq = MediaQuery.of(context);
-    if (!enabled ||
-        kIsWeb ||
-        defaultTargetPlatform != TargetPlatform.android) {
-      return child;
-    }
-    const double capDpr = 2.0;
-    final dpr = mq.devicePixelRatio;
-    final physicalW = mq.size.width * dpr;
-    // 只降真正的高分大屏；普通 1080p 手机（物理宽 1080）保持原清晰
-    if (dpr <= capDpr || physicalW < 1920) return child;
-    final scale = dpr / capDpr; // > 1：渲染分辨率的缩小倍数
-    final innerSize = mq.size / scale;
-    return FittedBox(
-      fit: BoxFit.contain,
-      alignment: Alignment.center,
-      child: SizedBox(
-        width: innerSize.width,
-        height: innerSize.height,
-        child: MediaQuery(
-          data: mq.copyWith(size: innerSize, devicePixelRatio: capDpr),
-          child: child,
-        ),
-      ),
-    );
-  }
-}

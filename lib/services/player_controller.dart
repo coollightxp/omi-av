@@ -1269,7 +1269,6 @@ class PlayerController extends ChangeNotifier {
         // 手机浏览器不适合填路径，仍只在设备上设置）
         'reservationRecord': s.reservationRecord,
         'castRecordFullSpeed': s.castRecordFullSpeed,
-        'renderScaleCap': s.renderScaleCap,
         'lyricsEnabled': s.lyricsEnabled,
         // 歌词时间微调（毫秒，正 = 往后等 / 负 = 往前赶）
         'lyricsOffsetMs': s.lyricsOffsetMs,
@@ -1401,7 +1400,6 @@ class PlayerController extends ChangeNotifier {
           rb('reservationRecord') ?? cur.reservationRecord;
       final castRecordFullSpeed =
           rb('castRecordFullSpeed') ?? cur.castRecordFullSpeed;
-      final renderScaleCap = rb('renderScaleCap') ?? cur.renderScaleCap;
       final lyricsEnabled = rb('lyricsEnabled') ?? cur.lyricsEnabled;
       int lyricsOffset = cur.lyricsOffsetMs;
       final loRaw = ri('lyricsOffsetMs');
@@ -1488,7 +1486,6 @@ class PlayerController extends ChangeNotifier {
           hideUnavailable != _settings.hideUnavailableChannels ||
           reservationRecord != _settings.reservationRecord ||
           castRecordFullSpeed != _settings.castRecordFullSpeed ||
-          renderScaleCap != _settings.renderScaleCap ||
           lyricsEnabled != _settings.lyricsEnabled ||
           lyricsOffset != _settings.lyricsOffsetMs ||
           lyricsVariant != _settings.lyricsVariant ||
@@ -1518,7 +1515,6 @@ class PlayerController extends ChangeNotifier {
           hideUnavailableChannels: hideUnavailable,
           reservationRecord: reservationRecord,
           castRecordFullSpeed: castRecordFullSpeed,
-          renderScaleCap: renderScaleCap,
           lyricsEnabled: lyricsEnabled,
           lyricsOffsetMs: lyricsOffset,
           lyricsVariant: lyricsVariant,
@@ -1972,18 +1968,17 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
-  /// 是否用 App 内遮罩调亮度（不调用系统亮度接口）。
+  /// 是否用 App 内遮罩调亮度（不调用原生接口）。
   ///
-  /// - Windows：原生 gamma ramp 在台式机/外接显示器上普遍无效，调了没反应；
-  /// - Android：`setApplicationScreenBrightness` 名义上是「应用内亮度」，
-  ///   但不少 ROM（联想小新等）实际写成了系统亮度，一调整个平板都变，
-  ///   还影响其它应用。
-  /// 这两类统一走播放页的黑色遮罩压暗画面（仅内置播放），网页频道走 CSS
-  /// filter——两种都只作用于本 App，不碰系统亮度。
+  /// 只有 Windows 需要：原生 gamma ramp 在台式机/外接显示器上普遍无效，
+  /// 调了没反应，改由播放页黑色遮罩压暗画面。
+  ///
+  /// Android / iOS 仍走原生「窗口亮度」`setApplicationScreenBrightness`：
+  /// 它只改本 App 窗口的显示亮度（0.0~1.0 对应屏幕硬件全亮度范围，能比
+  /// 系统自动亮度更亮），窗口销毁/退出后自动恢复原来的系统亮度，不改系统
+  /// 设置、也不影响其它应用——正是视频 App 的通行做法。
   bool get _useAppInternalBrightness =>
-      !kIsWeb &&
-      (defaultTargetPlatform == TargetPlatform.windows ||
-          defaultTargetPlatform == TargetPlatform.android);
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
   /// 初始化程序内音量和亮度。
   ///
@@ -1994,7 +1989,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> _initSystemValues() async {
     _brightness = (_lastBrightness ?? 1.0).clamp(0.0, 1.0);
     _volume = (_lastVolume ?? 1.0).clamp(0.0, 1.0);
-    // 走 App 内遮罩的平台不写系统亮度：避免启动瞬间把平板亮度带偏
+    // Windows 用遮罩，不写原生亮度；Android/iOS 启动即应用记住的窗口亮度
     if (!_useAppInternalBrightness) {
       try {
         await ScreenBrightness.instance
@@ -4120,8 +4115,8 @@ class PlayerController extends ChangeNotifier {
   /// 设置亮度 (0.0 - 1.0)
   Future<void> setBrightness(double value) async {
     _brightness = value.clamp(0.0, 1.0);
-    // Windows / Android 走 App 内遮罩（见 [_useAppInternalBrightness]），
-    // 跳过原生接口避免双重压暗或写成系统亮度
+    // Windows 走 App 内遮罩（见 [_useAppInternalBrightness]）跳过原生；
+    // Android/iOS 写窗口亮度，退出 App 自动恢复系统亮度
     final skipNative = _useAppInternalBrightness;
     if (!skipNative) {
       try {
@@ -4129,15 +4124,18 @@ class PlayerController extends ChangeNotifier {
             .setApplicationScreenBrightness(_brightness);
       } catch (_) {}
     }
-    // 网页频道：WebView2 原生 HWND 不受系统亮度影响，用 CSS filter 调光
+    // 网页频道：仅 Windows 的 WebView2 原生 HWND 不受系统亮度影响，
+    // 用 CSS filter 调光；Android 的窗口亮度对 WebView 同样生效，不再叠加
     if (_webPageActive) _applyWebBrightness();
     // 记住用户调的亮度（与音量一致）
     _scheduleSaveSettings();
     notifyListeners();
   }
 
-  /// 网页频道：把亮度写入所有 video 的 CSS filter
+  /// 网页频道：把亮度写入所有 video 的 CSS filter。
+  /// 仅 Windows（WebView2 不透传窗口亮度）；Android 走窗口亮度，无需叠加。
   void _applyWebBrightness() {
+    if (!_useAppInternalBrightness) return;
     final eval = _webEval;
     if (eval == null) return;
     final b = _brightness.toStringAsFixed(3);
@@ -4557,7 +4555,6 @@ class PlayerController extends ChangeNotifier {
   static const _kReservationRecord = 'settings_reservation_record';
   static const _kRecordSaveDir = 'settings_record_save_dir';
   static const _kCastRecordFullSpeed = 'settings_cast_record_full_speed';
-  static const _kRenderScaleCap = 'settings_render_scale_cap';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -4609,7 +4606,6 @@ class PlayerController extends ChangeNotifier {
         reservationRecord: p.getBool(_kReservationRecord) ?? false,
         recordSaveDir: p.getString(_kRecordSaveDir) ?? '',
         castRecordFullSpeed: p.getBool(_kCastRecordFullSpeed) ?? false,
-        renderScaleCap: p.getBool(_kRenderScaleCap) ?? true,
       );
       // 录制目录覆盖（桌面端）：必须在任何录制/截图之前生效
       MediaCaptureService.overrideDir =
@@ -4745,7 +4741,6 @@ class PlayerController extends ChangeNotifier {
       await putBool(_kReservationRecord, _settings.reservationRecord);
       await putString(_kRecordSaveDir, _settings.recordSaveDir);
       await putBool(_kCastRecordFullSpeed, _settings.castRecordFullSpeed);
-      await putBool(_kRenderScaleCap, _settings.renderScaleCap);
     } catch (_) {}
   }
 
