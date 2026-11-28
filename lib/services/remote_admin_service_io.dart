@@ -966,6 +966,7 @@ function renderPlayer(){
     [[5,'5 秒'],[10,'10 秒'],[20,'20 秒'],[30,'30 秒']], s.bufferSeconds||5);
   html+='<div class="group-title">界面</div>';
   html+=switchCard('uiScaleAuto','界面缩放自动适配','按屏幕宽度自动算字号，关掉后可手动调');
+  html+=switchCard('renderScaleCap','高分屏渲染封顶','2K/4K 安卓设备降低渲染分辨率换流畅；关掉保持原生清晰，4K 画质不打折（仅安卓生效）');
   if(s.uiScaleAuto===false){
     html+=rangeCard('uiScale','界面缩放比例','电视上字太小看不全就调大',0.8,2.5,0.05,
       (typeof s.uiScale==='number'?s.uiScale:1),2,'x');

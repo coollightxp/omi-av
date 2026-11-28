@@ -126,6 +126,7 @@ class _OmiMaterialApp extends StatelessWidget {
                     ? (isTv ? DeviceProfile.tv : DeviceProfile.mobile)
                     : DeviceProfile.desktop);
             return _RenderScaleCap(
+              enabled: settings.renderScaleCap,
               child: MediaQuery(
                 data: mq.copyWith(textScaler: TextScaler.linear(scale)),
                 child: DeviceProfileScope(
@@ -149,14 +150,20 @@ class _OmiMaterialApp extends StatelessWidget {
 /// 2.0：让 Flutter（含 WebView 纹理、视频纹理）以较低物理分辨率渲染，再由
 /// FittedBox 放大填满屏幕——UI 仍占满整个画面，代价是细节略微变软，换
 /// 来更流畅的播放。仅在物理宽度 >= 1920 的安卓大屏生效，1080p 手机不动。
+///
+/// 受 [PlayerSettings.renderScaleCap] 开关控制：关掉则保持屏幕原生分辨率，
+/// 4K 源画质不打折，留给高配机器 / 追求画质的用户。
 class _RenderScaleCap extends StatelessWidget {
-  const _RenderScaleCap({required this.child});
+  const _RenderScaleCap({required this.child, required this.enabled});
   final Widget child;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+    if (!enabled ||
+        kIsWeb ||
+        defaultTargetPlatform != TargetPlatform.android) {
       return child;
     }
     const double capDpr = 2.0;

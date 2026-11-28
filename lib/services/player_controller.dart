@@ -1269,6 +1269,7 @@ class PlayerController extends ChangeNotifier {
         // 手机浏览器不适合填路径，仍只在设备上设置）
         'reservationRecord': s.reservationRecord,
         'castRecordFullSpeed': s.castRecordFullSpeed,
+        'renderScaleCap': s.renderScaleCap,
         'lyricsEnabled': s.lyricsEnabled,
         // 歌词时间微调（毫秒，正 = 往后等 / 负 = 往前赶）
         'lyricsOffsetMs': s.lyricsOffsetMs,
@@ -1400,6 +1401,7 @@ class PlayerController extends ChangeNotifier {
           rb('reservationRecord') ?? cur.reservationRecord;
       final castRecordFullSpeed =
           rb('castRecordFullSpeed') ?? cur.castRecordFullSpeed;
+      final renderScaleCap = rb('renderScaleCap') ?? cur.renderScaleCap;
       final lyricsEnabled = rb('lyricsEnabled') ?? cur.lyricsEnabled;
       int lyricsOffset = cur.lyricsOffsetMs;
       final loRaw = ri('lyricsOffsetMs');
@@ -1486,6 +1488,7 @@ class PlayerController extends ChangeNotifier {
           hideUnavailable != _settings.hideUnavailableChannels ||
           reservationRecord != _settings.reservationRecord ||
           castRecordFullSpeed != _settings.castRecordFullSpeed ||
+          renderScaleCap != _settings.renderScaleCap ||
           lyricsEnabled != _settings.lyricsEnabled ||
           lyricsOffset != _settings.lyricsOffsetMs ||
           lyricsVariant != _settings.lyricsVariant ||
@@ -1515,6 +1518,7 @@ class PlayerController extends ChangeNotifier {
           hideUnavailableChannels: hideUnavailable,
           reservationRecord: reservationRecord,
           castRecordFullSpeed: castRecordFullSpeed,
+          renderScaleCap: renderScaleCap,
           lyricsEnabled: lyricsEnabled,
           lyricsOffsetMs: lyricsOffset,
           lyricsVariant: lyricsVariant,
@@ -4553,6 +4557,7 @@ class PlayerController extends ChangeNotifier {
   static const _kReservationRecord = 'settings_reservation_record';
   static const _kRecordSaveDir = 'settings_record_save_dir';
   static const _kCastRecordFullSpeed = 'settings_cast_record_full_speed';
+  static const _kRenderScaleCap = 'settings_render_scale_cap';
   // 旧单列表收藏键已迁到 SceneFavorites（omi_scene_favorites_v1），
   // 迁移逻辑在 SceneFavorites.ensure()，这里不再读
 
@@ -4604,6 +4609,7 @@ class PlayerController extends ChangeNotifier {
         reservationRecord: p.getBool(_kReservationRecord) ?? false,
         recordSaveDir: p.getString(_kRecordSaveDir) ?? '',
         castRecordFullSpeed: p.getBool(_kCastRecordFullSpeed) ?? false,
+        renderScaleCap: p.getBool(_kRenderScaleCap) ?? true,
       );
       // 录制目录覆盖（桌面端）：必须在任何录制/截图之前生效
       MediaCaptureService.overrideDir =
@@ -4739,6 +4745,7 @@ class PlayerController extends ChangeNotifier {
       await putBool(_kReservationRecord, _settings.reservationRecord);
       await putString(_kRecordSaveDir, _settings.recordSaveDir);
       await putBool(_kCastRecordFullSpeed, _settings.castRecordFullSpeed);
+      await putBool(_kRenderScaleCap, _settings.renderScaleCap);
     } catch (_) {}
   }
 
