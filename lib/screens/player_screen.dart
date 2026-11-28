@@ -868,12 +868,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                   ),
                       ),
 
-                      // Windows 桌面亮度遮罩：原生 gamma ramp 在台式机/外接
-                      // 显示器上普遍无效（调了没反应），改为在视频层上压一层
-                      // 黑色遮罩调暗画面。仅内置播放；网页频道走 CSS filter，
-                      // 安卓/macOS 走系统亮度。IgnorePointer 不拦手势。
+                      // App 内亮度遮罩：Windows gamma ramp 在台式机/外接屏上
+                      // 普遍无效，Android「应用内亮度」API 在部分 ROM（联想
+                      // 小新等）实际写成了系统亮度、带动整个平板亮度。这两类
+                      // 统一改为在视频层上压黑色遮罩调暗，只影响本 App 画面。
+                      // 仅内置播放；网页频道走 CSS filter。IgnorePointer 不拦手势。
                       if (!kIsWeb &&
-                          defaultTargetPlatform == TargetPlatform.windows &&
+                          (defaultTargetPlatform == TargetPlatform.windows ||
+                              defaultTargetPlatform == TargetPlatform.android) &&
                           !controller.webPageActive &&
                           controller.brightness < 1.0)
                         Positioned.fill(
@@ -3739,6 +3741,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         // 小窗（420×236，无标题栏）：整块画面都可以按着拖；普通窗口只让
         // 中间 1/3 拖（含网页直播），两侧留给上下滑调亮度/音量
         final miniDrag = controller.isDesktop && controller.miniWindow;
+        // 左/右边缘横滑开频道列表/EPG 只在桌面端启用：移动端屏幕边缘的横
+        // 滑是系统返回手势（→ 退出卡片），若被本层的横向识别器抢走，用户
+        // 一划就出 EPG/频道列表，退出卡片反而划不出来。移动端改用「点左/
+        // 右三分之一」开关面板，边缘让给系统返回。
+        final allowEdgeSwipe = controller.isDesktop;
         return Listener(
           // 原始指针事件（不进手势竞技场）：屏幕坐标取 Win32 GetCursorPos，
           // 见 window_drag_io.dart 注释。translucent：只在自己或子节点被
@@ -3795,17 +3802,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                         },
                   onVerticalDragEnd:
                       miniDrag ? null : (_) => _onBrightnessDragEnd(),
-                  onHorizontalDragStart: (details) {
-                    _isHorizontalDrag = true;
-                    _dragStartX = details.globalPosition.dx;
-                  },
-                  onHorizontalDragEnd: (details) {
-                    if (_dragStartX != null &&
-                        _dragStartX! <= _edgeWidth &&
-                        details.velocity.pixelsPerSecond.dx > 100) {
-                      _openDrawer(left: true);
-                    }
-                  },
+                  onHorizontalDragStart: allowEdgeSwipe
+                      ? (details) {
+                          _isHorizontalDrag = true;
+                          _dragStartX = details.globalPosition.dx;
+                        }
+                      : null,
+                  onHorizontalDragEnd: allowEdgeSwipe
+                      ? (details) {
+                          if (_dragStartX != null &&
+                              _dragStartX! <= _edgeWidth &&
+                              details.velocity.pixelsPerSecond.dx > 100) {
+                            _openDrawer(left: true);
+                          }
+                        }
+                      : null,
                   child: const SizedBox.expand(),
                 ),
               ),
@@ -3858,17 +3869,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                         },
                   onVerticalDragEnd:
                       miniDrag ? null : (_) => _onVolumeDragEnd(),
-                  onHorizontalDragStart: (details) {
-                    _isHorizontalDrag = true;
-                    _dragStartX = details.globalPosition.dx;
-                  },
-                  onHorizontalDragEnd: (details) {
-                    if (_dragStartX != null &&
-                        _dragStartX! >= width - _edgeWidth &&
-                        details.velocity.pixelsPerSecond.dx < -100) {
-                      _openDrawer(left: false);
-                    }
-                  },
+                  onHorizontalDragStart: allowEdgeSwipe
+                      ? (details) {
+                          _isHorizontalDrag = true;
+                          _dragStartX = details.globalPosition.dx;
+                        }
+                      : null,
+                  onHorizontalDragEnd: allowEdgeSwipe
+                      ? (details) {
+                          if (_dragStartX != null &&
+                              _dragStartX! >= width - _edgeWidth &&
+                              details.velocity.pixelsPerSecond.dx < -100) {
+                            _openDrawer(left: false);
+                          }
+                        }
+                      : null,
                   child: const SizedBox.expand(),
                 ),
               ),

@@ -180,10 +180,21 @@ class DlnaService {
           'USN: ${e[1]}\r\n\r\n';
       _multicast(pkt);
     }
-    // byebye 后补一轮 alive，让设备不真的从列表里消失（微信已收到
-    // byebye 会清投屏态；其他 App 几乎无感）。
+    // byebye 后补一组 alive，让设备「消失一下立刻回来」：
+    // 微信已收到 byebye 会清投屏态，其它 App 几乎无感。只补一轮在热点/
+    // 投屏中 CDN 大流量丢包时经常被吃掉，发送端重扫就要等下一个 5 秒周期
+    // alive 才出现（用户实测「已经投上了，再投新的要等很久才刷出设备名」）。
+    // 这里连发 3 轮（0/250/600ms），错开丢包窗口；USN 去重不会出现重复设备。
     // 退出/关机场景传 keepAlive=false：设备真的要没了，不能补。
-    if (keepAlive) _notifyAlive();
+    if (keepAlive) {
+      _notifyAlive();
+      Future.delayed(const Duration(milliseconds: 250), () {
+        if (_ssdp != null) _notifyAlive();
+      });
+      Future.delayed(const Duration(milliseconds: 600), () {
+        if (_ssdp != null) _notifyAlive();
+      });
+    }
   }
 
   /// 清空当前投屏媒体：投屏结束（Stop/自动恢复）后调用，

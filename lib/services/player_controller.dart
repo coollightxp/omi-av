@@ -1968,6 +1968,19 @@ class PlayerController extends ChangeNotifier {
     return null;
   }
 
+  /// 是否用 App 内遮罩调亮度（不调用系统亮度接口）。
+  ///
+  /// - Windows：原生 gamma ramp 在台式机/外接显示器上普遍无效，调了没反应；
+  /// - Android：`setApplicationScreenBrightness` 名义上是「应用内亮度」，
+  ///   但不少 ROM（联想小新等）实际写成了系统亮度，一调整个平板都变，
+  ///   还影响其它应用。
+  /// 这两类统一走播放页的黑色遮罩压暗画面（仅内置播放），网页频道走 CSS
+  /// filter——两种都只作用于本 App，不碰系统亮度。
+  bool get _useAppInternalBrightness =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.android);
+
   /// 初始化程序内音量和亮度。
   ///
   /// 亮度/音量都沿用上次 App 内调过的值（首次启动为 100%）：用户按自己的
@@ -1977,10 +1990,13 @@ class PlayerController extends ChangeNotifier {
   Future<void> _initSystemValues() async {
     _brightness = (_lastBrightness ?? 1.0).clamp(0.0, 1.0);
     _volume = (_lastVolume ?? 1.0).clamp(0.0, 1.0);
-    try {
-      await ScreenBrightness.instance
-          .setApplicationScreenBrightness(_brightness);
-    } catch (_) {}
+    // 走 App 内遮罩的平台不写系统亮度：避免启动瞬间把平板亮度带偏
+    if (!_useAppInternalBrightness) {
+      try {
+        await ScreenBrightness.instance
+            .setApplicationScreenBrightness(_brightness);
+      } catch (_) {}
+    }
     // 只读系统音量做提示，不做写入：系统被静音时 App 内增益调多大都
     // 没声，提示一句就够，改不改系统音量由用户自己决定
     try {
@@ -4100,12 +4116,9 @@ class PlayerController extends ChangeNotifier {
   /// 设置亮度 (0.0 - 1.0)
   Future<void> setBrightness(double value) async {
     _brightness = value.clamp(0.0, 1.0);
-    // Windows 桌面（非网页）：原生亮度走 gamma ramp，台式机/外接显示器
-    // 普遍不支持（调了没反应）；改由播放页黑色遮罩压暗视频画面，
-    // 这里跳过原生接口避免双重压暗
-    final skipNative = !kIsWeb &&
-        defaultTargetPlatform == TargetPlatform.windows &&
-        !_webPageActive;
+    // Windows / Android 走 App 内遮罩（见 [_useAppInternalBrightness]），
+    // 跳过原生接口避免双重压暗或写成系统亮度
+    final skipNative = _useAppInternalBrightness;
     if (!skipNative) {
       try {
         await ScreenBrightness.instance
